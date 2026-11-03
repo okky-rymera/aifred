@@ -1,0 +1,95 @@
+//! User settings, stored in settings.json in the data folder.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::bail;
+use serde::{Deserialize, Serialize};
+
+use crate::files;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// How often the GitHub list loads again from GitHub, in minutes.
+    /// 0 means only when the user clicks reload.
+    pub github_refresh_minutes: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { github_refresh_minutes: 15 }
+    }
+}
+
+/// The longest refresh time we accept: one day.
+const MAX_MINUTES: u32 = 24 * 60;
+
+fn path(dir: &Path) -> PathBuf {
+    dir.join("settings.json")
+}
+
+pub fn load(dir: &Path) -> anyhow::Result<Settings> {
+    files::load(&path(dir))
+}
+
+pub fn save(dir: &Path, s: &Settings) -> anyhow::Result<()> {
+    if s.github_refresh_minutes > MAX_MINUTES {
+        bail!("the refresh time must be {MAX_MINUTES} minutes or less");
+    }
+    // Replace, not update: a broken settings file must not block the fix.
+    files::replace(&path(dir), s)
+}
+
+/// The settings, or the defaults if the file is broken. For places that
+/// must keep working, like the GitHub list.
+pub fn load_or_default(dir: &Path) -> Settings {
+    load(dir).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("aifred-settings-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn missing_file_gives_defaults_and_save_round_trips() {
+        let d = temp("round");
+        assert_eq!(load(&d).unwrap().github_refresh_minutes, 15);
+        save(&d, &Settings { github_refresh_minutes: 0 }).unwrap();
+        assert_eq!(load(&d).unwrap().github_refresh_minutes, 0);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_refresh_time_over_one_day() {
+        let d = temp("max");
+        assert!(save(&d, &Settings { github_refresh_minutes: 24 * 60 + 1 }).is_err());
+        assert_eq!(load(&d).unwrap(), Settings::default(), "nothing was saved");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn save_repairs_a_broken_file() {
+        let d = temp("broken");
+        std::fs::write(d.join("settings.json"), "{ not json").unwrap();
+        assert!(load(&d).is_err());
+        assert_eq!(load_or_default(&d), Settings::default());
+        save(&d, &Settings { github_refresh_minutes: 30 }).unwrap();
+        assert_eq!(load(&d).unwrap().github_refresh_minutes, 30);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn unknown_and_missing_fields_are_fine() {
+        let d = temp("fields");
+        std::fs::write(d.join("settings.json"), r#"{"later_setting": true}"#).unwrap();
+        assert_eq!(load(&d).unwrap(), Settings::default());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+}

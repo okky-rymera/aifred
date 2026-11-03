@@ -1,0 +1,23 @@
+# Build output
+target/
+dist/
+
+# JavaScript packages
+node_modules/
+
+# Tauri makes these files at build time
+apps/desktop/src-tauri/gen/schemas/
+
+# The workspace uses the root Cargo.lock. A lock file in a crate folder is old and unused.
+crates/*/Cargo.lock
+
+# Local secrets
+.env
+.env.*
+
+# Temporary files, logs, and editor and OS files
+*.tmp
+*.log
+.DS_Store
+.idea/
+.vscode/
