@@ -79,3 +79,15 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - AIfred loads the list from GitHub again on a timer. Set the time on the Settings page (default: 15 minutes). The reload button always loads from GitHub.
 - When you tick a GitHub item, AIfred hides it and checks GitHub. If the item is still open, AIfred asks if you want to close it.
 - The ticked items are in `github-done.json`. Use "Show done" to undo a tick.
+
+## Check the app without a window on your screen
+
+```bash
+scripts/run-hidden.sh 300 /tmp/app.png
+```
+
+This starts the app on a hidden screen (Xvfb). It waits up to 300 seconds until the page shows, saves a picture, and stops the app. It does not change your own copy of the app:
+
+- It uses a different web port, so it works while your copy runs.
+- It does not read or write your saved window size. The setting `AIFRED_NO_WINDOW_STATE=1` turns that off.
+- It uses a temporary copy of your data folder.

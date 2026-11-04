@@ -235,14 +235,22 @@ fn main() -> anyhow::Result<()> {
     let tools_dir = std::env::current_exe()?.parent().map(Into::into).unwrap_or_default();
     let assistant = Arc::new(Assistant::new(dir, backend, tools_dir)?);
 
-    with_commands(tauri::Builder::default(), App { assistant, busy: Mutex::new(()) })
-        .plugin(tauri_plugin_opener::init())
+    // AIFRED_NO_WINDOW_STATE: do not read or write the saved window size.
+    // scripts/run-hidden.sh sets it, so a check run cannot change the size
+    // of the user's own window.
+    let keep_window_state = std::env::var_os("AIFRED_NO_WINDOW_STATE").is_none();
+
+    let mut builder = with_commands(tauri::Builder::default(), App { assistant, busy: Mutex::new(()) })
+        .plugin(tauri_plugin_opener::init());
+    if keep_window_state {
         // Saves the window size and maximized state when the app closes, and
         // puts them back on the next start. On X11 it also restores the
         // position. On Wayland the app cannot read or set the position, so
         // the desktop picks it. The window starts hidden (tauri.conf.json) so
         // it does not show at the default size first and then jump.
-        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(WINDOW_STATE).build())
+        builder = builder.plugin(tauri_plugin_window_state::Builder::default().with_state_flags(WINDOW_STATE).build());
+    }
+    builder
         .setup(|app| {
             // The plugin does not save or restore "visible", so this is the
             // only place that shows the window. Ignore errors: some window
@@ -253,14 +261,14 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         })
-        .on_window_event(|w, e| match e {
+        .on_window_event(move |w, e| match e {
             // The plugin writes the file only on a normal quit. A logout or a
             // crash skips that. So also write it when the window loses focus,
             // but only if the window moved or changed size since the last save.
             tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                 WINDOW_CHANGED.store(true, Ordering::Relaxed);
             }
-            tauri::WindowEvent::Focused(false) if WINDOW_CHANGED.swap(false, Ordering::Relaxed) => {
+            tauri::WindowEvent::Focused(false) if keep_window_state && WINDOW_CHANGED.swap(false, Ordering::Relaxed) => {
                 let _ = w.app_handle().save_window_state(WINDOW_STATE);
             }
             _ => {}
