@@ -35,6 +35,150 @@ const WINDOW_STATE: StateFlags = StateFlags::all().difference(StateFlags::VISIBL
 /// The window moved or changed size since the last save.
 static WINDOW_CHANGED: AtomicBool = AtomicBool::new(false);
 
+/// The version of this program, from Cargo.toml.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The first update check waits this long after the start, so it does not
+/// slow the start. Then the window checks again on each interval.
+const UPDATE_FIRST_CHECK: std::time::Duration = std::time::Duration::from_secs(20);
+const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// "Restart now" starts the new window with this setting. The new window
+/// waits until the old window stops, so they do not use the data folder at
+/// the same time.
+const RESTARTED_ENV: &str = "AIFRED_RESTARTED";
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the window shows about updates.
+#[derive(Clone, Serialize)]
+struct UpdateStatus {
+    /// The version of this program.
+    current: String,
+    /// "off", "idle", "checking", "none", "downloading", "ready", or "error".
+    state: String,
+    /// The new version, when one is found.
+    latest: Option<String>,
+    /// The release page of the new version, with the list of changes.
+    page: Option<String>,
+    /// Why updates are off, or the error.
+    message: Option<String>,
+    /// The last check, in Unix seconds.
+    checked_at: Option<u64>,
+}
+
+impl UpdateStatus {
+    fn new(state: &str, message: Option<&str>) -> Self {
+        Self {
+            current: VERSION.into(),
+            state: state.into(),
+            latest: None,
+            page: None,
+            message: message.map(Into::into),
+            checked_at: None,
+        }
+    }
+}
+
+/// The program updates itself from the GitHub releases (aifred_core::update).
+/// It downloads a new version in the background. The program file changes
+/// only when the user clicks "Restart", or when the window closes.
+struct Updater {
+    /// The program file to replace. None: updates are off.
+    program: Option<std::path::PathBuf>,
+    status: std::sync::Mutex<UpdateStatus>,
+    /// Held while a check or a download runs, and while "Restart now"
+    /// installs the update. So only one of them runs at a time.
+    run: Mutex<()>,
+    /// Only one window updates the program. Kept until this process stops.
+    _lock: Option<aifred_core::update::UpdateLock>,
+}
+
+impl Updater {
+    fn off(why: &str) -> Self {
+        Self {
+            program: None,
+            status: std::sync::Mutex::new(UpdateStatus::new("off", Some(why))),
+            run: Mutex::new(()),
+            _lock: None,
+        }
+    }
+
+    fn on(program: std::path::PathBuf, lock: aifred_core::update::UpdateLock) -> Self {
+        Self {
+            program: Some(program),
+            status: std::sync::Mutex::new(UpdateStatus::new("idle", None)),
+            run: Mutex::new(()),
+            _lock: Some(lock),
+        }
+    }
+
+    fn status(&self) -> UpdateStatus {
+        self.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set(&self, f: impl FnOnce(&mut UpdateStatus)) {
+        f(&mut self.status.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+
+    /// Asks GitHub for a new version. When there is one, downloads and checks
+    /// it, and then the state is "ready". When a check already runs, waits
+    /// for its end and does not start another.
+    async fn check(&self) {
+        let Some(program) = &self.program else { return };
+        let Ok(_run) = self.run.try_lock() else {
+            let _ = self.run.lock().await;
+            return;
+        };
+        self.set(|s| {
+            s.state = "checking".into();
+            s.message = None;
+        });
+        let found = aifred_core::update::check(VERSION).await;
+        let now = now();
+        let release = match found {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                // A file from before, of a release that was then removed,
+                // must not be installed.
+                aifred_core::update::discard(program);
+                return self.set(|s| {
+                    s.state = "none".into();
+                    s.latest = None;
+                    s.page = None;
+                    s.checked_at = Some(now);
+                });
+            }
+            Err(e) => {
+                eprintln!("aifred: cannot check for updates: {e:#}");
+                return self.set(|s| {
+                    s.state = "error".into();
+                    s.message = Some(format!("{e:#}"));
+                    s.checked_at = Some(now);
+                });
+            }
+        };
+        // The same version is already downloaded and checked.
+        let have = self.status().latest.as_deref() == Some(release.version.as_str()) && aifred_core::update::is_staged(program);
+        if !have {
+            self.set(|s| s.state = "downloading".into());
+            if let Err(e) = aifred_core::update::download(&release, program).await {
+                eprintln!("aifred: cannot download the update: {e:#}");
+                return self.set(|s| {
+                    s.state = "error".into();
+                    s.message = Some(format!("Cannot install version {}: {e:#}", release.version));
+                    s.checked_at = Some(now);
+                });
+            }
+        }
+        self.set(|s| {
+            s.state = "ready".into();
+            s.latest = Some(release.version);
+            s.page = Some(release.page);
+            s.checked_at = Some(now);
+        });
+    }
+}
+
 struct App {
     assistant: Arc<Assistant<ClaudeBackend>>,
     /// One question at a time: two at once would race on the saved session.
@@ -44,12 +188,14 @@ struct App {
     background: bool,
     /// What the sidebar says about meaning search.
     meaning: Arc<std::sync::Mutex<String>>,
+    update: Arc<Updater>,
 }
 
 impl App {
-    fn new(assistant: Arc<Assistant<ClaudeBackend>>, background: bool) -> Self {
+    fn new(assistant: Arc<Assistant<ClaudeBackend>>, background: bool, update: Updater) -> Self {
         let meaning = if background { "starting" } else { "off" };
-        Self { assistant, busy: Mutex::new(()), background, meaning: Arc::new(std::sync::Mutex::new(meaning.into())) }
+        let meaning = Arc::new(std::sync::Mutex::new(meaning.into()));
+        Self { assistant, busy: Mutex::new(()), background, meaning, update: Arc::new(update) }
     }
 
     /// Writes a chat summary in the background: of the conversation that
@@ -476,6 +622,50 @@ fn info(app: State<'_, App>) -> Info {
     }
 }
 
+#[tauri::command]
+fn update_status(app: State<'_, App>) -> UpdateStatus {
+    app.update.status()
+}
+
+/// Checks for a new version now, and downloads it when there is one.
+#[tauri::command]
+async fn check_update(app: State<'_, App>) -> CmdResult<UpdateStatus> {
+    app.update.check().await;
+    Ok(app.update.status())
+}
+
+/// Puts the downloaded version in place and starts it. This window closes.
+/// The chat, the tasks, and the window size are saved, so the new window
+/// opens where this one was.
+#[tauri::command]
+async fn restart_to_update<R: tauri::Runtime>(handle: tauri::AppHandle<R>, app: State<'_, App>) -> CmdResult<()> {
+    let Some(program) = app.update.program.clone() else {
+        return Err("Updates are off.".into());
+    };
+    // Hold the lock to the end: no new question can start.
+    let Ok(_guard) = app.busy.try_lock() else {
+        return Err("AIfred is still working on the last question. Restart after the answer.".into());
+    };
+    // No check or download can change the waiting file now.
+    let Ok(_run) = app.update.run.try_lock() else {
+        return Err("AIfred is checking for a newer version. Try again in a minute.".into());
+    };
+    if app.update.status().state != "ready" {
+        return Err("No downloaded update waits. Check for updates again.".into());
+    }
+    if !aifred_core::update::apply(&program).map_err(err)? {
+        return Err("No downloaded update waits. Check for updates again.".into());
+    }
+    let _ = handle.save_window_state(WINDOW_STATE);
+    // The new window waits until this process stops (RESTARTED_ENV).
+    std::process::Command::new(&program)
+        .env(RESTARTED_ENV, "1")
+        .spawn()
+        .map_err(|e| format!("The update is installed, but the new version did not start ({e}). Open AIfred again."))?;
+    handle.exit(0);
+    Ok(())
+}
+
 /// Adds the app state and all commands. The tests use the same list.
 fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tauri::Builder<R> {
     builder.manage(app).invoke_handler(tauri::generate_handler![
@@ -505,7 +695,10 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         set_settings,
         chat_model,
         set_chat_model,
-        info
+        info,
+        update_status,
+        check_update,
+        restart_to_update
     ])
 }
 
@@ -515,6 +708,11 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => open_window(program),
+        // The update check runs the new file with this word (aifred_core::update).
+        Some("version" | "--version") => {
+            println!("{VERSION}");
+            Ok(())
+        }
         Some(aifred_core::program::TOOL) => match args.get(1) {
             Some(name) => aifred_tools::run(name),
             None => anyhow::bail!("usage: aifred tool <name>"),
@@ -528,7 +726,7 @@ fn main() -> anyhow::Result<()> {
         },
         Some(word) if cli::COMMANDS.contains(&word) => cli::run(args),
         Some(_) => {
-            eprintln!("usage: aifred [ask \"<message>\" | chat | remember \"<fact>\" | new | index]");
+            eprintln!("usage: aifred [ask \"<message>\" | chat | remember \"<fact>\" | new | index | version]");
             eprintln!("With no words, aifred opens the window.");
             std::process::exit(2);
         }
@@ -536,17 +734,20 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
+    // First, so that a restarted window waits for the old one to stop
+    // before it opens the data folder.
+    let update = updater(program.clone());
     let dir = default_data_dir()?;
     let backend = ClaudeBackend { work_dir: dir.join("claude"), model: std::env::var("AIFRED_MODEL").ok() };
     GithubStore::new(&dir).remove_old_files();
-    let assistant = Arc::new(Assistant::new(dir, backend, program)?);
+    let assistant = Arc::new(Assistant::new(dir, backend, program.clone())?);
 
     // AIFRED_NO_WINDOW_STATE: do not read or write the saved window size.
     // scripts/run-hidden.sh sets it, so a check run cannot change the size
     // of the user's own window.
     let keep_window_state = std::env::var_os("AIFRED_NO_WINDOW_STATE").is_none();
 
-    let app = App::new(assistant, true);
+    let app = App::new(assistant, true, update);
     // Vectors for the data from before, or from the command-line program and
     // the tool servers. The first start also downloads the model here.
     app.fill_vectors();
@@ -570,6 +771,17 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
                 let _ = w.show();
                 let _ = w.set_focus();
             }
+            // Check for updates after the start, then on each interval.
+            let update = app.state::<App>().update.clone();
+            if update.program.is_some() {
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(UPDATE_FIRST_CHECK).await;
+                    loop {
+                        update.check().await;
+                        tokio::time::sleep(UPDATE_INTERVAL).await;
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(move |w, e| match e {
@@ -584,8 +796,43 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())?;
+        .build(tauri::generate_context!())?
+        .run(|handle, event| {
+            // A downloaded update that the user did not restart for: the
+            // next start uses it.
+            if let tauri::RunEvent::Exit = event
+                && let Some(program) = &handle.state::<App>().update.program
+            {
+                match aifred_core::update::apply(program) {
+                    Ok(true) => eprintln!("aifred: the update is installed. The next start uses it."),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("aifred: cannot install the update: {e:#}"),
+                }
+            }
+        });
     Ok(())
+}
+
+/// The updater of this window. Updates are off in a development build, and
+/// when another AIfred window already updates the program.
+fn updater(program: std::path::PathBuf) -> Updater {
+    // A development build must not replace itself with a release.
+    if cfg!(debug_assertions) {
+        return Updater::off("Updates are off in development builds.");
+    }
+    let wait = std::env::var_os(RESTARTED_ENV).is_some().then_some(RESTART_WAIT);
+    match aifred_core::update::UpdateLock::take(&program, wait) {
+        Ok(Some(lock)) => {
+            // A download from a window that stopped early was not checked to the end.
+            aifred_core::update::discard(&program);
+            Updater::on(program, lock)
+        }
+        Ok(None) => Updater::off("Another AIfred window checks for updates."),
+        Err(e) => {
+            eprintln!("aifred: {e:#}");
+            Updater::off(&format!("{e:#}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -601,7 +848,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let backend = ClaudeBackend { work_dir: dir.join("claude"), model: None };
         let assistant = Arc::new(Assistant::new(dir.clone(), backend, dir.clone()).unwrap());
-        let app = with_commands(mock_builder(), App::new(assistant, false))
+        let app = with_commands(mock_builder(), App::new(assistant, false, Updater::off("Updates are off in tests.")))
             .build(mock_context(noop_assets()))
             .unwrap();
         let win = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
@@ -789,6 +1036,17 @@ mod tests {
         assert!(call(&win, "set_chat_model", json!({ "model": "nope" })).is_err());
         call(&win, "set_chat_model", json!({ "model": null })).unwrap();
         assert_eq!(call(&win, "chat_model", json!({})).unwrap(), Value::Null);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn updates_are_off_in_tests_and_restart_is_refused() {
+        let (_app, win, dir) = window("update");
+        let st = call(&win, "update_status", json!({})).unwrap();
+        assert_eq!((st["state"].clone(), st["current"].clone()), (json!("off"), json!(VERSION)));
+        // No GitHub call: the check does nothing when updates are off.
+        assert_eq!(call(&win, "check_update", json!({})).unwrap()["state"], "off");
+        assert!(call(&win, "restart_to_update", json!({})).unwrap_err().as_str().unwrap().contains("off"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

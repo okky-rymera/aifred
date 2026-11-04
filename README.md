@@ -123,7 +123,26 @@ aifred ask "What GitHub items need my attention?"
 aifred ask "Summarize item 2."     # continues the same conversation
 aifred chat                        # talk in a loop
 aifred new                         # start a new conversation
+aifred version                     # show the version
 ```
+
+## Updates
+
+The release program updates itself from the GitHub releases of this repository.
+
+1. 20 seconds after the window opens, and then every 6 hours, AIfred asks GitHub for a newer version. Pre-releases count. "Check now" on the Settings page asks at once.
+2. When it finds one, it downloads the file for your computer (for example `aifred-0.1.2-linux-x86_64`) next to the program, under a temporary name.
+3. It compares the file's SHA-256 sum with the sum from GitHub. Then it runs `<file> version` one time, to see that the file starts on your computer. Only then does it rename the file to `.aifred-update`. If a step fails, it removes the new file, keeps an earlier checked file, and shows the error on the Settings page. A download stops when no data comes for 60 seconds, or after 30 minutes.
+4. The sidebar shows "AIfred <version> is ready" and a "Restart now" button. The button puts the new file in place of the program, starts it, and closes this window. The chat, the tasks, and the window size stay.
+5. If you close AIfred without a restart, AIfred puts the new file in place when it closes. The next start uses it.
+
+- AIfred replaces the program file only at a restart or a close. Before that, the AI tool servers that Claude Code starts use the same version as the window.
+- Only one AIfred window at a time checks for updates. A second window shows "Another AIfred window checks for updates."
+- If a newer release is removed from GitHub, the next check removes its downloaded file, so AIfred does not install it.
+- AIfred must be able to write to the folder of the program file. If it cannot, the Settings page shows the error.
+- Development builds (`npx tauri dev`) do not update themselves.
+- `aifred version` shows the version.
+- A release must have its program file with the name `aifred-<version>-linux-x86_64`. Versions 0.1.1 and older cannot update themselves. Install the first version with updates by hand.
 
 ## Settings (environment variables)
 

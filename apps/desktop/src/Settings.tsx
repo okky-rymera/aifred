@@ -89,12 +89,101 @@ function ClickupSection(props: { status: api.ClickupTokenStatus | null; onChange
   );
 }
 
+/** Shows the program version, checks for a new one, and restarts into it. */
+export function UpdateSection(props: { status: api.UpdateStatus | null; onChanged: (s: api.UpdateStatus) => void; busy?: boolean }) {
+  const [error, setError] = useState("");
+  const s = props.status;
+  if (!s) return null;
+  const working = s.state === "checking" || s.state === "downloading";
+
+  async function check() {
+    setError("");
+    props.onChanged({ ...s!, state: "checking" });
+    try {
+      // When a check already runs, the app waits for its end and sends the result.
+      props.onChanged(await api.checkUpdate());
+    } catch (e) {
+      setError(String(e));
+      // Do not show "Checking…" until the next status read.
+      api.updateStatus().then(props.onChanged).catch(() => props.onChanged(s!));
+    }
+  }
+
+  const text: Record<api.UpdateStatus["state"], string> = {
+    off: s.message ?? "Updates are off.",
+    idle: "AIfred checks for a new version after it starts, and then every 6 hours.",
+    checking: "Checking for a new version…",
+    downloading: "Downloading the new version…",
+    none: "You have the newest version.",
+    ready: `Version ${s.latest} is downloaded. Restart AIfred to use it. If you close AIfred, the next start uses it.`,
+    error: s.message ?? "The update failed.",
+  };
+
+  return (
+    <section className="mt-8 space-y-2">
+      <h2 className="text-sm font-semibold">Updates</h2>
+      <p className="text-sm text-stone-500">This is AIfred {s.current}.</p>
+      <p role="status" className={`text-sm ${s.state === "error" ? "text-red-600" : "text-stone-500"}`}>
+        {text[s.state]}
+        {s.state === "ready" && s.page && (
+          <>
+            {" "}
+            <a href={s.page} className="underline">
+              What is new
+            </a>
+          </>
+        )}
+      </p>
+      <div className="flex items-center gap-3">
+        {s.state !== "off" && (
+          <button
+            onClick={check}
+            disabled={working}
+            className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm hover:bg-stone-200 disabled:opacity-40 dark:border-stone-700 dark:hover:bg-stone-800"
+          >
+            Check now
+          </button>
+        )}
+        {s.state === "ready" && <RestartButton busy={props.busy} onError={setError} />}
+      </div>
+      {error && <p className="text-sm text-red-600">{error}</p>}
+    </section>
+  );
+}
+
+/** Installs the downloaded version and starts it. The window closes and opens again. */
+export function RestartButton(props: { busy?: boolean; onError: (e: string) => void; small?: boolean }) {
+  const [restarting, setRestarting] = useState(false);
+  return (
+    <button
+      onClick={async () => {
+        setRestarting(true);
+        props.onError("");
+        try {
+          await api.restartToUpdate();
+        } catch (e) {
+          props.onError(String(e));
+          setRestarting(false);
+        }
+      }}
+      disabled={props.busy || restarting}
+      title={props.busy ? "Wait for the answer, then restart." : undefined}
+      className={`rounded-lg bg-[#252e4a] font-medium text-stone-50 hover:bg-[#323d62] disabled:opacity-40 ${props.small ? "px-2 py-1 text-xs" : "px-4 py-2 text-sm"}`}
+    >
+      {restarting ? "Restarting…" : "Restart now"}
+    </button>
+  );
+}
+
 export function SettingsPage(props: {
   settings: api.Settings;
   onSaved: (s: api.Settings) => void;
   onBack: () => void;
   clickupToken?: api.ClickupTokenStatus | null;
   onClickupTokenChanged?: () => void;
+  update?: api.UpdateStatus | null;
+  onUpdateChanged?: (s: api.UpdateStatus) => void;
+  busy?: boolean;
 }) {
   const [draft, setDraft] = useState(props.settings);
   const [status, setStatus] = useState("");
@@ -157,6 +246,8 @@ export function SettingsPage(props: {
       </div>
 
       <ClickupSection status={props.clickupToken ?? null} onChanged={() => props.onClickupTokenChanged?.()} />
+
+      <UpdateSection status={props.update ?? null} onChanged={(s) => props.onUpdateChanged?.(s)} busy={props.busy} />
     </div>
   );
 }

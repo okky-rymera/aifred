@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
 import { TodoList } from "./Todo";
-import { SettingsPage } from "./Settings";
+import { RestartButton, SettingsPage } from "./Settings";
 import { MemoryList } from "./Memory";
 
 type Message = {
@@ -120,6 +120,8 @@ export default function App() {
   const [clickup, setClickup] = useState<api.ClickupList>({ items: [], fetched_at: 0 });
   const [clickupState, setClickupState] = useState("loading");
   const [clickupToken, setClickupToken] = useState<api.ClickupTokenStatus | null>(null);
+  const [update, setUpdate] = useState<api.UpdateStatus | null>(null);
+  const [restartError, setRestartError] = useState("");
   /** Counts ClickUp loads. Only the newest load may change the screen. */
   const clickupLoad = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
@@ -232,6 +234,14 @@ export default function App() {
     return () => clearInterval(timer);
   }, [meaningStarting]);
 
+  // The app checks for updates by itself (main.rs). Read its status each minute.
+  useEffect(() => {
+    const load = () => api.updateStatus().then(setUpdate).catch(() => {});
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, progress, chatOpen]);
@@ -341,6 +351,14 @@ export default function App() {
           Settings
         </button>
 
+        {update?.state === "ready" && (
+          <div className="space-y-2 rounded-lg border border-amber-400/60 bg-amber-50 p-2 text-xs dark:bg-amber-950/30">
+            <div>AIfred {update.latest} is ready.</div>
+            <RestartButton small busy={busy} onError={setRestartError} />
+            {restartError && <div className="text-red-600">{restartError}</div>}
+          </div>
+        )}
+
         <div className="space-y-1 text-[11px] text-stone-500">
           {loadError && <div className="text-red-600">{loadError}</div>}
           {info?.api_key_set && (
@@ -364,6 +382,9 @@ export default function App() {
               onBack={() => setPage("home")}
               clickupToken={clickupToken}
               onClickupTokenChanged={() => checkClickup(true)}
+              update={update}
+              onUpdateChanged={setUpdate}
+              busy={busy}
             />
           )}
           {page === "home" && !chatOpen && (

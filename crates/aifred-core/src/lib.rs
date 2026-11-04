@@ -18,5 +18,6 @@ pub mod settings;
 pub mod summaries;
 pub mod tasks;
 pub mod text;
+pub mod update;
 
 pub use assistant::{Answer, Assistant, default_data_dir};

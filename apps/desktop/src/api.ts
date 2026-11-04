@@ -200,6 +200,27 @@ export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");
 
+/** What the app knows about updates (main.rs). */
+export type UpdateStatus = {
+  /** The version of this program. */
+  current: string;
+  state: "off" | "idle" | "checking" | "none" | "downloading" | "ready" | "error";
+  /** The new version, when one is found. */
+  latest: string | null;
+  /** The release page of the new version. */
+  page: string | null;
+  /** Why updates are off, or the error. */
+  message: string | null;
+  /** The last check, in Unix seconds. */
+  checked_at: number | null;
+};
+
+export const updateStatus = () => invoke<UpdateStatus>("update_status");
+/** Checks GitHub now. When there is a new version, it also downloads it. */
+export const checkUpdate = () => invoke<UpdateStatus>("check_update");
+/** Installs the downloaded version and starts it. This window closes. */
+export const restartToUpdate = () => invoke<void>("restart_to_update");
+
 /** Plain-language label for a tool call, shown while AIfred works. */
 export function describe(e: ProgressEvent): string {
   if (e.kind === "notice") return e.message;

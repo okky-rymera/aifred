@@ -351,6 +351,33 @@ describe("settings page", () => {
     expect(screen.getByText("Good to see you.")).toBeInTheDocument();
   });
 
+  it("checks for a new version and restarts into it", async () => {
+    const fake = await startApp({ updateTo: "0.2.0" });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByText("This is AIfred 0.1.1.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText(/Version 0.2.0 is downloaded/)).toBeInTheDocument();
+    // The sidebar shows it too.
+    expect(screen.getByText("AIfred 0.2.0 is ready.")).toBeInTheDocument();
+    await userEvent.click(screen.getAllByRole("button", { name: "Restart now" })[0]);
+    await waitFor(() => expect(fake.restarts).toBe(1));
+  });
+
+  it("says when there is no new version", async () => {
+    await startApp();
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText("You have the newest version.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restart now" })).not.toBeInTheDocument();
+  });
+
+  it("shows why updates are off", async () => {
+    await startApp({ update: { current: "0.1.1", state: "off", latest: null, page: null, message: "Updates are off in development builds.", checked_at: null } });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Updates are off in development builds.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
+  });
+
   it("shows a failed save", async () => {
     await startApp({ fail: { set_settings: "read-only folder" } });
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));

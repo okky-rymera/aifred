@@ -2,7 +2,7 @@
 // the Rust app (src-tauri/src/main.rs), but keeps everything in memory.
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Answer, ClickupItem, Fact, GithubItem, ProgressEvent, Settings, Task, TaskChanges, Turn } from "../api";
+import type { Answer, ClickupItem, Fact, GithubItem, ProgressEvent, Settings, Task, TaskChanges, Turn, UpdateStatus } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void) => Promise<Answer> | Answer;
 
@@ -29,6 +29,12 @@ export type Fake = {
   /** How many times the window asked ClickUp (not the saved list). */
   clickupFetches: number;
   settings: Settings;
+  /** The update status. A check moves it to "ready" when `updateTo` is set. */
+  update: UpdateStatus;
+  /** The version that a check finds. null: no new version. */
+  updateTo: string | null;
+  /** How many times the window asked to restart. */
+  restarts: number;
   /** The model picked in the chat box. null: the default. */
   chatModel: string | null;
   history: Turn[];
@@ -157,6 +163,9 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     clickupClosed: {},
     clickupFetches: 0,
     settings: { refresh_minutes: 15 },
+    update: { current: "0.1.1", state: "idle", latest: null, page: null, message: null, checked_at: null },
+    updateTo: null,
+    restarts: 0,
     chatModel: null,
     history: [],
     memory: [],
@@ -323,6 +332,17 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         const a = await fake.onAsk(args.prompt, progress);
         return { ...a, model: fake.chatModel };
       }
+      case "update_status":
+        return fake.update;
+      case "check_update":
+        fake.update = fake.updateTo
+          ? { ...fake.update, state: "ready", latest: fake.updateTo, page: `https://example.com/v${fake.updateTo}`, checked_at: nowSecs() }
+          : { ...fake.update, state: "none", checked_at: nowSecs() };
+        return fake.update;
+      case "restart_to_update":
+        if (fake.update.state !== "ready") throw "No downloaded update waits. Check for updates again.";
+        fake.restarts++;
+        return null;
       default:
         throw `fake backend: unknown command ${cmd}`;
     }
