@@ -52,15 +52,29 @@ fn parse_owners(s: &str) -> Vec<String> {
 /// The most results one search returns.
 const SEARCH_LIMIT: usize = 50;
 
+/// The `gh` arguments for one search.
+fn search_args(kind: &str, filter: &str, owners: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "search",
+        kind,
+        filter,
+        "--state=open",
+        // Archived repositories are read-only, so their items need no work.
+        "--archived=false",
+        "--limit",
+        &SEARCH_LIMIT.to_string(),
+        "--json",
+        "repository,number,title,url,updatedAt",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(owners.iter().map(|o| format!("--owner={o}")));
+    args
+}
+
 async fn search(kind: &str, filter: &str, reason: &str, owners: &[String]) -> anyhow::Result<Vec<GithubItem>> {
-    let mut cmd = Command::new("gh");
-    let limit = SEARCH_LIMIT.to_string();
-    cmd.args(["search", kind, filter, "--state=open", "--limit", &limit])
-        .args(["--json", "repository,number,title,url,updatedAt"]);
-    for o in owners {
-        cmd.arg(format!("--owner={o}"));
-    }
-    let out = cmd.output().await?;
+    let out = Command::new("gh").args(search_args(kind, filter, owners)).output().await?;
     if !out.status.success() {
         bail!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -247,6 +261,14 @@ mod tests {
         assert_eq!(all.len(), 2, "duplicates are removed");
         assert!(all.iter().all(|i| i.reason == "review_requested"));
         assert_eq!(all[0].id, "acme/shop#7");
+    }
+
+    #[test]
+    fn searches_skip_archived_repos_and_keep_the_owner_limit() {
+        let args = search_args("issues", "--assignee=@me", &["acme".into(), "me".into()]);
+        assert!(args.contains(&"--archived=false".to_string()), "got {args:?}");
+        assert!(args.contains(&"--state=open".to_string()));
+        assert!(args.ends_with(&["--owner=acme".to_string(), "--owner=me".to_string()]));
     }
 
     #[test]

@@ -53,13 +53,22 @@ impl GithubTools {
         Self { owners }
     }
 
-    /// Runs one `gh search` query (`issues` or `prs`) with the owner limit applied.
-    async fn search(&self, kind: &str, filter: &str, limit: Option<u32>) -> Result<String, ErrorData> {
+    /// The `gh` arguments for one search (`issues` or `prs`), with the owner limit.
+    /// Items in archived repositories are left out.
+    fn search_args(&self, kind: &str, filter: &str, limit: Option<u32>) -> Vec<String> {
         let limit = limit.unwrap_or(30).clamp(1, MAX_LIMIT).to_string();
-        let mut args = vec!["search", kind, filter, "--state=open", "--json", SEARCH_FIELDS, "--limit", &limit];
-        let owner_args: Vec<String> = self.owners.iter().map(|o| format!("--owner={o}")).collect();
-        args.extend(owner_args.iter().map(String::as_str));
-        run_gh(&args).await
+        let mut args: Vec<String> =
+            ["search", kind, filter, "--state=open", "--archived=false", "--json", SEARCH_FIELDS, "--limit", &limit]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        args.extend(self.owners.iter().map(|o| format!("--owner={o}")));
+        args
+    }
+
+    async fn search(&self, kind: &str, filter: &str, limit: Option<u32>) -> Result<String, ErrorData> {
+        let args = self.search_args(kind, filter, limit);
+        run_gh(&args.iter().map(String::as_str).collect::<Vec<_>>()).await
     }
 
     fn check_repo(&self, repo: &str) -> Result<(), ErrorData> {
@@ -83,17 +92,17 @@ impl GithubTools {
 
 #[tool_router]
 impl GithubTools {
-    #[tool(description = "List open GitHub issues assigned to the user.")]
+    #[tool(description = "List open GitHub issues assigned to the user. Repositories that are archived are left out.")]
     async fn my_issues(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, ErrorData> {
         ok_text(self.search("issues", "--assignee=@me", a.limit).await?)
     }
 
-    #[tool(description = "List open pull requests where the user's review is requested.")]
+    #[tool(description = "List open pull requests where the user's review is requested. Repositories that are archived are left out.")]
     async fn review_requests(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, ErrorData> {
         ok_text(self.search("prs", "--review-requested=@me", a.limit).await?)
     }
 
-    #[tool(description = "List open pull requests that the user authored.")]
+    #[tool(description = "List open pull requests that the user authored. Repositories that are archived are left out.")]
     async fn my_pull_requests(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, ErrorData> {
         ok_text(self.search("prs", "--author=@me", a.limit).await?)
     }
@@ -159,4 +168,19 @@ async fn main() -> anyhow::Result<()> {
     let server = GithubTools::from_env().serve(stdio()).await?;
     server.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn searches_skip_archived_repos_and_keep_the_owner_limit() {
+        let t = GithubTools { owners: vec!["acme".into()] };
+        let args = t.search_args("prs", "--author=@me", Some(500));
+        assert!(args.contains(&"--archived=false".to_string()), "got {args:?}");
+        assert!(args.contains(&"--state=open".to_string()));
+        assert!(args.contains(&MAX_LIMIT.to_string()), "limit is capped");
+        assert_eq!(args.last().unwrap(), "--owner=acme");
+    }
 }
