@@ -1,7 +1,7 @@
 //! What AIfred knows about the user. Each fact is one row in the database.
 //!
 //! - "Core" facts go into the AI instructions with each message.
-//! - The AI finds the other facts with a search (aifred-memory-mcp).
+//! - The AI finds the other facts with a search (the memory tool server, aifred-tools).
 //! - A forgotten fact is not deleted. It gets a "forgotten" time, and the
 //!   user can restore it in the app.
 //!

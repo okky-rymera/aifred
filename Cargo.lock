@@ -32,28 +32,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aifred"
-version = "0.1.0"
-dependencies = [
- "aifred-core",
- "anyhow",
- "tokio",
-]
-
-[[package]]
-name = "aifred-clickup-mcp"
-version = "0.1.0"
-dependencies = [
- "aifred-core",
- "anyhow",
- "rmcp",
- "schemars 1.2.3",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "aifred-core"
 version = "0.1.0"
 dependencies = [
@@ -72,6 +50,8 @@ name = "aifred-desktop"
 version = "0.1.0"
 dependencies = [
  "aifred-core",
+ "aifred-embed",
+ "aifred-tools",
  "anyhow",
  "serde",
  "serde_json",
@@ -93,33 +73,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aifred-github-mcp"
-version = "0.1.0"
-dependencies = [
- "aifred-core",
- "anyhow",
- "rmcp",
- "schemars 1.2.3",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "aifred-memory-mcp"
-version = "0.1.0"
-dependencies = [
- "aifred-core",
- "anyhow",
- "rmcp",
- "schemars 1.2.3",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "aifred-tasks-mcp"
+name = "aifred-tools"
 version = "0.1.0"
 dependencies = [
  "aifred-core",

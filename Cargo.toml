@@ -1,3 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/desktop/src-tauri"]
+
+# Release builds: remove the debug symbols. The program file gets much smaller.
+[profile.release]
+strip = true

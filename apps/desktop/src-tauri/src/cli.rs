@@ -1,4 +1,4 @@
-//! aifred terminal commands. Prototype.
+//! The terminal commands of the AIfred program.
 //!
 //!   aifred ask "<message>"     Ask one question in the current conversation.
 //!   aifred chat                Talk in a loop. Empty line or Ctrl-D ends it.
@@ -69,17 +69,23 @@ async fn fill_vectors(a: Arc<Assistant<ClaudeBackend>>) {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// The first words of the terminal commands.
+pub const COMMANDS: [&str; 5] = ["ask", "chat", "remember", "new", "index"];
+
+/// Runs one terminal command. `args` are the words after the program name.
+pub fn run(args: Vec<String>) -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run_async(args))
+}
+
+async fn run_async(args: Vec<String>) -> anyhow::Result<()> {
     if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
         eprintln!("[aifred] warning: ANTHROPIC_API_KEY is set, so claude uses the API key, not your login.");
     }
     let dir = default_data_dir()?;
     let backend = ClaudeBackend { work_dir: dir.join("claude"), model: std::env::var("AIFRED_MODEL").ok() };
-    let tools_dir = std::env::current_exe()?.parent().map(Into::into).unwrap_or_default();
-    let a = Arc::new(Assistant::new(dir, backend, tools_dir)?);
+    let program = std::env::current_exe()?;
+    let a = Arc::new(Assistant::new(dir, backend, program)?);
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("ask") if args.len() > 1 => {
             ask(&a, &args[1..].join(" ")).await?;

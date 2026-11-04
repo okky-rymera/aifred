@@ -13,6 +13,7 @@ pub mod history;
 mod import;
 pub mod memory;
 pub mod overview;
+pub mod program;
 pub mod settings;
 pub mod summaries;
 pub mod tasks;

@@ -2,7 +2,8 @@
 //! numbers (a vector). Texts with a near meaning get near vectors, so
 //! "money" can find "invoice" with no shared word.
 //!
-//! - Only the helper program `aifred-embed` loads the model (see its lib.rs).
+//! - Only the helper loads the model (the aifred-embed crate). It is the
+//!   AIfred program in its helper mode, in its own process.
 //!   This file sends texts to it over <data folder>/embed.sock. It starts
 //!   the helper when the socket does not answer. The helper stops after 5
 //!   minutes with no requests, so an idle app keeps no model in memory.
@@ -31,7 +32,6 @@ pub const DIMS: usize = 384;
 const BATCH: i64 = 64;
 /// The file names in the data folder, the same as in aifred_embed.
 const SOCKET: &str = "embed.sock";
-const HELPER: &str = "aifred-embed";
 /// How long a new helper can take to open its socket.
 const START_WAIT: Duration = Duration::from_secs(10);
 /// How long an answer can take for a fill. The first start downloads the model.
@@ -226,24 +226,20 @@ fn connect_new(dir: &Path, socket: &Path, mut helper: Option<std::process::Child
     result
 }
 
-/// Starts the helper program. It is next to this program, or at
-/// $AIFRED_EMBED_BIN. When one already runs, the new one stops at once.
+/// Starts the helper: the AIfred program in its helper mode
+/// (`aifred embed-helper <data folder> <socket>`). When one already runs,
+/// the new one stops at once.
 #[cfg(not(test))]
 fn start_helper(dir: &Path, socket: &Path) -> Result<Option<std::process::Child>, String> {
     use std::os::unix::process::CommandExt;
-    let bin = match std::env::var_os("AIFRED_EMBED_BIN") {
-        Some(p) => PathBuf::from(p),
-        None => std::env::current_exe()
-            .map_err(|e| e.to_string())?
-            .parent()
-            .map(|d| d.join(HELPER))
-            .unwrap_or_else(|| PathBuf::from(HELPER)),
+    // Only the AIfred program saves its path. A test program of another
+    // part does not, so it never starts a copy of itself.
+    let Some(program) = crate::program::path() else {
+        return Err("the meaning search helper is missing: this program is not AIfred".into());
     };
-    if !bin.exists() {
-        return Err(format!("the meaning search helper is missing: {}", bin.display()));
-    }
     let log = std::fs::File::create(dir.join("embed.log")).map_err(|e| format!("cannot make embed.log: {e}"))?;
-    let child = std::process::Command::new(&bin)
+    let child = std::process::Command::new(program)
+        .arg(crate::program::EMBED_HELPER)
         .arg(dir)
         .arg(socket)
         .stdin(std::process::Stdio::null())
@@ -252,14 +248,13 @@ fn start_helper(dir: &Path, socket: &Path) -> Result<Option<std::process::Child>
         // Its own process group: it keeps running when a tool server stops.
         .process_group(0)
         .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", bin.display()))?;
+        .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
     Ok(Some(child))
 }
 
 /// The tests run the helper in a thread, with the shared test model folder.
 #[cfg(test)]
 fn start_helper(dir: &Path, socket: &Path) -> Result<Option<std::process::Child>, String> {
-    let _ = HELPER;
     let (dir, socket) = (dir.to_path_buf(), socket.to_path_buf());
     std::thread::spawn(move || {
         if let Err(e) = aifred_embed::serve(&dir, &socket, &models_dir(&dir), Duration::from_secs(30)) {

@@ -6,14 +6,25 @@ AIfred owns the memory, the conversation history, the tools, and the access rule
 
 ## Parts
 
+AIfred is one program file, `aifred`. The first word after the name selects the part:
+
+- `aifred`: opens the window.
+- `aifred ask`, `chat`, `remember`, `new`, `index`: the terminal commands (see "Use").
+- `aifred tool <name>`: one AI tool server. Claude Code starts it for each message. You do not run it yourself.
+- `aifred embed-helper <data folder> <socket>`: the meaning search helper. AIfred starts it when it needs it.
+
+The tool servers and the helper run as their own processes, but they use the same file.
+
+The source code:
+
 - `crates/aifred-core`: the shared core. It contains memory, history, the `Backend` trait (`src/backend/mod.rs`), and the Claude backend (`src/backend/claude.rs`).
-- `crates/aifred`: the terminal commands.
-- `apps/desktop`: the desktop app (Tauri 2, React, Tailwind).
-- `crates/aifred-github-mcp`: a read-only GitHub tool server (MCP, stdio). It uses your `gh` login.
-- `crates/aifred-clickup-mcp`: a read-only ClickUp tool server (MCP, stdio). It reads your ClickUp token from the data folder.
-- `crates/aifred-tasks-mcp`: a local task tool server. AIfred uses it to add, list, search, and finish tasks. It can only change the tasks in the data folder.
-- `crates/aifred-memory-mcp`: a memory tool server. AIfred uses it to search, add, and forget facts about you, and to search old chats.
-- `crates/aifred-embed`: the meaning search helper. It is the only program that loads the meaning search model.
+- `apps/desktop`: the desktop app (Tauri 2, React, Tailwind). Its Rust part (`src-tauri`) makes the `aifred` program. The terminal commands are in `src-tauri/src/cli.rs`.
+- `crates/aifred-tools`: the AI tool servers (MCP, stdio):
+  - `github`: reads GitHub with your `gh` login.
+  - `clickup`: reads ClickUp with the token in the data folder.
+  - `tasks`: adds, lists, searches, and finishes local tasks. It can only change the tasks in the data folder.
+  - `memory`: searches, adds, and forgets facts about you, and searches old chats.
+- `crates/aifred-embed`: the meaning search helper. It is the only part that loads the meaning search model.
 
 ## Data
 
@@ -32,7 +43,7 @@ AIfred owns the memory, the conversation history, the tools, and the access rule
 - AIfred can also search your old chats, your tasks, and the saved GitHub and ClickUp lists. A GitHub item or ClickUp task that left your list stays searchable.
 - Search finds words and meaning. For example, "book my flight" finds the fact "I prefer window seats".
 - Meaning search uses a small model that runs on your computer (all-MiniLM-L6-v2, about 90 MB). It uses the processor and RAM, not the GPU. The first start downloads it into `models` in the data folder. If the download fails, word search still works, and AIfred tries the download again after 1 minute. The sidebar shows the state under "Meaning search".
-- Only the helper program `aifred-embed` loads the model. The app, the terminal commands, and the tool servers send their texts to it, so only one copy of the model is in memory (about 150 MB while it runs).
+- Only the meaning search helper loads the model. The app, the terminal commands, and the tool servers send their texts to it, so only one copy of the model is in memory (about 150 MB while it runs).
   - A program starts the helper when it needs it. The start takes about 0.2 s.
   - The helper stops after 5 minutes with no requests. Then the model uses no memory.
   - The helper's messages go to `embed.log` in the data folder.
@@ -68,7 +79,6 @@ AIfred owns the memory, the conversation history, the tools, and the access rule
 Run these commands one time:
 
 ```bash
-cargo build                    # builds the tool servers and the meaning search helper
 cd apps/desktop && npm install
 ```
 
@@ -78,7 +88,7 @@ Start the app:
 cd apps/desktop && npx tauri dev
 ```
 
-The app looks for the tool servers (`aifred-github-mcp`, `aifred-clickup-mcp`, `aifred-tasks-mcp`, `aifred-memory-mcp`) and the meaning search helper (`aifred-embed`) in the same folder as the app program (`target/debug`). If a tool server is missing, the chat still works without those tools, and the chat panel shows a notice. If the helper is missing, word search still works. An installed app package does not include the tool servers yet.
+The tool servers and the meaning search helper are in the same program, so you do not build them separately.
 
 ## Tests
 
@@ -95,9 +105,15 @@ cd apps/desktop && npm test        # window: home page, chat panel, to-do list
 
 ## Build
 
+Make the release program (one file, `target/release/aifred`):
+
 ```bash
-cargo build --release
+cd apps/desktop && npx tauri build --no-bundle
 ```
+
+- Use the Tauri command, not `cargo build --release`. Only the Tauri command puts the window files into the program.
+- Release builds remove the debug symbols (`[profile.release]` in `Cargo.toml`).
+- The program needs WebKitGTK 4.1 on the computer.
 
 ## Use
 

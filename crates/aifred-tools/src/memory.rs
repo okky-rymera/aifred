@@ -116,8 +116,8 @@ impl ServerHandler for MemoryTools {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Serves these tools over stdio until Claude Code closes the connection.
+pub async fn serve() -> anyhow::Result<()> {
     let dir = default_data_dir()?;
     std::fs::create_dir_all(&dir)?;
     let server = MemoryTools { dir }.serve(stdio()).await?;

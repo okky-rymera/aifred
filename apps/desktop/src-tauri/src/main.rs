@@ -1,6 +1,13 @@
-//! aifred desktop app. The window talks to aifred-core through these commands.
+//! The AIfred program. With no words after its name it opens the window.
+//! The window talks to aifred-core through the commands in this file.
+//!
+//! The same file also holds the other parts (see aifred_core::program):
+//! the terminal commands (cli.rs), the AI tool servers (aifred-tools), and
+//! the meaning search helper (aifred-embed).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod cli;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -503,12 +510,36 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
 }
 
 fn main() -> anyhow::Result<()> {
+    let program = std::env::current_exe()?;
+    aifred_core::program::set_path(program.clone());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => open_window(program),
+        Some(aifred_core::program::TOOL) => match args.get(1) {
+            Some(name) => aifred_tools::run(name),
+            None => anyhow::bail!("usage: aifred tool <name>"),
+        },
+        Some(aifred_core::program::EMBED_HELPER) => match (args.get(1), args.get(2)) {
+            (Some(dir), Some(socket)) => {
+                let dir = std::path::Path::new(dir);
+                aifred_embed::serve(dir, socket.as_ref(), &aifred_embed::models_dir(dir), aifred_embed::IDLE)
+            }
+            _ => anyhow::bail!("usage: aifred embed-helper <data folder> <socket>"),
+        },
+        Some(word) if cli::COMMANDS.contains(&word) => cli::run(args),
+        Some(_) => {
+            eprintln!("usage: aifred [ask \"<message>\" | chat | remember \"<fact>\" | new | index]");
+            eprintln!("With no words, aifred opens the window.");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
     let dir = default_data_dir()?;
     let backend = ClaudeBackend { work_dir: dir.join("claude"), model: std::env::var("AIFRED_MODEL").ok() };
-    // The GitHub tool server is built into the same folder as this app.
-    let tools_dir = std::env::current_exe()?.parent().map(Into::into).unwrap_or_default();
     GithubStore::new(&dir).remove_old_files();
-    let assistant = Arc::new(Assistant::new(dir, backend, tools_dir)?);
+    let assistant = Arc::new(Assistant::new(dir, backend, program)?);
 
     // AIFRED_NO_WINDOW_STATE: do not read or write the saved window size.
     // scripts/run-hidden.sh sets it, so a check run cannot change the size

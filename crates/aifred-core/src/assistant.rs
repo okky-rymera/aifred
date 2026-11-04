@@ -83,8 +83,8 @@ struct SessionState {
 pub struct Assistant<B: Backend> {
     pub dir: PathBuf,
     pub backend: B,
-    /// Folder that holds the tool server programs.
-    pub tools_dir: PathBuf,
+    /// The AIfred program. The tool servers run as `<program> tool <name>`.
+    pub program: PathBuf,
     /// One summary at a time. Two at the same time would cost two AI calls.
     summary: tokio::sync::Mutex<()>,
     /// One run of the item summaries at a time, for the same reason. It holds the items with no usable summary
@@ -119,7 +119,7 @@ pub fn default_data_dir() -> anyhow::Result<PathBuf> {
 }
 
 impl<B: Backend> Assistant<B> {
-    pub fn new(dir: PathBuf, backend: B, tools_dir: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(dir: PathBuf, backend: B, program: PathBuf) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         // Make the path full. The tool servers run in another folder
         // (the Claude work folder), so a relative path would point
@@ -128,7 +128,7 @@ impl<B: Backend> Assistant<B> {
         Ok(Self {
             dir,
             backend,
-            tools_dir,
+            program,
             summary: tokio::sync::Mutex::new(()),
             item_summaries: tokio::sync::Mutex::new(Default::default()),
         })
@@ -334,95 +334,59 @@ impl<B: Backend> Assistant<B> {
     }
 
     /// The path of a tool server program, or None if it is not built.
-    fn tool_path(&self, name: &str) -> Option<PathBuf> {
-        let p = self.tools_dir.join(name);
-        p.exists().then_some(p)
-    }
-
     pub fn tasks(&self) -> TaskStore {
         TaskStore::new(&self.dir)
     }
 
-    /// The tool servers that are built, and a notice for each one that is
-    /// missing. A missing server must not stop the whole chat.
+    /// The tool servers, or a notice when the AIfred program is missing.
+    /// A missing program must not stop the whole chat.
     fn tool_servers(&self) -> (Vec<ToolServer>, Vec<String>) {
-        let mut servers = vec![];
-        let mut missing = vec![];
-        let mut notice = |name: &str, what: &str| {
-            missing.push(format!(
-                "{what} are off: {} is missing. Run `cargo build` in the workspace.",
-                self.tools_dir.join(name).display()
-            ))
+        if !self.program.is_file() {
+            let notice = format!("The AI tools are off: the AIfred program {} is missing.", self.program.display());
+            return (vec![], vec![notice]);
+        }
+        let server = |name: &str, env: Vec<(String, String)>, allowed_tools: &[&str]| ToolServer {
+            name: name.into(),
+            command: self.program.clone(),
+            args: vec![crate::program::TOOL.into(), name.into()],
+            env,
+            allowed_tools: allowed_tools.iter().map(|t| t.to_string()).collect(),
         };
 
         // The server must use the same data folder as this app. The GitHub
         // owner filter goes to each server that downloads the GitHub list
         // (the overview tool of the tasks server, and the GitHub server).
         // Without it, a download saves the items of all owners.
-        let env_with_owners = || {
-            let mut env = vec![("AIFRED_HOME".to_string(), self.dir.display().to_string())];
+        let home = || vec![("AIFRED_HOME".to_string(), self.dir.display().to_string())];
+        let home_with_owners = || {
+            let mut env = home();
             if let Ok(owners) = std::env::var("AIFRED_GITHUB_OWNERS") {
                 env.push(("AIFRED_GITHUB_OWNERS".to_string(), owners));
             }
             env
         };
 
-        match self.tool_path("aifred-tasks-mcp") {
-            Some(command) => servers.push(ToolServer {
-                name: "tasks".into(),
-                command,
-                args: vec![],
-                env: env_with_owners(),
-                allowed_tools: ["overview", "list_tasks", "search_tasks", "add_task", "update_task", "complete_task"].map(String::from).to_vec(),
-            }),
-            None => notice("aifred-tasks-mcp", "To-do list tools"),
-        }
-
-        match self.tool_path("aifred-memory-mcp") {
-            Some(command) => servers.push(ToolServer {
-                name: "memory".into(),
-                command,
-                args: vec![],
-                env: vec![("AIFRED_HOME".into(), self.dir.display().to_string())],
-                allowed_tools: ["search_memory", "add_memory", "forget_memory", "search_history"]
-                    .map(String::from)
-                    .to_vec(),
-            }),
-            None => notice("aifred-memory-mcp", "Memory tools"),
-        }
-
-        match self.tool_path("aifred-github-mcp") {
-            Some(command) => {
-                // The server searches the saved GitHub list in the data folder.
-                servers.push(ToolServer {
-                    name: "github".into(),
-                    command,
-                    args: vec![],
-                    env: env_with_owners(),
-                    allowed_tools: ["my_issues", "review_requests", "my_pull_requests", "search_my_items", "item_details"]
-                        .map(String::from)
-                        .to_vec(),
-                });
-            }
-            None => notice("aifred-github-mcp", "GitHub tools"),
-        }
-
+        let mut servers = vec![
+            server(
+                "tasks",
+                home_with_owners(),
+                &["overview", "list_tasks", "search_tasks", "add_task", "update_task", "complete_task"],
+            ),
+            server("memory", home(), &["search_memory", "add_memory", "forget_memory", "search_history"]),
+            // The server searches the saved GitHub list in the data folder.
+            server(
+                "github",
+                home_with_owners(),
+                &["my_issues", "review_requests", "my_pull_requests", "search_my_items", "item_details"],
+            ),
+        ];
         // ClickUp tools only when the user connected ClickUp. The server reads
         // the token from the data folder itself, so the token never goes into
         // the tool settings file.
         if crate::clickup::token(&self.dir).is_some() {
-            match self.tool_path("aifred-clickup-mcp") {
-                Some(command) => servers.push(ToolServer {
-                    name: "clickup".into(),
-                    command,
-                    args: vec![],
-                    env: vec![("AIFRED_HOME".into(), self.dir.display().to_string())],
-                    allowed_tools: ["my_tasks", "search_my_tasks", "task_details"].map(String::from).to_vec(),
-                }),
-                None => notice("aifred-clickup-mcp", "ClickUp tools"),
-            }
+            servers.push(server("clickup", home(), &["my_tasks", "search_my_tasks", "task_details"]));
         }
-        (servers, missing)
+        (servers, vec![])
     }
 
     pub async fn ask(&self, prompt: &str, on_event: OnEvent<'_>) -> anyhow::Result<Answer> {
@@ -505,9 +469,9 @@ mod tests {
     use super::*;
     use crate::backend::claude::ClaudeBackend;
 
-    fn assistant(dir: PathBuf, tools_dir: PathBuf) -> Assistant<ClaudeBackend> {
+    fn assistant(dir: PathBuf, program: PathBuf) -> Assistant<ClaudeBackend> {
         let backend = ClaudeBackend { work_dir: dir.join("claude"), model: None };
-        Assistant::new(dir, backend, tools_dir).unwrap()
+        Assistant::new(dir, backend, program).unwrap()
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -742,43 +706,37 @@ mod tests {
     }
 
     #[test]
-    fn missing_tool_servers_give_notices_not_an_error() {
+    fn missing_program_gives_a_notice_not_an_error() {
         let dir = temp("no-tools");
-        let (servers, missing) = assistant(dir.clone(), dir.join("empty")).tool_servers();
+        let (servers, missing) = assistant(dir.clone(), dir.join("aifred")).tool_servers();
         assert!(servers.is_empty());
-        // AIFRED_CLICKUP_TOKEN in the developer's shell also adds a ClickUp notice.
-        let missing = without_clickup(missing);
-        assert_eq!(missing.len(), 3);
-        assert!(missing[0].contains("aifred-tasks-mcp"), "got {missing:?}");
-        assert!(missing[1].contains("aifred-memory-mcp"), "got {missing:?}");
-        assert!(missing[2].contains("aifred-github-mcp"), "got {missing:?}");
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("AI tools are off"), "got {missing:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn built_tool_server_is_used_and_gets_the_data_folder() {
-        let dir = temp("one-tool");
-        std::fs::write(dir.join("aifred-tasks-mcp"), "").unwrap();
-        let a = assistant(dir.clone(), dir.clone());
+    fn tool_servers_run_the_program_and_get_the_data_folder() {
+        let dir = temp("tools");
+        std::fs::write(dir.join("aifred"), "").unwrap();
+        let a = assistant(dir.clone(), dir.join("aifred"));
         let (servers, missing) = a.tool_servers();
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "tasks");
-        assert_eq!(servers[0].env, vec![("AIFRED_HOME".to_string(), a.dir.display().to_string())]);
-        assert_eq!(without_clickup(missing).len(), 2, "memory and GitHub are missing");
+        assert!(missing.is_empty(), "got {missing:?}");
+        let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).filter(|n| *n != "clickup").collect();
+        assert_eq!(names, ["tasks", "memory", "github"]);
+        let tasks = &servers[0];
+        assert_eq!(tasks.command, dir.join("aifred"));
+        assert_eq!(tasks.args, ["tool", "tasks"]);
+        assert_eq!(tasks.env[0], ("AIFRED_HOME".to_string(), a.dir.display().to_string()));
+        assert_eq!(servers[1].env, vec![("AIFRED_HOME".to_string(), a.dir.display().to_string())]);
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The notices without the ClickUp one. It shows only when a token is set,
-    /// and AIFRED_CLICKUP_TOKEN can set one outside the test.
-    fn without_clickup(missing: Vec<String>) -> Vec<String> {
-        missing.into_iter().filter(|m| !m.contains("aifred-clickup-mcp")).collect()
     }
 
     #[test]
     fn clickup_tools_start_only_with_a_token_and_never_get_it() {
         let dir = temp("clickup-tool");
-        std::fs::write(dir.join("aifred-clickup-mcp"), "").unwrap();
-        let a = assistant(dir.clone(), dir.clone());
+        std::fs::write(dir.join("aifred"), "").unwrap();
+        let a = assistant(dir.clone(), dir.join("aifred"));
         let names = |a: &Assistant<ClaudeBackend>| a.tool_servers().0.into_iter().map(|s| s.name).collect::<Vec<_>>();
         if std::env::var_os("AIFRED_CLICKUP_TOKEN").is_none() {
             assert!(!names(&a).contains(&"clickup".to_string()), "no token, no ClickUp tools");
@@ -787,6 +745,7 @@ mod tests {
         let (servers, _) = a.tool_servers();
         let s = servers.iter().find(|s| s.name == "clickup").expect("ClickUp tools start");
         assert_eq!(s.allowed_tools, vec!["my_tasks", "search_my_tasks", "task_details"], "read-only tools only");
+        assert_eq!(s.args, ["tool", "clickup"]);
         assert!(!format!("{:?}", s.env).contains("SECRET"), "the token stays out of the tool settings");
         std::fs::remove_dir_all(&dir).unwrap();
     }

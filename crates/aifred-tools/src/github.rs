@@ -245,8 +245,8 @@ fn ok_text(s: String) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![ContentBlock::text(s)]))
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Serves these tools over stdio until Claude Code closes the connection.
+pub async fn serve() -> anyhow::Result<()> {
     let server = GithubTools::from_env()?.serve(stdio()).await?;
     server.waiting().await?;
     Ok(())

@@ -194,8 +194,8 @@ fn shorten(task: &Value, comments: &Value) -> Value {
     })
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Serves these tools over stdio until Claude Code closes the connection.
+pub async fn serve() -> anyhow::Result<()> {
     let server = ClickupTools { dir: default_data_dir()? }.serve(stdio()).await?;
     server.waiting().await?;
     Ok(())

@@ -1,7 +1,10 @@
 [package]
-name = "aifred-tasks-mcp"
+name = "aifred-tools"
 version = "0.1.0"
 edition = "2024"
+
+# The AI tool servers (MCP, stdio). They are part of the AIfred program:
+# Claude Code starts them as `aifred tool <name>`.
 
 [dependencies]
 aifred-core = { version = "0.1.0", path = "../aifred-core" }
@@ -10,4 +13,4 @@ rmcp = { version = "=3.8.0", features = ["server", "transport-io", "macros"] }
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "io-std"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "io-std", "process"] }
