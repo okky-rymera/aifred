@@ -26,13 +26,18 @@ pub struct ToolServer {
 pub struct AskRequest {
     /// Rules plus memory. Rebuilt on every call so memory edits apply at once.
     pub system: String,
-    /// Recent turns that aifred stored. A backend uses them when it cannot
-    /// continue its own session.
+    /// The stored turns that `summary` does not cover, oldest first. A
+    /// backend uses them when it cannot continue its own session.
     pub history: Vec<Turn>,
+    /// A summary of the current conversation, if it has one. A backend sends
+    /// it with the recent turns when it cannot continue its own session.
+    pub summary: Option<String>,
     pub prompt: String,
     pub tools: Vec<ToolServer>,
     /// Backend-specific conversation id from the last answer, if any.
     pub session: Option<String>,
+    /// The model for this message, for example "sonnet". None: the backend's own default.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -73,4 +78,13 @@ pub trait Backend: Send + Sync {
         req: &AskRequest,
         on_event: OnEvent<'_>,
     ) -> impl std::future::Future<Output = anyhow::Result<AskResponse>> + Send;
+
+    /// One answer with no tools, no history, and no saved session. AIfred
+    /// uses it to write summaries. `model` None: the backend's own default.
+    fn complete(
+        &self,
+        system: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> impl std::future::Future<Output = anyhow::Result<String>> + Send;
 }

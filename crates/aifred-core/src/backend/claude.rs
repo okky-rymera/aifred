@@ -8,14 +8,15 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use super::{AskRequest, AskResponse, AskStats, Backend, Event, OnEvent};
 use crate::history::Turn;
 
-/// How many stored turns to replay when there is no session to resume.
-const REPLAY_TURNS: usize = 10;
+/// At most this many characters of stored turns go into a replay when there
+/// is no session to resume (about 25,000 tokens). The newest turns go first.
+const REPLAY_MAX_CHARS: usize = 100_000;
 
 pub struct ClaudeBackend {
     /// Folder the `claude` process runs in. It holds no project files, so no
@@ -43,6 +44,48 @@ impl Backend for ClaudeBackend {
             Err(e) => Err(e),
         }
     }
+
+    async fn complete(&self, system: &str, prompt: &str, model: Option<&str>) -> anyhow::Result<String> {
+        // Its own folder: an `ask` at the same time writes files into work_dir.
+        let dir = self.work_dir.join("once");
+        std::fs::create_dir_all(&dir)?;
+        let mut cmd = Command::new("claude");
+        // The prompt goes in through stdin. One command-line argument can
+        // hold at most 128 KiB on Linux, and a summary prompt can be larger.
+        cmd.current_dir(&dir)
+            .arg("-p")
+            .args(["--output-format", "json"])
+            // No tools at all: no built-in tools and no MCP servers.
+            .args(["--tools", ""])
+            .arg("--strict-mcp-config")
+            .args(["--permission-mode", "dontAsk"])
+            .args(["--setting-sources", "local"])
+            .arg("--system-prompt")
+            .arg(system)
+            // Do not save a session: this call is not a chat.
+            .arg("--no-session-persistence")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(m) = model.or(self.model.as_deref()) {
+            cmd.args(["--model", m]);
+        }
+        let mut child = cmd.spawn().context("cannot start `claude`. Is Claude Code installed?")?;
+        let writer = send_prompt(&mut child, prompt)?;
+        let out = child.wait_with_output().await?;
+        // Check the write last: when claude stops early, the write fails with
+        // "Broken pipe", and the real reason is in claude's own output.
+        let written = writer.await?;
+        let res: Value = serde_json::from_slice(&out.stdout).with_context(|| {
+            format!("claude ended without an answer (exit {}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim())
+        })?;
+        if res["is_error"].as_bool().unwrap_or(false) {
+            bail!("claude reported an error: {}", res["result"].as_str().unwrap_or(&res.to_string()));
+        }
+        written.context("cannot send the prompt to claude")?;
+        Ok(res["result"].as_str().unwrap_or_default().trim().to_string())
+    }
 }
 
 impl ClaudeBackend {
@@ -67,13 +110,14 @@ impl ClaudeBackend {
 
         let prompt = match resume {
             Some(_) => req.prompt.clone(),
-            None => with_replayed_history(&req.history, &req.prompt),
+            None => with_replayed_history(&req.history, req.summary.as_deref(), &req.prompt),
         };
 
         let mut cmd = Command::new("claude");
+        // The prompt goes in through stdin: a replay can be larger than the
+        // 128 KiB that one command-line argument can hold on Linux.
         cmd.current_dir(&self.work_dir)
             .arg("-p")
-            .arg(&prompt)
             .args(["--output-format", "stream-json", "--verbose"])
             // No built-in tools: no shell, no file access, no web.
             .args(["--tools", ""])
@@ -89,19 +133,21 @@ impl ClaudeBackend {
             .arg(&system_path)
             // Memory can change between turns. Do not freeze the prompt.
             .args(["--system-prompt-snapshot", "off"])
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(id) = resume {
             cmd.args(["--resume", id]);
         }
-        if let Some(m) = &self.model {
+        // The model that the user picked in the chat box, or AIFRED_MODEL.
+        if let Some(m) = req.model.as_deref().or(self.model.as_deref()) {
             cmd.args(["--model", m]);
         }
 
         let start = Instant::now();
         let mut child = cmd.spawn().context("cannot start `claude`. Is Claude Code installed?")?;
+        let writer = send_prompt(&mut child, &prompt)?;
         let stdout = child.stdout.take().context("no stdout")?;
         let mut lines = BufReader::new(stdout).lines();
 
@@ -134,6 +180,8 @@ impl ClaudeBackend {
         }
 
         let output = child.wait_with_output().await?;
+        // Check the write last, for the same reason as in `complete`.
+        let written = writer.await?;
         stats.total_ms = start.elapsed().as_millis();
         let Some(res) = result else {
             let err = String::from_utf8_lossy(&output.stderr);
@@ -142,6 +190,7 @@ impl ClaudeBackend {
         if res["is_error"].as_bool().unwrap_or(false) {
             bail!("claude reported an error: {}", res["result"].as_str().unwrap_or(&res.to_string()));
         }
+        written.context("cannot send the prompt to claude")?;
 
         stats.model_ms = res["duration_api_ms"].as_u64();
         stats.cost_usd = res["total_cost_usd"].as_f64();
@@ -151,6 +200,21 @@ impl ClaudeBackend {
             stats,
         })
     }
+}
+
+/// Writes the prompt to the child's stdin and then closes it, so `claude`
+/// knows that the prompt is complete. It runs in its own task: the child can
+/// write output before it reads all of stdin.
+fn send_prompt(
+    child: &mut tokio::process::Child,
+    prompt: &str,
+) -> anyhow::Result<tokio::task::JoinHandle<std::io::Result<()>>> {
+    let mut stdin = child.stdin.take().context("no stdin")?;
+    let bytes = prompt.as_bytes().to_vec();
+    Ok(tokio::spawn(async move {
+        stdin.write_all(&bytes).await?;
+        stdin.shutdown().await
+    }))
 }
 
 fn mcp_config(req: &AskRequest) -> Value {
@@ -166,16 +230,68 @@ fn mcp_config(req: &AskRequest) -> Value {
     json!({ "mcpServers": servers })
 }
 
-fn with_replayed_history(history: &[Turn], prompt: &str) -> String {
-    let recent = &history[history.len().saturating_sub(REPLAY_TURNS)..];
-    if recent.is_empty() {
+/// `history` holds the turns that the summary does not cover, oldest first.
+/// The newest of them go in, up to REPLAY_MAX_CHARS.
+fn with_replayed_history(history: &[Turn], summary: Option<&str>, prompt: &str) -> String {
+    let mut used = 0;
+    let mut from = history.len();
+    while from > 0 {
+        let len = history[from - 1].text.len();
+        if used + len > REPLAY_MAX_CHARS {
+            break;
+        }
+        used += len;
+        from -= 1;
+    }
+    let recent = &history[from..];
+    if recent.is_empty() && summary.is_none() {
         return prompt.to_string();
     }
-    let mut s = String::from("Earlier conversation (for context):\n");
+    let mut s = String::new();
+    // The summary keeps the main points of the turns before `history`.
+    if let Some(sum) = summary {
+        s.push_str(&format!("Summary of this conversation so far:\n{sum}\n\n"));
+    }
+    if from > 0 {
+        s.push_str(&format!("({from} older messages are not shown. Use search_history to find them.)\n\n"));
+    }
+    s.push_str("Earlier conversation (for context):\n");
     for t in recent {
         s.push_str(&format!("\n[{}]\n{}\n", t.role, t.text));
     }
     s.push_str("\n---\nNew message:\n");
     s.push_str(prompt);
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn turn(role: &str, text: &str) -> Turn {
+        Turn { ts: 1, role: role.into(), text: text.into(), backend: "claude".into() }
+    }
+
+    #[test]
+    fn a_lost_session_gets_the_summary_and_all_turns_after_it() {
+        let history: Vec<Turn> = (0..60).map(|i| turn("user", &format!("message {i}"))).collect();
+        let p = with_replayed_history(&history, Some("- The user plans a trip."), "Next?");
+        assert!(p.starts_with("Summary of this conversation so far:\n- The user plans a trip."), "{p}");
+        assert!(p.contains("message 0\n") && p.contains("message 59\n"), "no turn after the summary is lost");
+        assert!(!p.contains("older messages"));
+        assert!(p.ends_with("New message:\nNext?"));
+        assert_eq!(with_replayed_history(&[], None, "Hi"), "Hi");
+        assert!(with_replayed_history(&[], Some("- s"), "Hi").contains("- s"));
+    }
+
+    #[test]
+    fn a_replay_keeps_the_newest_turns_that_fit() {
+        let big = "x".repeat(REPLAY_MAX_CHARS / 2 - 10);
+        let mut history: Vec<Turn> = (0..3).map(|_| turn("user", &big)).collect();
+        history.push(turn("assistant", "the newest answer"));
+        let p = with_replayed_history(&history, None, "Next?");
+        assert!(p.contains("(1 older messages are not shown."), "{}", &p[..200]);
+        assert!(p.contains("the newest answer"));
+        assert!(p.len() < REPLAY_MAX_CHARS + 1000);
+    }
 }

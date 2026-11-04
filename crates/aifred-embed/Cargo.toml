@@ -1,0 +1,15 @@
+[package]
+name = "aifred-embed"
+version = "0.1.0"
+edition = "2024"
+
+# The meaning search helper. It is the only program that loads the model.
+# The app, the terminal commands, and the tool servers ask it over a local
+# socket (aifred-core/src/embed.rs). It stops itself when it is idle.
+
+[dependencies]
+anyhow = "1.0.104"
+# The model runs on the processor (no GPU). rustls: no system TLS library needed.
+fastembed = { version = "=7.5.0", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

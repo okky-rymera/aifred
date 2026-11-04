@@ -1,20 +1,17 @@
 //! The GitHub part of the to-do list. The sync goes one way only: AIfred reads
-//! GitHub and never changes it. The list is saved in the data folder as
-//! github-cache.json, so AIfred does not ask GitHub each time the window loads.
+//! GitHub and never changes it. The list is saved in the database (db.rs),
+//! so AIfred does not ask GitHub each time the window loads. An item that
+//! leaves the list stays in the database for search, marked as not in the list.
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use rusqlite::OptionalExtension;
+use serde::Serialize;
 
-use crate::files;
+use crate::db::{self, ListItem};
 use crate::github::{GithubItem, Link};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Cache {
-    /// Unix seconds. 0 means never.
-    fetched_at: u64,
-    items: Vec<GithubItem>,
-}
+const SOURCE: &str = "github";
 
 /// What the window shows.
 #[derive(Debug, Serialize)]
@@ -37,44 +34,98 @@ impl GithubStore {
         Self { dir: dir.into() }
     }
 
-    fn cache_path(&self) -> PathBuf {
-        self.dir.join("github-cache.json")
-    }
-
     /// The saved list, if it is younger than `max_age_secs`.
     /// None also when there is no saved list yet.
     /// Use u64::MAX to get the saved list at any age.
     pub fn cached(&self, max_age_secs: u64, now: u64) -> anyhow::Result<Option<GithubList>> {
-        let cache: Cache = files::load(&self.cache_path())?;
-        if cache.fetched_at == 0 || now.saturating_sub(cache.fetched_at) >= max_age_secs {
-            return Ok(None);
-        }
-        Ok(Some(view(cache)))
+        db::read(&self.dir, |c| {
+            let fetched_at: Option<u64> =
+                c.query_row("SELECT fetched_at FROM work_fetch WHERE source = ?1", [SOURCE], |r| r.get(0)).optional()?;
+            match fetched_at {
+                Some(f) if f != 0 && now.saturating_sub(f) < max_age_secs => {
+                    Ok(Some(view(db::list_data(c, SOURCE, None)?, f)))
+                }
+                _ => Ok(None),
+            }
+        })
     }
 
     /// Saves a new list from GitHub.
     ///
     /// GitHub did not send the links of the items in `no_links`. They get the
-    /// links from the saved list, so their rows do not change shape. The read
-    /// and the save hold the file lock, so a second fetch at the same time
+    /// links from the saved item, so their rows do not change shape. The read
+    /// and the save are one transaction, so a second fetch at the same time
     /// (the timer and the reload button) cannot mix old and new links.
     ///
-    /// A saved list that cannot be read counts as no saved links: the new list
-    /// from GitHub is more important. The save then repairs the file.
+    /// A saved item that cannot be read counts as no saved links: the new list
+    /// from GitHub is more important. The save then repairs the item.
     pub fn save_fetch(&self, mut items: Vec<GithubItem>, no_links: &[String], now: u64) -> anyhow::Result<GithubList> {
-        let path = self.cache_path();
-        let cache = files::locked(&path, || {
+        db::write(&self.dir, |tx| {
             if !no_links.is_empty() {
-                match files::load::<Cache>(&path) {
-                    Ok(saved) => keep_saved_links(&mut items, no_links, &saved),
-                    Err(e) => eprintln!("aifred: cannot use the saved GitHub links: {e:#}"),
+                let mut q = tx.prepare("SELECT data FROM work_item WHERE source = ?1 AND item_id = ?2")?;
+                for item in items.iter_mut().filter(|i| no_links.contains(&i.id)) {
+                    let Some(data) = q.query_row([SOURCE, &item.id], |r| r.get::<_, String>(0)).optional()? else {
+                        continue;
+                    };
+                    match serde_json::from_str::<GithubItem>(&data) {
+                        Ok(saved) => keep_saved_links(item, &saved),
+                        Err(e) => eprintln!("aifred: cannot use the saved GitHub links of {}: {e}", item.id),
+                    }
                 }
             }
-            let cache = Cache { fetched_at: now, items };
-            files::save(&path, &cache)?;
-            Ok(cache)
+            let rows = items
+                .iter()
+                .map(|i| {
+                    Ok(ListItem {
+                        id: i.id.clone(),
+                        title: i.title.clone(),
+                        place: i.repo.clone(),
+                        url: i.url.clone(),
+                        data: serde_json::to_string(i)?,
+                        details: i.body.clone(),
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            db::save_list(tx, SOURCE, "", &rows, &[], 0, now)
         })?;
-        Ok(view(cache))
+        Ok(view(items, now))
+    }
+
+    /// For the chat tools: downloads a new list when the saved one is older
+    /// than the tool age in the settings. Returns a note for the AI when that
+    /// fails: the tools then use the older saved list.
+    pub async fn refresh_if_old(&self) -> Option<String> {
+        let now = crate::files::now();
+        if let Ok(Some(_)) = self.cached(crate::settings::tool_max_age_secs(&self.dir), now) {
+            return None;
+        }
+        let fetched = match crate::github::my_items(&crate::github::owners_from_env()).await {
+            Ok(f) => f,
+            Err(e) => return Some(format!("Cannot reach GitHub, so the GitHub items come from the saved list. {e:#}")),
+        };
+        match self.save_fetch(fetched.items, &fetched.no_links, crate::files::now()) {
+            Ok(_) => None,
+            Err(e) => Some(format!("Cannot save the new GitHub list, so the GitHub items come from the saved list. {e:#}")),
+        }
+    }
+
+    /// Saved items with words of `query` in the title, the repository, or the
+    /// saved description, best match first. Items that left the list
+    /// (for example closed issues) only when `include_old` is true. A
+    /// non-empty `owners` (lowercase) keeps only the repositories of those owners.
+    pub fn search(
+        &self,
+        query: &str,
+        owners: &[String],
+        include_old: bool,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<db::WorkHit>> {
+        db::search_work(&self.dir, SOURCE, None, owners, query, include_old, limit)
+    }
+
+    /// Saves the description of item `id` ("owner/repo#number") for search.
+    pub fn save_details(&self, id: &str, details: &str) -> anyhow::Result<()> {
+        db::save_details(&self.dir, SOURCE, id, details)
     }
 
     /// Removes the files of the old "done" feature. AIfred does not change
@@ -92,17 +143,13 @@ impl GithubStore {
     }
 }
 
-fn keep_saved_links(items: &mut [GithubItem], ids: &[String], saved: &Cache) {
-    for item in items.iter_mut().filter(|i| ids.contains(&i.id)) {
-        if let Some(s) = saved.items.iter().find(|s| s.id == item.id) {
-            item.links = s.links.clone();
-            item.more_links = s.more_links;
-        }
-    }
+fn keep_saved_links(item: &mut GithubItem, saved: &GithubItem) {
+    item.links = saved.links.clone();
+    item.more_links = saved.more_links;
 }
 
-fn view(cache: Cache) -> GithubList {
-    GithubList { items: join_linked(cache.items), fetched_at: cache.fetched_at, warning: None }
+fn view(items: Vec<GithubItem>, fetched_at: u64) -> GithubList {
+    GithubList { items: join_linked(items), fetched_at, warning: None }
 }
 
 /// Shows an issue and the pull requests that close it as one row.
@@ -191,6 +238,7 @@ mod tests {
             updated: "2026-10-01T10:00:00Z".into(),
             links: Vec::new(),
             more_links: false,
+            body: None,
         }
     }
 
@@ -319,12 +367,75 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_saved_list_does_not_stop_a_new_fetch() {
+    fn a_broken_saved_item_does_not_stop_a_new_fetch() {
         let (s, d) = store("broken");
-        std::fs::write(d.join("github-cache.json"), b"{ half a fi").unwrap();
-        let l = s.save_fetch(vec![item(1)], &["acme/shop#1".into()], 1000).unwrap();
+        s.save_fetch(vec![item(1)], &[], 1000).unwrap();
+        db::write(&d, |tx| Ok(tx.execute("UPDATE work_item SET data = '{ half'", [])?)).unwrap();
+        let l = s.save_fetch(vec![item(1)], &["acme/shop#1".into()], 2000).unwrap();
         assert_eq!(ids(&l.items), vec![1]);
-        assert_eq!(ids(&s.cached(u64::MAX, 1000).unwrap().unwrap().items), vec![1], "the file is repaired");
+        assert_eq!(ids(&s.cached(u64::MAX, 2000).unwrap().unwrap().items), vec![1], "the item is repaired");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn search_finds_saved_items_and_old_ones_only_when_asked() {
+        let (s, d) = store("search");
+        let mut a = item(1);
+        a.title = "Fix the checkout button".into();
+        let mut b = item(2);
+        b.title = "Update docs".into();
+        s.save_fetch(vec![a, b], &[], 1000).unwrap();
+        s.save_details("acme/shop#2", "The checkout page needs a new screenshot.").unwrap();
+        let found = |q: &str, old: bool| -> Vec<u64> {
+            s.search(q, &[], old, None).unwrap().iter().map(|h| h.item["number"].as_u64().unwrap()).collect()
+        };
+        assert_eq!(found("checkout", false), vec![1, 2], "the title counts more than the description");
+        assert_eq!(found("acme", false).len(), 2, "the repository is searched");
+        s.save_fetch(vec![item(2)], &[], 2000).unwrap();
+        assert_eq!(found("checkout button", false), vec![2], "item 1 left the list");
+        let hits = s.search("button", &[], true, None).unwrap();
+        assert_eq!((hits[0].in_list, hits[0].last_seen), (false, 1000));
+        let v = s.search("button", &[], true, None).unwrap().remove(0).into_json();
+        assert_eq!((v["number"].as_u64(), v["in_list"].as_bool(), v["last_seen"].as_u64()), (Some(1), Some(false), Some(1000)));
+        assert_eq!(found("screenshot", false), vec![2], "a new download keeps the description");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_owner_limit_does_not_use_up_result_slots() {
+        // The best word matches are from another owner. With limit 2, a
+        // filter after the search would give back nothing.
+        let (s, d) = store("owners");
+        let mut items: Vec<GithubItem> = (1..=3)
+            .map(|n| GithubItem {
+                id: format!("other/shop#{n}"),
+                repo: "other/shop".into(),
+                title: "Checkout checkout checkout".into(),
+                ..item(n)
+            })
+            .collect();
+        let mut ours = item(9);
+        ours.title = "Fix the checkout page".into();
+        items.push(ours);
+        s.save_fetch(items, &[], 1000).unwrap();
+        let hits = s.search("checkout", &["acme".into()], false, Some(2)).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].item["id"], "acme/shop#9");
+        assert_eq!(s.search("checkout", &[], false, Some(10)).unwrap().len(), 4, "no limit: all owners");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_item_that_leaves_the_list_is_kept_for_search() {
+        let (s, d) = store("kept");
+        s.save_fetch(vec![item(1), item(2)], &[], 1000).unwrap();
+        s.save_fetch(vec![item(2)], &[], 2000).unwrap();
+        let rows: Vec<(String, bool, i64, i64)> = db::read(&d, |c| {
+            let mut q = c.prepare("SELECT item_id, in_list, first_seen, last_seen FROM work_item ORDER BY item_id")?;
+            Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?)
+        })
+        .unwrap();
+        assert_eq!(rows, vec![("acme/shop#1".into(), false, 1000, 1000), ("acme/shop#2".into(), true, 1000, 2000)]);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

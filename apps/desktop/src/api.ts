@@ -12,13 +12,41 @@ export type Answer = {
   stats: { startup_ms: number; total_ms: number; tool_calls: string[] };
   model_ms: number | null;
   cost_usd: number | null;
+  /** Facts from memory that the app added to the question, because they match it. */
+  memory: string[];
+  /** The model you picked for this message. null: the default model. */
+  model: string | null;
 };
+
+/** The models that the chat box offers. null is the default model. */
+export const CHAT_MODELS: { id: string | null; label: string; hint: string }[] = [
+  { id: null, label: "Default", hint: "The Claude Code default model, or AIFRED_MODEL" },
+  { id: "fable", label: "Fable", hint: "The most careful model. The slowest." },
+  { id: "opus", label: "Opus", hint: "Very careful. Slow." },
+  { id: "sonnet", label: "Sonnet", hint: "Careful and faster" },
+  { id: "haiku", label: "Haiku", hint: "The fastest. Good for short questions." },
+];
 
 export type Info = {
   data_dir: string;
   backend: string;
   github_owners: string | null;
   api_key_set: boolean;
+  /** "on", "starting", or "off" with the reason. */
+  meaning_search: string;
+};
+
+/** One fact that AIfred knows about you. */
+export type Fact = {
+  id: number;
+  text: string;
+  /** True: the fact goes into every message. False: AIfred finds it with a search. */
+  core: boolean;
+  added_by: "you" | "aifred";
+  created: number;
+  updated: number;
+  /** When the fact was forgotten, in Unix seconds. null for a fact in use. */
+  forgotten: number | null;
 };
 
 export type Task = {
@@ -112,11 +140,17 @@ export function ask(prompt: string, onEvent: (e: ProgressEvent) => void): Promis
 }
 
 export const history = () => invoke<Turn[]>("history");
-export const getMemory = () => invoke<string>("get_memory");
-export const setMemory = (text: string) => invoke<void>("set_memory", { text });
+/** All facts: the ones in use, then the forgotten ones. */
+export const memoryFacts = () => invoke<Fact[]>("memory_facts");
+export const addFact = (text: string) => invoke<Fact>("add_fact", { text });
+export const editFact = (id: number, text: string) => invoke<Fact>("edit_fact", { id, text });
+export const setFactCore = (id: number, core: boolean) => invoke<Fact>("set_fact_core", { id, core });
+export const forgetFact = (id: number) => invoke<Fact>("forget_fact", { id });
+export const restoreFact = (id: number) => invoke<Fact>("restore_fact", { id });
 export const newConversation = () => invoke<void>("new_conversation");
 export const tasks = () => invoke<Task[]>("tasks");
-export const addTask = (title: string) => invoke<Task>("add_task", { title });
+/** notes: the optional description. */
+export const addTask = (title: string, notes = "") => invoke<Task>("add_task", { title, notes });
 export const setTaskDone = (id: string, done: boolean) => invoke<Task>("set_task_done", { id, done });
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
 /** force: ask GitHub now, and do not use the saved list. */
@@ -130,6 +164,11 @@ export const clickupTokenStatus = () => invoke<ClickupTokenStatus>("clickup_toke
 /** Checks the token with ClickUp and saves it. Returns your ClickUp user name. */
 export const setClickupToken = (token: string) => invoke<string>("set_clickup_token", { token });
 export const removeClickupToken = () => invoke<void>("remove_clickup_token");
+/** The model you picked last in the chat box. null: the default model. */
+export const chatModel = () => invoke<string | null>("chat_model");
+export const setChatModel = (model: string | null) => invoke<void>("set_chat_model", { model });
+/** Changes the title and the description of a local task. */
+export const editTask = (id: string, title: string, notes: string) => invoke<Task>("edit_task", { id, title, notes });
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");

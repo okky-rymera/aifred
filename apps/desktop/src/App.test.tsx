@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import { answer, clickupItem, deferred, fakeBackend, githubItem, task } from "./test/fakeBackend";
+import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, task } from "./test/fakeBackend";
 import type { Answer } from "./api";
 
 const panel = () => screen.queryByRole("complementary", { name: "Conversation" });
@@ -34,6 +34,29 @@ describe("home page", () => {
     });
     await userEvent.click(screen.getByRole("button", { name: /Continue the conversation \(2 messages\)/ }));
     expect(within(panel()!).getByText("Hello!")).toBeInTheDocument();
+  });
+});
+
+describe("the model picker", () => {
+  it("shows the model you picked last and uses it for the next message", async () => {
+    const fake = await startApp({ chatModel: "sonnet" });
+    const picker = await screen.findByRole("combobox", { name: "Model" });
+    await waitFor(() => expect(picker).toHaveValue("sonnet"));
+    await userEvent.selectOptions(picker, "haiku");
+    expect(fake.chatModel).toBe("haiku");
+    await userEvent.type(screen.getByPlaceholderText("Ask AIfred anything about your work…"), "hi{Enter}");
+    expect(await within(panel()!).findByText(/^1\.5s · Haiku/)).toBeInTheDocument();
+    // The chat panel has its own box with the same pick.
+    expect(within(panel()!).getByRole("combobox", { name: "Model" })).toHaveValue("haiku");
+    await userEvent.selectOptions(within(panel()!).getByRole("combobox", { name: "Model" }), "");
+    expect(fake.chatModel).toBeNull();
+  });
+
+  it("goes back to the old pick when the save fails", async () => {
+    await startApp({ fail: { set_chat_model: "the database is locked" } });
+    const picker = await screen.findByRole("combobox", { name: "Model" });
+    await userEvent.selectOptions(picker, "opus");
+    await waitFor(() => expect(picker).toHaveValue(""));
   });
 });
 
@@ -149,26 +172,90 @@ describe("closing the chat panel", () => {
   });
 });
 
-describe("memory editor", () => {
-  it("saves what AIfred knows about you", async () => {
-    const fake = await startApp({ memory: "- I work on StoreAgent." });
-    await userEvent.click(screen.getByRole("button", { name: /What AIfred knows about you/ }));
-    const box = screen.getByDisplayValue("- I work on StoreAgent.");
-    await userEvent.type(box, "\n- I like short answers.");
-    await userEvent.click(screen.getByRole("button", { name: "Save memory" }));
-    await screen.findByRole("button", { name: "Saved" });
-    expect(fake.memory).toBe("- I work on StoreAgent.\n- I like short answers.");
+describe("memory list", () => {
+  const openMemory = () => userEvent.click(screen.getByRole("button", { name: /What AIfred knows about you/ }));
+
+  it("adds a fact that goes into every message", async () => {
+    const fake = await startApp({ memory: [fact("I work on StoreAgent.")] });
+    await openMemory();
+    expect(screen.getByText("I work on StoreAgent.")).toBeInTheDocument();
+    await userEvent.type(screen.getByPlaceholderText("Add a fact and press Enter"), "I like short answers.{Enter}");
+    expect(await screen.findByText("I like short answers.")).toBeInTheDocument();
+    expect(fake.memory.map((f) => [f.text, f.core])).toEqual([
+      ["I work on StoreAgent.", true],
+      ["I like short answers.", true],
+    ]);
+    expect(screen.getByPlaceholderText("Add a fact and press Enter")).toHaveValue("");
+  });
+
+  it("edits a fact and turns off 'Always'", async () => {
+    const fake = await startApp({ memory: [fact("Tea, no sugar")] });
+    await openMemory();
+    await userEvent.click(screen.getByText("Tea, no sugar"));
+    const box = screen.getByLabelText("Fact text");
+    await userEvent.clear(box);
+    await userEvent.type(box, "Green tea, no sugar{Enter}");
+    expect(await screen.findByText("Green tea, no sugar")).toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("Always use: Green tea, no sugar"));
+    await waitFor(() => expect(fake.memory[0].core).toBe(false));
+    expect(fake.memory[0].text).toBe("Green tea, no sugar");
+  });
+
+  it("starts the edit box with the saved text, so an unchanged fact is not saved again", async () => {
+    const fake = await startApp({ memory: [fact("Tea")] });
+    await openMemory();
+    await userEvent.click(screen.getByText("Tea"));
+    const box = screen.getByLabelText("Fact text");
+    await userEvent.clear(box);
+    // The backend joins the two lines into "likes tea".
+    await userEvent.type(box, "likes{Shift>}{Enter}{/Shift} tea{Enter}");
+    expect(await screen.findByText("likes tea")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("likes tea"));
+    expect(screen.getByLabelText("Fact text")).toHaveValue("likes tea");
+    await userEvent.tab();
+    expect(fake.calls.filter((c) => c.cmd === "edit_fact")).toHaveLength(1);
+  });
+
+  it("forgets a fact and restores it", async () => {
+    const fake = await startApp({ memory: [fact("Old job at Acme", { added_by: "aifred" })] });
+    await openMemory();
+    expect(screen.getByText("by AIfred")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Forget: Old job at Acme" }));
+    await userEvent.click(await screen.findByRole("button", { name: /Forgotten \(1\)/ }));
+    expect(fake.memory[0].forgotten).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Restore: Old job at Acme" }));
+    expect(await screen.findByRole("button", { name: "Forget: Old job at Acme" })).toBeInTheDocument();
+    expect(fake.memory[0].forgotten).toBeNull();
+  });
+
+  it("shows the facts that the app added to a question", async () => {
+    await startApp({ onAsk: () => answer("It comes on the 1st.", { memory: ["Sam sends the hosting invoice"] }) });
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "When is the invoice?{Enter}");
+    const side = panel()!;
+    await userEvent.click(await within(side).findByText("Used 1 fact from memory"));
+    expect(within(side).getByText("Sam sends the hosting invoice")).toBeVisible();
+  });
+
+  it("shows a fact that AIfred added in the chat", async () => {
+    const fake = await startApp({
+      onAsk: () => {
+        fake.memory.push(fact("Sam sends the invoices", { core: false, added_by: "aifred" }));
+        return answer("Noted.");
+      },
+    });
+    await openMemory();
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Sam sends the invoices{Enter}");
+    expect(await screen.findByText("Sam sends the invoices", { selector: "button" })).toBeInTheDocument();
   });
 });
 
 describe("errors the window must show", () => {
-  it("a failed memory save says so and keeps the edit", async () => {
-    await startApp({ memory: "", fail: { set_memory: "read-only folder" } });
+  it("a failed memory save says so and keeps the text", async () => {
+    await startApp({ fail: { add_fact: "database is locked" } });
     await userEvent.click(screen.getByRole("button", { name: /What AIfred knows about you/ }));
-    await userEvent.type(screen.getByPlaceholderText(/StoreAgent/), "- Note");
-    await userEvent.click(screen.getByRole("button", { name: "Save memory" }));
-    expect(await screen.findByText("Not saved: read-only folder")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save memory" })).toBeEnabled();
+    await userEvent.type(screen.getByPlaceholderText("Add a fact and press Enter"), "Note{Enter}");
+    expect(await screen.findByText("Not saved: database is locked")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Add a fact and press Enter")).toHaveValue("Note");
   });
 
   it("a task file that cannot load shows the reason, not an empty list", async () => {

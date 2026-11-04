@@ -30,6 +30,11 @@ pub struct GithubItem {
     /// issue, because the missing links would show nowhere.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub more_links: bool,
+    /// The description from the search. It goes into the details column of
+    /// the database (db.rs), not into the saved item, so the window and the
+    /// list tools do not get it.
+    #[serde(skip)]
+    pub body: Option<String>,
 }
 
 /// An issue or pull request that is linked to a list item.
@@ -90,6 +95,8 @@ struct Raw {
     url: String,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -125,7 +132,7 @@ fn search_args(kind: &str, filter: &str, owners: &[String]) -> Vec<String> {
         "--limit",
         &SEARCH_LIMIT.to_string(),
         "--json",
-        "id,repository,number,title,url,updatedAt",
+        "id,repository,number,title,url,updatedAt,body",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -161,6 +168,7 @@ fn parse(json: &[u8], reason: &str) -> anyhow::Result<Vec<Found>> {
                 updated: r.updated_at,
                 links: Vec::new(),
                 more_links: false,
+                body: r.body,
             };
             (r.id, item)
         })

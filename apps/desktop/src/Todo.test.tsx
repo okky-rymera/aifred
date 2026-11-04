@@ -195,4 +195,60 @@ describe("TodoList", () => {
     await userEvent.click(screen.getByTitle("Reload the list"));
     expect(onRefresh).toHaveBeenCalledOnce();
   });
+  it("adds a task with an optional description", async () => {
+    const fake = fakeBackend();
+    show([]);
+    expect(screen.queryByRole("textbox", { name: "New task description" })).not.toBeInTheDocument();
+    await userEvent.type(screen.getByPlaceholderText("+ Add a task and press Enter"), "Pay rent");
+    await userEvent.type(screen.getByRole("textbox", { name: "New task description" }), "Before Friday{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(fake.tasks).toHaveLength(1));
+    expect(fake.tasks[0]).toMatchObject({ title: "Pay rent", notes: "Before Friday" });
+  });
+
+  it("changes the title and the description of a task", async () => {
+    const t = task("Call Sam", { notes: "About the invoice" });
+    const fake = fakeBackend({ tasks: [t] });
+    const { onChange } = show([t]);
+    expect(screen.getByText("About the invoice")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Call Sam"));
+    const title = screen.getByRole("textbox", { name: "Task title" });
+    await userEvent.clear(title);
+    await userEvent.type(title, "Call Sam today");
+    const notes = screen.getByRole("textbox", { name: "Task description" });
+    await userEvent.clear(notes);
+    await userEvent.type(notes, "Ask about the{Shift>}{Enter}{/Shift}second invoice");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    expect(fake.tasks[0]).toMatchObject({ title: "Call Sam today", notes: "Ask about the\nsecond invoice" });
+    expect(screen.queryByRole("textbox", { name: "Task title" })).not.toBeInTheDocument();
+  });
+
+  it("Escape stops an edit and changes nothing", async () => {
+    const t = task("Call Sam");
+    const fake = fakeBackend({ tasks: [t] });
+    show([t]);
+    await userEvent.click(screen.getByText("Call Sam"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Task title" }), " later{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Task title" })).not.toBeInTheDocument();
+    expect(fake.tasks[0].title).toBe("Call Sam");
+    expect(fake.calls.some((c) => c.cmd === "edit_task")).toBe(false);
+  });
+
+  it("keeps an edit in progress when the list loads again with a changed task", async () => {
+    const t = task("Call Sam", { notes: "About the invoice" });
+    fakeBackend({ tasks: [t] });
+    const props = { github: [], githubState: "ok", onChange: vi.fn(), onRefresh: vi.fn() };
+    const { rerender } = render(<TodoList tasks={[t]} {...props} />);
+    await userEvent.click(screen.getByText("Call Sam"));
+    const notes = screen.getByRole("textbox", { name: "Task description" });
+    await userEvent.type(notes, " and the receipt");
+    // The list loads again: the task changed in another place.
+    const changed = { ...t, title: "Call Sam now" };
+    rerender(<TodoList tasks={[changed]} {...props} />);
+    expect(screen.getByRole("textbox", { name: "Task description" })).toHaveValue("About the invoice and the receipt");
+    // After Cancel, the row shows the new title, and a new edit starts from it.
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await userEvent.click(screen.getByText("Call Sam now"));
+    expect(screen.getByRole("textbox", { name: "Task title" })).toHaveValue("Call Sam now");
+  });
 });

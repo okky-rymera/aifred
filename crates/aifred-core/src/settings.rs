@@ -57,6 +57,48 @@ pub fn max_age_secs(dir: &Path) -> u64 {
     if minutes == 0 { u64::MAX } else { u64::from(minutes) * 60 }
 }
 
+/// The oldest saved list that the chat tools use when the user reloads only
+/// by hand (refresh time 0). The chat must not plan a day from a week-old list.
+pub const TOOL_MANUAL_MAX_AGE_SECS: u64 = 15 * 60;
+
+/// How old, in seconds, a saved list can be for the GitHub and ClickUp chat
+/// tools. The same as max_age_secs, but never more than
+/// TOOL_MANUAL_MAX_AGE_SECS when the user reloads only by hand.
+pub fn tool_max_age_secs(dir: &Path) -> u64 {
+    match max_age_secs(dir) {
+        u64::MAX => TOOL_MANUAL_MAX_AGE_SECS,
+        secs => secs,
+    }
+}
+
+/// The models that the chat box offers. The `claude` program knows these
+/// short names and always uses the newest model of each family.
+pub const CHAT_MODELS: &[&str] = &["fable", "opus", "sonnet", "haiku"];
+
+/// The model that the user picked last in the chat box, or None for the
+/// default (AIFRED_MODEL, or the Claude Code default). It is in the database
+/// and not in settings.json: the Settings page saves settings.json as a whole,
+/// and an open Settings page must not put back an older model.
+pub fn chat_model(dir: &Path) -> anyhow::Result<Option<String>> {
+    crate::db::read(dir, |c| crate::db::meta(c, "chat_model"))
+}
+
+/// Saves the model for the next messages. None goes back to the default.
+pub fn set_chat_model(dir: &Path, model: Option<&str>) -> anyhow::Result<()> {
+    if let Some(m) = model
+        && !CHAT_MODELS.contains(&m)
+    {
+        bail!("unknown model \"{m}\". Use one of: {}", CHAT_MODELS.join(", "));
+    }
+    crate::db::write(dir, |tx| {
+        match model {
+            Some(m) => tx.execute("INSERT INTO meta (key, value) VALUES ('chat_model', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1", [m])?,
+            None => tx.execute("DELETE FROM meta WHERE key = 'chat_model'", [])?,
+        };
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +125,33 @@ mod tests {
         std::fs::write(d.join("settings.json"), r#"{"github_refresh_minutes":45}"#).unwrap();
         assert_eq!(load(&d).unwrap().refresh_minutes, 45);
         assert_eq!(max_age_secs(&d), 45 * 60);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_chat_tools_never_use_a_list_older_than_15_minutes_in_manual_mode() {
+        let d = temp("tool-age");
+        save(&d, &Settings { refresh_minutes: 0 }).unwrap();
+        assert_eq!(max_age_secs(&d), u64::MAX, "the window keeps its list");
+        assert_eq!(tool_max_age_secs(&d), 15 * 60);
+        save(&d, &Settings { refresh_minutes: 45 }).unwrap();
+        assert_eq!(tool_max_age_secs(&d), 45 * 60);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_chat_model_is_kept_and_an_unknown_model_is_refused() {
+        let d = temp("chat-model");
+        assert_eq!(chat_model(&d).unwrap(), None, "the default at first");
+        set_chat_model(&d, Some("sonnet")).unwrap();
+        assert_eq!(chat_model(&d).unwrap().as_deref(), Some("sonnet"));
+        assert!(set_chat_model(&d, Some("gpt-4")).is_err());
+        assert_eq!(chat_model(&d).unwrap().as_deref(), Some("sonnet"), "a bad name changes nothing");
+        // A save on the Settings page does not touch the model.
+        save(&d, &Settings { refresh_minutes: 30 }).unwrap();
+        assert_eq!(chat_model(&d).unwrap().as_deref(), Some("sonnet"));
+        set_chat_model(&d, None).unwrap();
+        assert_eq!(chat_model(&d).unwrap(), None);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

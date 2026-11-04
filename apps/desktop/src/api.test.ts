@@ -10,15 +10,23 @@ describe("command wrappers", () => {
     const t = await api.addTask("Call Sam");
     await api.setTaskDone(t.id, true);
     await api.deleteTask(t.id);
-    await api.setMemory("- likes tea");
+    const f = await api.addFact("likes tea");
+    await api.editFact(f.id, "likes green tea");
+    await api.setFactCore(f.id, false);
+    await api.forgetFact(f.id);
+    await api.restoreFact(f.id);
     await api.githubItems(true);
     await api.getSettings();
     await api.setSettings({ refresh_minutes: 30 });
     expect(fake.calls).toEqual([
-      { cmd: "add_task", args: { title: "Call Sam" } },
+      { cmd: "add_task", args: { title: "Call Sam", notes: "" } },
       { cmd: "set_task_done", args: { id: t.id, done: true } },
       { cmd: "delete_task", args: { id: t.id } },
-      { cmd: "set_memory", args: { text: "- likes tea" } },
+      { cmd: "add_fact", args: { text: "likes tea" } },
+      { cmd: "edit_fact", args: { id: f.id, text: "likes green tea" } },
+      { cmd: "set_fact_core", args: { id: f.id, core: false } },
+      { cmd: "forget_fact", args: { id: f.id } },
+      { cmd: "restore_fact", args: { id: f.id } },
       { cmd: "github_items", args: { force: true } },
       { cmd: "get_settings", args: {} },
       { cmd: "set_settings", args: { settings: { refresh_minutes: 30 } } },

@@ -134,6 +134,11 @@ pub struct ClickupItem {
     pub due: Option<u64>,
     /// Unix milliseconds.
     pub updated: u64,
+    /// The description as plain text. It goes into the details column of the
+    /// database (db.rs), not into the saved item, so the window and the list
+    /// tools do not get it.
+    #[serde(skip)]
+    pub description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +164,10 @@ struct RawTask {
     due_date: Option<String>,
     #[serde(default)]
     date_updated: Option<String>,
+    #[serde(default)]
+    text_content: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -214,9 +223,17 @@ fn parse_tasks(json: &[u8], workspace: &str) -> anyhow::Result<(Vec<ClickupItem>
             priority: t.priority.map(|p| p.priority),
             due: millis(t.due_date.as_deref()),
             updated: millis(t.date_updated.as_deref()).unwrap_or_default(),
+            description: Some(description_text(t.text_content.as_deref(), t.description.as_deref())),
         })
         .collect();
     Ok((items, last))
+}
+
+/// The description that AIfred saves: the plain text, or else the
+/// description field. The list download and the task_details tool both use
+/// it, so the saved text (and its summary) does not change between them.
+pub fn description_text(text_content: Option<&str>, description: Option<&str>) -> String {
+    text_content.filter(|t| !t.trim().is_empty()).or(description).unwrap_or_default().trim().to_string()
 }
 
 #[derive(Deserialize)]

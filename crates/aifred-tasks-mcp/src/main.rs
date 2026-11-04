@@ -1,10 +1,13 @@
 //! Local task tools for aifred, served over MCP (stdio).
 //!
-//! These tools only touch tasks.json in the aifred data folder
-//! ($AIFRED_HOME, or ~/.aifred). They cannot reach any other file.
+//! These tools only change the tasks in the aifred database
+//! ($AIFRED_HOME/aifred.db, or ~/.aifred/aifred.db). They cannot reach any other file.
+//!
+//! The overview tool also reads the saved GitHub and ClickUp lists in the same
+//! database. It downloads a new list first when the saved one is too old.
 
-use aifred_core::default_data_dir;
 use aifred_core::tasks::TaskStore;
+use aifred_core::{clickup, default_data_dir, github_list::GithubStore, overview};
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
@@ -24,6 +27,16 @@ struct TaskTools {
 struct ListArgs {
     /// Also include tasks that are done. Default false.
     include_done: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SearchArgs {
+    /// Words to find in the task title and notes. Example: "invoice Sam".
+    query: String,
+    /// Also include tasks that are done. Default false.
+    include_done: Option<bool>,
+    /// Maximum number of tasks to return (1-50). Default 10.
+    limit: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -57,11 +70,30 @@ impl TaskTools {
 
 #[tool_router]
 impl TaskTools {
+    #[tool(description = "Everything on the user's plate in one call: the open local to-do tasks, the open GitHub items (assigned issues, review requests, and the user's own pull requests), and the open ClickUp tasks. Each item has a short summary of its description. Use this first when the user asks what to do, what is open, or for a plan. Then use item_details or task_details only for the few items that need a closer look. fetched_at is when each list came from GitHub or ClickUp (Unix seconds).")]
+    async fn overview(&self) -> Result<CallToolResult, ErrorData> {
+        // Both downloads at the same time: each can take some seconds.
+        let gh = GithubStore::new(&self.dir);
+        let (gh_note, cu_note) = tokio::join!(gh.refresh_if_old(), aifred_core::clickup_list::refresh_if_old(&self.dir));
+        let account = clickup::token(&self.dir).map(|t| clickup::account_key(&t));
+        let mut out = overview::build(&self.dir, account.as_deref()).map_err(fail)?;
+        let notes: Vec<String> = [gh_note, cu_note].into_iter().flatten().collect();
+        if !notes.is_empty() {
+            out["notes"] = notes.into();
+        }
+        json(&out)
+    }
+
     #[tool(description = "List the user's local to-do tasks (not GitHub or ClickUp items).")]
     async fn list_tasks(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, ErrorData> {
         let all = self.store().load().map_err(fail)?;
         let keep_done = a.include_done.unwrap_or(false);
         json(&all.into_iter().filter(|t| keep_done || !t.done).collect::<Vec<_>>())
+    }
+
+    #[tool(description = "Search the user's local to-do tasks by words in the title and notes, best match first. A task matches when it has any of the words, also other forms of a word (\"invoices\" finds \"invoice\").")]
+    async fn search_tasks(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
+        json(&self.store().search(&a.query, a.include_done.unwrap_or(false), a.limit).map_err(fail)?)
     }
 
     #[tool(description = "Add a task to the user's local to-do list. Use it when the user asks you to note, remember to do, or track something.")]
@@ -147,6 +179,22 @@ mod tests {
         let done = body(t.complete_task(Parameters(IdArgs { id: a.id.clone() })).await.unwrap());
         assert_eq!(done["done"], true);
         assert!(t.complete_task(Parameters(IdArgs { id: "nope".into() })).await.is_err());
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_tasks_finds_words_and_hides_done_tasks() {
+        let t = tools("search");
+        let s = t.store();
+        let a = s.add("Pay the invoice", "", "you").unwrap();
+        s.add("Buy milk", "", "you").unwrap();
+        let args = |done| Parameters(SearchArgs { query: "invoices".into(), include_done: done, limit: None });
+        let found = body(t.search_tasks(args(None)).await.unwrap());
+        assert_eq!(found.as_array().unwrap().len(), 1);
+        assert_eq!(found[0]["id"], a.id.as_str());
+        s.set_done(&a.id, true).unwrap();
+        assert!(body(t.search_tasks(args(None)).await.unwrap()).as_array().unwrap().is_empty());
+        assert_eq!(body(t.search_tasks(args(Some(true))).await.unwrap()).as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 

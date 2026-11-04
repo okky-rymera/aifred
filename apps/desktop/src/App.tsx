@@ -5,11 +5,14 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
 import { TodoList } from "./Todo";
 import { SettingsPage } from "./Settings";
+import { MemoryList } from "./Memory";
 
 type Message = {
   role: "user" | "assistant" | "error";
   text: string;
   meta?: string;
+  /** Facts from memory that the app added to the question. */
+  facts?: string[];
 };
 
 const BRIEF_PROMPT =
@@ -21,15 +24,47 @@ const SUGGESTIONS = [
   { label: "Plan my day", prompt: "Look at my to-do list, GitHub items, and ClickUp tasks. Suggest an order for today." },
 ];
 
+function modelLabel(id: string | null): string {
+  return api.CHAT_MODELS.find((m) => m.id === id)?.label ?? id ?? "Default";
+}
+
 function formatMeta(a: api.Answer): string {
   const parts = [`${(a.stats.total_ms / 1000).toFixed(1)}s`];
+  if (a.model) parts.push(modelLabel(a.model));
   const n = a.stats.tool_calls.length;
   if (n) parts.push(`${n} lookup${n === 1 ? "" : "s"}`);
   if (a.cost_usd != null) parts.push(`~$${a.cost_usd.toFixed(3)} usage`);
   return parts.join(" · ");
 }
 
-function ChatInput(props: { busy: boolean; onSend: (text: string) => void; big?: boolean; autoFocus?: boolean }) {
+/** Picks the model for the next messages. The app remembers the last pick. */
+function ModelPicker(props: { model: string | null; onChange: (model: string | null) => void; disabled?: boolean }) {
+  return (
+    <select
+      aria-label="Model"
+      title={api.CHAT_MODELS.find((m) => m.id === props.model)?.hint}
+      value={props.model ?? ""}
+      disabled={props.disabled}
+      onChange={(e) => props.onChange(e.target.value || null)}
+      className="h-10 rounded-xl border border-stone-300 bg-white px-2 text-xs text-stone-600 outline-none focus:border-amber-500 disabled:opacity-40 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+    >
+      {api.CHAT_MODELS.map((m) => (
+        <option key={m.id ?? ""} value={m.id ?? ""} title={m.hint}>
+          {m.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function ChatInput(props: {
+  busy: boolean;
+  onSend: (text: string) => void;
+  big?: boolean;
+  autoFocus?: boolean;
+  model: string | null;
+  onModel: (model: string | null) => void;
+}) {
   const [input, setInput] = useState("");
   function send() {
     if (!input.trim() || props.busy) return;
@@ -54,6 +89,7 @@ function ChatInput(props: { busy: boolean; onSend: (text: string) => void; big?:
           props.big ? "py-3 text-[15px] shadow-sm" : "py-2.5 text-sm"
         }`}
       />
+      <ModelPicker model={props.model} onChange={props.onModel} disabled={props.busy} />
       <button
         onClick={send}
         disabled={props.busy || !input.trim()}
@@ -71,15 +107,14 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [info, setInfo] = useState<api.Info | null>(null);
-  const [memory, setMemory] = useState("");
-  const [memorySaved, setMemorySaved] = useState(true);
+  const [facts, setFacts] = useState<api.Fact[]>([]);
   const [showMemory, setShowMemory] = useState(false);
   const [tasks, setTasks] = useState<api.Task[]>([]);
   const [tasksError, setTasksError] = useState("");
-  const [memoryError, setMemoryError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [github, setGithub] = useState<api.GithubList>({ items: [], fetched_at: 0 });
   const [settings, setSettings] = useState<api.Settings | null>(null);
+  const [model, setModel] = useState<string | null>(null);
   const [page, setPage] = useState<"home" | "settings">("home");
   const [githubState, setGithubState] = useState("loading");
   const [clickup, setClickup] = useState<api.ClickupList>({ items: [], fetched_at: 0 });
@@ -164,7 +199,7 @@ export default function App() {
       .then((turns) => setMessages(turns.map((t) => ({ role: t.role, text: t.text }))))
       .catch(failed("the conversation"));
     api.info().then(setInfo).catch(failed("app info"));
-    api.getMemory().then(setMemory).catch(failed("memory"));
+    api.memoryFacts().then(setFacts).catch(failed("memory"));
     api
       .getSettings()
       .then(setSettings)
@@ -172,6 +207,7 @@ export default function App() {
         failed("settings")(e);
         setSettings({ refresh_minutes: 15 });
       });
+    api.chatModel().then(setModel).catch(failed("the chat model"));
     loadTasks();
     loadGithub(false);
     checkClickup(false);
@@ -188,6 +224,14 @@ export default function App() {
     return () => clearInterval(timer);
   }, [refreshMinutes, loadGithub, loadClickup, clickupOn]);
 
+  // The first start downloads the meaning search model. Check again until it is ready.
+  const meaningStarting = info?.meaning_search === "starting";
+  useEffect(() => {
+    if (!meaningStarting) return;
+    const timer = setInterval(() => api.info().then(setInfo).catch(() => {}), 10_000);
+    return () => clearInterval(timer);
+  }, [meaningStarting]);
+
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, progress, chatOpen]);
@@ -201,14 +245,27 @@ export default function App() {
     setMessages((m) => [...m, { role: "user", text }]);
     try {
       const answer = await api.ask(text, (e) => setProgress((p) => [...p, api.describe(e)]));
-      setMessages((m) => [...m, { role: "assistant", text: answer.text, meta: formatMeta(answer) }]);
+      setMessages((m) => [...m, { role: "assistant", text: answer.text, meta: formatMeta(answer), facts: answer.memory }]);
     } catch (e) {
       setMessages((m) => [...m, { role: "error", text: String(e) }]);
     } finally {
       setBusy(false);
       setProgress([]);
-      // AIfred can add or finish tasks while it answers.
+      // AIfred can add or finish tasks, and add or forget facts, while it answers.
       loadTasks();
+      api.memoryFacts().then(setFacts).catch(() => {});
+    }
+  }
+
+  /** Saves the pick first, so the next message uses it. */
+  async function pickModel(m: string | null) {
+    const before = model;
+    setModel(m);
+    try {
+      await api.setChatModel(m);
+    } catch (e) {
+      setModel(before);
+      setMessages((all) => [...all, { role: "error", text: `Cannot change the model: ${e}` }]);
     }
   }
 
@@ -219,16 +276,6 @@ export default function App() {
       setChatOpen(false);
     } catch (e) {
       setMessages((m) => [...m, { role: "error", text: String(e) }]);
-    }
-  }
-
-  async function saveMemory() {
-    try {
-      await api.setMemory(memory);
-      setMemorySaved(true);
-      setMemoryError("");
-    } catch (e) {
-      setMemoryError(`Not saved: ${e}`);
     }
   }
 
@@ -279,25 +326,11 @@ export default function App() {
             <span>{showMemory ? "−" : "+"}</span>
           </button>
           {showMemory && (
-            <div className="mt-2 flex min-h-0 flex-1 flex-col gap-2">
-              <textarea
-                value={memory}
-                onChange={(e) => {
-                  setMemory(e.target.value);
-                  setMemorySaved(false);
-                }}
-                placeholder="- I work on the StoreAgent plugin."
-                className="min-h-40 flex-1 resize-none rounded-lg border border-stone-300 bg-white p-2 font-mono text-xs dark:border-stone-700 dark:bg-stone-950"
-              />
-              <button
-                onClick={saveMemory}
-                disabled={memorySaved}
-                className="rounded-lg border border-stone-300 px-3 py-1.5 text-xs hover:bg-stone-200 disabled:opacity-40 dark:border-stone-700 dark:hover:bg-stone-800"
-              >
-                {memorySaved ? "Saved" : "Save memory"}
-              </button>
-              {memoryError && <div className="text-xs text-red-600">{memoryError}</div>}
-            </div>
+            <MemoryList
+              facts={facts}
+              onAdd={(f) => setFacts((all) => [...all, f])}
+              onChange={(f) => setFacts((all) => all.map((x) => (x.id === f.id ? f : x)))}
+            />
           )}
         </div>
 
@@ -314,6 +347,7 @@ export default function App() {
             <div className="text-red-600">ANTHROPIC_API_KEY is set: Claude uses the API key, not your login.</div>
           )}
           <div>GitHub: {info?.github_owners ? `only ${info.github_owners}` : "all owners"}</div>
+          {info && <div title="Finds facts, chats, and tasks by meaning, not only by words.">Meaning search: {info.meaning_search}</div>}
           <div className="truncate" title={info?.data_dir}>
             Data: {info?.data_dir}
           </div>
@@ -335,7 +369,7 @@ export default function App() {
           {page === "home" && !chatOpen && (
             <div className="mb-10">
               <div className="mb-4 text-2xl font-semibold">Good to see you.</div>
-              <ChatInput big autoFocus busy={busy} onSend={send} />
+              <ChatInput big autoFocus busy={busy} onSend={send} model={model} onModel={pickModel} />
               <div className="mt-3 flex flex-wrap gap-2">
                 {SUGGESTIONS.map((s) => (
                   <button
@@ -422,6 +456,18 @@ export default function App() {
                     <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
                   </div>
                   {m.meta && <div className="mt-2 text-xs text-stone-400">{m.meta}</div>}
+                  {m.facts && m.facts.length > 0 && (
+                    <details className="mt-1 text-xs text-stone-400">
+                      <summary className="cursor-pointer">
+                        Used {m.facts.length} fact{m.facts.length === 1 ? "" : "s"} from memory
+                      </summary>
+                      <ul className="mt-1 list-disc pl-4">
+                        {m.facts.map((f, j) => (
+                          <li key={j}>{f}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                 </div>
               ),
             )}
@@ -437,7 +483,7 @@ export default function App() {
           </div>
 
           <div className="border-t border-stone-200 p-3 dark:border-stone-800">
-            <ChatInput autoFocus busy={busy} onSend={send} />
+            <ChatInput autoFocus busy={busy} onSend={send} model={model} onModel={pickModel} />
           </div>
         </aside>
       )}

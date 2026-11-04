@@ -6,12 +6,15 @@
 //!
 //! These tools only read. The user marks ClickUp tasks done in the window.
 //!
-//! my_tasks uses the list that the window saved (clickup-cache.json) while
-//! it is new enough, and saves each new list it gets from ClickUp.
+//! my_tasks uses the list that the window saved in the database while it is
+//! new enough, and saves each new list it gets from ClickUp. search_my_tasks
+//! searches that saved list. task_details saves the description for search.
 
 use aifred_core::clickup::{self, Client};
 use aifred_core::clickup_list::{ClickupList, ClickupStore};
+use aifred_core::files::now;
 use aifred_core::{default_data_dir, settings};
+use aifred_core::text::cut;
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
@@ -25,9 +28,6 @@ use serde_json::{Value, json};
 
 const MAX_TEXT_CHARS: usize = 4000;
 const MAX_COMMENTS: usize = 5;
-/// The oldest saved list that my_tasks uses when the user reloads only by
-/// hand (refresh time 0). The chat must not plan a day from a week-old list.
-const MANUAL_MAX_AGE_SECS: u64 = 15 * 60;
 
 #[derive(Clone)]
 struct ClickupTools {
@@ -37,6 +37,16 @@ struct ClickupTools {
 #[derive(Deserialize, JsonSchema)]
 struct ListArgs {
     /// Maximum number of tasks to return (1-200). Default 50.
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SearchArgs {
+    /// Words to find in the task name, the workspace and list, and the saved description. Example: "invoice client".
+    query: String,
+    /// Also include tasks that are no longer in the user's list, for example done tasks. Default false.
+    include_old: Option<bool>,
+    /// Maximum number of tasks to return (1-50). Default 10.
     limit: Option<u32>,
 }
 
@@ -52,10 +62,6 @@ fn fail(e: anyhow::Error) -> ErrorData {
 
 fn ok_json(v: &Value) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![ContentBlock::text(v.to_string())]))
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
 }
 
 impl ClickupTools {
@@ -77,12 +83,8 @@ impl ClickupTools {
         let token = self.token()?;
         let account = clickup::account_key(&token);
         let store = ClickupStore::new(&self.dir);
-        let max_age = match settings::max_age_secs(&self.dir) {
-            u64::MAX => MANUAL_MAX_AGE_SECS,
-            secs => secs,
-        };
         // A broken saved file is not an error here: ask ClickUp.
-        if let Ok(Some(list)) = store.cached(&account, max_age, now()) {
+        if let Ok(Some(list)) = store.cached(&account, settings::tool_max_age_secs(&self.dir), now()) {
             return Ok(list);
         }
         let fetched = Client::new(&token).my_tasks().await.map_err(fail)?;
@@ -113,11 +115,41 @@ impl ClickupTools {
         ok_json(&out)
     }
 
+    #[tool(description = "Search the user's ClickUp tasks by words in the name, the workspace and list, and the description, best match first. It searches the list that AIfred saved, and downloads a new list first when it is too old. Each result says if it is still in the user's open list (in_list) and when AIfred last saw it (last_seen, Unix seconds).")]
+    async fn search_my_tasks(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
+        let account = clickup::account_key(&self.token()?);
+        // list() downloads a new list when the saved one is too old.
+        let note = match self.list().await {
+            Ok(list) => list.warning,
+            Err(e) => Some(format!("Cannot reach ClickUp, so the results come from the saved list. {}", e.message)),
+        };
+        let hits = ClickupStore::new(&self.dir)
+            .search(&account, &a.query, a.include_old.unwrap_or(false), a.limit)
+            .map_err(fail)?;
+        let tasks: Vec<Value> = hits.into_iter().map(|h| h.into_json()).collect();
+        let mut out = json!({ "tasks": tasks });
+        if let Some(note) = note {
+            out["note"] = json!(note);
+        }
+        ok_json(&out)
+    }
+
     #[tool(description = "Get one ClickUp task: name, status, description (shortened), assignees, dates, and the last comments.")]
     async fn task_details(&self, Parameters(a): Parameters<DetailArgs>) -> Result<CallToolResult, ErrorData> {
         clickup::check_task_id(&a.id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         let (task, comments) = self.client()?.task_with_comments(&a.id).await.map_err(fail)?;
-        ok_json(&shorten(&task, &comments))
+        let short = shorten(&task, &comments);
+        // Save the full description, so search_my_tasks can find words in it.
+        // It is the same text as the list download saves (description_text),
+        // so the summary of the task does not have to be made again.
+        // The id from ClickUp, because `a.id` can be the team's custom id.
+        let text = clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
+        if let Some(id) = task["id"].as_str()
+            && let Err(e) = ClickupStore::new(&self.dir).save_details(id, &text)
+        {
+            eprintln!("aifred-clickup-mcp: cannot save the description: {e:#}");
+        }
+        ok_json(&short)
     }
 }
 
@@ -128,26 +160,18 @@ impl ServerHandler for ClickupTools {
     }
 }
 
-fn cut(s: &str) -> String {
-    if s.chars().count() <= MAX_TEXT_CHARS {
-        return s.to_string();
-    }
-    let c: String = s.chars().take(MAX_TEXT_CHARS).collect();
-    format!("{c}\n[... shortened]")
-}
-
 /// Keeps the tool output small: only the useful task fields, a shortened
 /// description, and the last comments as plain text.
 fn shorten(task: &Value, comments: &Value) -> Value {
     let names = |v: &Value| -> Vec<Value> {
         v.as_array().map(|a| a.iter().map(|u| u["username"].clone()).collect()).unwrap_or_default()
     };
-    let text = task["text_content"].as_str().or(task["description"].as_str()).unwrap_or_default();
+    let text = clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
     let mut last: Vec<Value> = comments["comments"]
         .as_array()
         .map(|a| {
             a.iter()
-                .map(|c| json!({ "by": c["user"]["username"], "date": c["date"], "text": cut(c["comment_text"].as_str().unwrap_or_default()) }))
+                .map(|c| json!({ "by": c["user"]["username"], "date": c["date"], "text": cut(c["comment_text"].as_str().unwrap_or_default(), MAX_TEXT_CHARS) }))
                 .collect()
         })
         .unwrap_or_default();
@@ -165,7 +189,7 @@ fn shorten(task: &Value, comments: &Value) -> Value {
         "date_updated": task["date_updated"],
         "assignees": names(&task["assignees"]),
         "tags": task["tags"].as_array().map(|t| t.iter().map(|x| x["name"].clone()).collect::<Vec<_>>()),
-        "description": cut(text),
+        "description": cut(&text, MAX_TEXT_CHARS),
         "last_comments": last,
     })
 }
@@ -236,6 +260,14 @@ mod tests {
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["tasks"][0]["title"], "Write notes");
         assert!(v["note"].as_str().unwrap().contains("Big"), "the chat hears that the list is cut: {v}");
+
+        // The search uses the same saved list, also without a ClickUp call.
+        let args = Parameters(SearchArgs { query: "notes sprint".into(), include_old: None, limit: None });
+        let r = t.search_my_tasks(args).await.unwrap();
+        let text = serde_json::to_value(&r.content[0]).unwrap()["text"].as_str().unwrap().to_string();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["tasks"][0]["title"], "Write notes");
+        assert_eq!(v["tasks"][0]["in_list"], true);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

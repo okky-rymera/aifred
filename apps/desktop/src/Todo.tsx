@@ -100,6 +100,89 @@ function Chip({ active, onClick, children, disabled }: {
   );
 }
 
+/** One open local task. Click the title to change the title or the description. */
+function TaskRow(props: { task: api.Task; run: (p: Promise<unknown>) => Promise<boolean> }) {
+  const t = props.task;
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(t.title);
+  const [notes, setNotes] = useState(t.notes);
+
+  function start() {
+    setTitle(t.title);
+    setNotes(t.notes);
+    setEditing(true);
+  }
+
+  async function save() {
+    if (!title.trim()) return;
+    if (await props.run(api.editTask(t.id, title, notes))) setEditing(false);
+  }
+
+  return (
+    <li className="group flex items-start gap-3 py-2.5">
+      <input
+        type="checkbox"
+        aria-label={`Mark "${t.title}" done`}
+        checked={false}
+        onChange={() => props.run(api.setTaskDone(t.id, true))}
+        className="mt-0.5 size-4 accent-amber-500"
+      />
+      {editing ? (
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <input
+            aria-label="Task title"
+            value={title}
+            autoFocus
+            onChange={(e) => setTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") save();
+              if (e.key === "Escape") setEditing(false);
+            }}
+            className="w-full rounded border border-stone-300 bg-transparent px-2 py-1 text-sm outline-none focus:border-amber-500 dark:border-stone-700"
+          />
+          <textarea
+            aria-label="Task description"
+            value={notes}
+            rows={Math.max(2, notes.split("\n").length)}
+            placeholder="Description (optional)"
+            onChange={(e) => setNotes(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) save();
+              if (e.key === "Escape") setEditing(false);
+            }}
+            className="w-full resize-none rounded border border-stone-300 bg-transparent px-2 py-1 text-xs outline-none focus:border-amber-500 dark:border-stone-700"
+          />
+          <div className="flex gap-2 text-xs">
+            <button onClick={save} disabled={!title.trim()} className="rounded bg-[#252e4a] px-2 py-1 text-stone-50 disabled:opacity-40">
+              Save
+            </button>
+            <button onClick={() => setEditing(false)} className="rounded px-2 py-1 text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={start} title="Change the title or the description" className="min-w-0 flex-1 text-left">
+          <div className="text-sm">{t.title}</div>
+          {t.notes && <div className="line-clamp-2 whitespace-pre-line text-xs text-stone-500">{t.notes}</div>}
+        </button>
+      )}
+      {t.added_by === "aifred" && (
+        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+          added by AIfred
+        </span>
+      )}
+      <button
+        onClick={() => props.run(api.deleteTask(t.id))}
+        title="Delete task"
+        className="invisible text-stone-400 hover:text-red-600 group-hover:visible"
+      >
+        ✕
+      </button>
+    </li>
+  );
+}
+
 /** A task that was just marked done in ClickUp, so the user can undo it.
  * The list keeps each one: a second tick must not lose the undo of the first. */
 type Closed = { id: string; title: string; before: string };
@@ -130,6 +213,7 @@ export function TodoList(props: {
   const { tasks, github, githubState } = props;
   const [filter, setFilter] = useState<Filter>("all");
   const [draft, setDraft] = useState("");
+  const [draftNotes, setDraftNotes] = useState("");
   const [showDone, setShowDone] = useState(false);
   const [error, setError] = useState("");
   /** ClickUp tasks that wait for ClickUp to answer, so they cannot be clicked twice. */
@@ -189,10 +273,14 @@ export function TodoList(props: {
 
   async function add() {
     const text = draft;
+    const notes = draftNotes;
     if (!text.trim()) return;
-    // Clear the box only when the add worked, so a failure keeps your text.
+    // Clear the boxes only when the add worked, so a failure keeps your text.
     // Keep anything you typed while the add was running.
-    if (await run(api.addTask(text))) setDraft((d) => (d === text ? "" : d));
+    if (await run(api.addTask(text, notes))) {
+      setDraft((d) => (d === text ? "" : d));
+      setDraftNotes((d) => (d === notes ? "" : d));
+    }
   }
 
   return (
@@ -234,6 +322,18 @@ export function TodoList(props: {
           className="mt-3 rounded-lg border border-dashed border-stone-300 bg-transparent px-3 py-2 text-sm outline-none focus:border-amber-500 focus:border-solid dark:border-stone-700"
         />
       )}
+      {/* The description box shows when you type a title. */}
+      {showLocal && (draft.trim() || draftNotes) && (
+        <textarea
+          aria-label="New task description"
+          value={draftNotes}
+          rows={Math.max(2, draftNotes.split("\n").length)}
+          onChange={(e) => setDraftNotes(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && add()}
+          placeholder="Description (optional). Ctrl+Enter adds the task."
+          className="mt-1.5 resize-none rounded-lg border border-dashed border-stone-300 bg-transparent px-3 py-2 text-xs outline-none focus:border-amber-500 focus:border-solid dark:border-stone-700"
+        />
+      )}
       {error && <div className="mt-2 text-sm text-red-600">{error}</div>}
       {closed.map((c) => (
         <div key={c.id} role="status" className="mt-2 flex items-center gap-2 text-sm text-stone-600 dark:text-stone-300">
@@ -260,32 +360,7 @@ export function TodoList(props: {
 
       <ul className="mt-2 divide-y divide-stone-200 dark:divide-stone-800">
         {showLocal &&
-          open.map((t) => (
-            <li key={t.id} className="group flex items-center gap-3 py-2.5">
-              <input
-                type="checkbox"
-                checked={false}
-                onChange={() => run(api.setTaskDone(t.id, true))}
-                className="size-4 accent-amber-500"
-              />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm">{t.title}</div>
-                {t.notes && <div className="truncate text-xs text-stone-500">{t.notes}</div>}
-              </div>
-              {t.added_by === "aifred" && (
-                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                  added by AIfred
-                </span>
-              )}
-              <button
-                onClick={() => run(api.deleteTask(t.id))}
-                title="Delete task"
-                className="invisible text-stone-400 hover:text-red-600 group-hover:visible"
-              >
-                ✕
-              </button>
-            </li>
-          ))}
+          open.map((t) => <TaskRow key={t.id} task={t} run={run} />)}
 
         {/* GitHub items have no checkbox: AIfred only reads GitHub. An item
             leaves the list when it is closed on GitHub. */}

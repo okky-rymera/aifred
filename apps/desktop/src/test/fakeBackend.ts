@@ -2,7 +2,7 @@
 // the Rust app (src-tauri/src/main.rs), but keeps everything in memory.
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Answer, ClickupItem, GithubItem, ProgressEvent, Settings, Task, Turn } from "../api";
+import type { Answer, ClickupItem, Fact, GithubItem, ProgressEvent, Settings, Task, Turn } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void) => Promise<Answer> | Answer;
 
@@ -29,8 +29,11 @@ export type Fake = {
   /** How many times the window asked ClickUp (not the saved list). */
   clickupFetches: number;
   settings: Settings;
+  /** The model picked in the chat box. null: the default. */
+  chatModel: string | null;
   history: Turn[];
-  memory: string;
+  /** All facts, also the forgotten ones. */
+  memory: Fact[];
   /** Commands that fail, with the error text. Example: { tasks: "cannot read tasks.json" }. */
   fail: Record<string, string>;
   /** Every command the window called, in order. */
@@ -46,6 +49,11 @@ export function task(title: string, extra: Partial<Task> = {}): Task {
   const n = nextId++;
   // Each new task is one second newer, so the sort order is known.
   return { id: `t${n}`, title, notes: "", done: false, added_by: "you", created: nowSecs() + n, done_at: null, ...extra };
+}
+
+export function fact(text: string, extra: Partial<Fact> = {}): Fact {
+  const n = nextId++;
+  return { id: n, text, core: true, added_by: "you", created: nowSecs(), updated: nowSecs(), forgotten: null, ...extra };
 }
 
 export function githubItem(n: number, reason: GithubItem["reason"], title = `Item ${n}`): GithubItem {
@@ -76,7 +84,7 @@ export function clickupItem(id: string, title = `Task ${id}`, extra: Partial<Cli
 }
 
 export function answer(text: string, extra: Partial<Answer> = {}): Answer {
-  return { text, stats: { startup_ms: 10, total_ms: 1500, tool_calls: [] }, model_ms: 1000, cost_usd: 0.005, ...extra };
+  return { text, stats: { startup_ms: 10, total_ms: 1500, tool_calls: [] }, model_ms: 1000, cost_usd: 0.005, memory: [], model: null, ...extra };
 }
 
 export function fakeBackend(init: Partial<Fake> = {}): Fake {
@@ -89,8 +97,9 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     clickupClosed: {},
     clickupFetches: 0,
     settings: { refresh_minutes: 15 },
+    chatModel: null,
     history: [],
-    memory: "",
+    memory: [],
     fail: {},
     calls: [],
     onAsk: (p) => answer(`You said: ${p}`),
@@ -101,6 +110,16 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     const args = (payload ?? {}) as Record<string, any>;
     fake.calls.push({ cmd, args });
     if (cmd in fake.fail) throw fake.fail[cmd];
+    const findFact = (id: number) => {
+      const f = fake.memory.find((f) => f.id === id);
+      if (!f) throw `no fact with id ${id}`;
+      return f;
+    };
+    const factText = (text: unknown) => {
+      const t = String(text).split(/\s+/).filter(Boolean).join(" ");
+      if (!t) throw "the fact is empty";
+      return t;
+    };
     const find = (id: string) => {
       const t = fake.tasks.find((t) => t.id === id);
       if (!t) throw `no task with id ${id}`;
@@ -108,14 +127,40 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     };
     switch (cmd) {
       case "info":
-        return { data_dir: "/fake/aifred", backend: "Claude (your login)", github_owners: null, api_key_set: false };
+        return { data_dir: "/fake/aifred", backend: "Claude (your login)", github_owners: null, api_key_set: false, meaning_search: "on" };
       case "history":
         return fake.history;
-      case "get_memory":
-        return fake.memory;
-      case "set_memory":
-        fake.memory = args.text;
-        return null;
+      case "memory_facts":
+        // In use first, in their order. Then forgotten, newest first. Like memory.rs.
+        return structuredClone([
+          ...fake.memory.filter((f) => f.forgotten === null),
+          ...fake.memory.filter((f) => f.forgotten !== null).sort((a, b) => b.forgotten! - a.forgotten!),
+        ]);
+      case "add_fact": {
+        const f = fact(factText(args.text));
+        fake.memory.push(f);
+        return structuredClone(f);
+      }
+      case "edit_fact": {
+        const f = findFact(args.id);
+        f.text = factText(args.text);
+        return structuredClone(f);
+      }
+      case "set_fact_core": {
+        const f = findFact(args.id);
+        f.core = args.core;
+        return structuredClone(f);
+      }
+      case "forget_fact": {
+        const f = findFact(args.id);
+        f.forgotten ??= nowSecs();
+        return structuredClone(f);
+      }
+      case "restore_fact": {
+        const f = findFact(args.id);
+        f.forgotten = null;
+        return structuredClone(f);
+      }
       case "new_conversation":
         fake.history = [];
         return null;
@@ -123,9 +168,16 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         return structuredClone(fake.tasks);
       case "add_task": {
         if (!String(args.title).trim()) throw "the task title is empty";
-        const t = task(String(args.title).trim());
+        const t = task(String(args.title).trim(), { notes: String(args.notes ?? "").trim() });
         fake.tasks.push(t);
         return t;
+      }
+      case "edit_task": {
+        if (!String(args.title).trim()) throw "the task title is empty";
+        const t = find(args.id);
+        t.title = String(args.title).trim();
+        t.notes = String(args.notes).trim();
+        return structuredClone(t);
       }
       case "set_task_done": {
         const t = find(args.id);
@@ -183,6 +235,12 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         fake.clickup.push({ ...before, status: args.status });
         return null;
       }
+      case "chat_model":
+        return fake.chatModel;
+      case "set_chat_model":
+        if (args.model !== null && !["fable", "opus", "sonnet", "haiku"].includes(args.model)) throw `unknown model "${args.model}"`;
+        fake.chatModel = args.model;
+        return null;
       case "get_settings":
         return structuredClone(fake.settings);
       case "set_settings":
@@ -193,7 +251,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         let index = 0;
         const progress = (e: ProgressEvent) =>
           (window as any).__TAURI_INTERNALS__.runCallback(args.onEvent.id, { index: index++, message: e });
-        return fake.onAsk(args.prompt, progress);
+        const a = await fake.onAsk(args.prompt, progress);
+        return { ...a, model: fake.chatModel };
       }
       default:
         throw `fake backend: unknown command ${cmd}`;

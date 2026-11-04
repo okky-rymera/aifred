@@ -13,6 +13,7 @@ use aifred_core::clickup_list::{ClickupList, ClickupStore};
 use aifred_core::github;
 use aifred_core::github_list::{GithubList, GithubStore};
 use aifred_core::history::Turn;
+use aifred_core::memory::Fact;
 use aifred_core::tasks::Task;
 use aifred_core::{Answer, Assistant, default_data_dir};
 use serde::Serialize;
@@ -31,6 +32,130 @@ struct App {
     assistant: Arc<Assistant<ClaudeBackend>>,
     /// One question at a time: two at once would race on the saved session.
     busy: Mutex<()>,
+    /// False in the tests: they must not download the meaning search model
+    /// or call the AI for a summary.
+    background: bool,
+    /// What the sidebar says about meaning search.
+    meaning: Arc<std::sync::Mutex<String>>,
+}
+
+impl App {
+    fn new(assistant: Arc<Assistant<ClaudeBackend>>, background: bool) -> Self {
+        let meaning = if background { "starting" } else { "off" };
+        Self { assistant, busy: Mutex::new(()), background, meaning: Arc::new(std::sync::Mutex::new(meaning.into())) }
+    }
+
+    /// Writes a chat summary in the background: of the conversation that
+    /// ended (`Some(id)`), or of the current one when it is long (`None`).
+    /// It is one more AI call, so it runs only when it is needed (assistant.rs).
+    fn summarize(&self, ended: Option<i64>) {
+        if !self.background {
+            return;
+        }
+        let a = self.assistant.clone();
+        let fill = self.fill_job();
+        tauri::async_runtime::spawn(async move {
+            let made = match ended {
+                Some(id) => a.summarize_ended(id).await,
+                None => a.summarize_if_long().await,
+            };
+            match made {
+                // The summary gets its meaning search vector.
+                Ok(true) => fill(),
+                Ok(false) => {}
+                Err(e) => eprintln!("aifred: cannot write the chat summary: {e:#}"),
+            }
+        });
+    }
+
+    /// Writes the missing summaries of old conversations in the background:
+    /// conversations from the old history files, and summaries that stopped
+    /// when the app closed. At most 5 conversations in one run (assistant.rs).
+    fn summarize_old(&self) {
+        if !self.background {
+            return;
+        }
+        let a = self.assistant.clone();
+        let fill = self.fill_job();
+        tauri::async_runtime::spawn(async move {
+            match a.summarize_old().await {
+                // The summaries get their meaning search vectors.
+                Ok(n) if n > 0 => fill(),
+                Ok(_) => {}
+                Err(e) => eprintln!("aifred: cannot write the old chat summaries: {e:#}"),
+            }
+        });
+    }
+
+    /// Writes the missing summaries of long descriptions in the background
+    /// (summaries.rs), for the overview tool of the chat. Each group of 15
+    /// items is one AI call with the fast model. It does nothing when no
+    /// summary is missing.
+    fn summarize_items(&self) {
+        if !self.background {
+            return;
+        }
+        let a = self.assistant.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = a.summarize_items().await {
+                eprintln!("aifred: cannot write the item summaries: {e:#}");
+            }
+        });
+    }
+
+    /// Makes the missing meaning search vectors on a background thread, so the
+    /// window does not wait. Two fills at the same time are safe: the second
+    /// waits for the first (embed.rs) and then finds little to do.
+    fn fill_vectors(&self) {
+        if self.background {
+            (self.fill_job())();
+        }
+    }
+
+    /// The vector fill as a job that can run later, on any thread.
+    fn fill_job(&self) -> impl Fn() + Send + 'static {
+        let (a, meaning) = (self.assistant.clone(), self.meaning.clone());
+        move || {
+            let (a, meaning) = (a.clone(), meaning.clone());
+            std::thread::spawn(move || {
+            let off = "off: the model cannot load. Word search still works.".to_string();
+            // When the fill made data, the model works. In the other cases
+            // the fill did not ask the helper (nothing was missing, or the
+            // database failed first). When the status is already "on", keep
+            // it: a check would start the helper and load the model (about
+            // 175 MB) for nothing, and keep it in memory 5 more minutes. Only
+            // an unknown or "off" status asks the helper with one short text.
+            let known_on = meaning.lock().unwrap_or_else(|e| e.into_inner()).as_str() == "on";
+            let check = || {
+                if known_on {
+                    return "on".to_string();
+                }
+                match aifred_core::embed::check(&a.dir) {
+                    Ok(()) => "on".to_string(),
+                    Err(e) => {
+                        eprintln!("aifred: {e}");
+                        off.clone()
+                    }
+                }
+            };
+            let status = match a.fill_vectors() {
+                Ok(n) if n > 0 => "on".to_string(),
+                Ok(_) => check(),
+                Err(e) => {
+                    eprintln!("aifred: cannot make the meaning search data: {e:#}");
+                    if e.downcast_ref::<aifred_core::embed::ModelError>().is_some() {
+                        off.clone()
+                    } else {
+                        // For example a busy database. The next fill (after
+                        // the next answer) makes the missing data.
+                        check()
+                    }
+                }
+            };
+            *meaning.lock().unwrap_or_else(|e| e.into_inner()) = status;
+            });
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -39,6 +164,8 @@ struct Info {
     backend: String,
     github_owners: Option<String>,
     api_key_set: bool,
+    /// "on", "starting", or "off" with the reason.
+    meaning_search: String,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -55,7 +182,12 @@ async fn ask(app: State<'_, App>, prompt: String, on_event: Channel<Event>) -> C
     let mut send = |e: Event| {
         let _ = on_event.send(e);
     };
-    app.assistant.ask(&prompt, &mut send).await.map_err(err)
+    let answer = app.assistant.ask(&prompt, &mut send).await.map_err(err)?;
+    // The new messages, and the facts or tasks that AIfred added.
+    app.fill_vectors();
+    app.summarize(None);
+    app.summarize_items();
+    Ok(answer)
 }
 
 /// Runs file work on a background thread. Tauri runs commands that are not
@@ -73,14 +205,40 @@ async fn history(app: State<'_, App>) -> CmdResult<Vec<Turn>> {
     blocking(&app, |a| a.turns()).await
 }
 
+/// All memory facts: the ones in use, then the forgotten ones.
 #[tauri::command]
-async fn get_memory(app: State<'_, App>) -> CmdResult<String> {
-    blocking(&app, |a| Ok(a.memory())).await
+async fn memory_facts(app: State<'_, App>) -> CmdResult<Vec<Fact>> {
+    blocking(&app, |a| a.memory().list()).await
+}
+
+/// A fact that the user adds is a core fact: it goes into every message.
+#[tauri::command]
+async fn add_fact(app: State<'_, App>, text: String) -> CmdResult<Fact> {
+    let f = blocking(&app, move |a| a.memory().add(&text, "you", true)).await?;
+    app.fill_vectors();
+    Ok(f)
 }
 
 #[tauri::command]
-async fn set_memory(app: State<'_, App>, text: String) -> CmdResult<()> {
-    blocking(&app, move |a| a.set_memory(&text)).await
+async fn edit_fact(app: State<'_, App>, id: i64, text: String) -> CmdResult<Fact> {
+    let f = blocking(&app, move |a| a.memory().edit(id, &text)).await?;
+    app.fill_vectors();
+    Ok(f)
+}
+
+#[tauri::command]
+async fn set_fact_core(app: State<'_, App>, id: i64, core: bool) -> CmdResult<Fact> {
+    blocking(&app, move |a| a.memory().set_core(id, core)).await
+}
+
+#[tauri::command]
+async fn forget_fact(app: State<'_, App>, id: i64) -> CmdResult<Fact> {
+    blocking(&app, move |a| a.memory().forget(id)).await
+}
+
+#[tauri::command]
+async fn restore_fact(app: State<'_, App>, id: i64) -> CmdResult<Fact> {
+    blocking(&app, move |a| a.memory().restore(id)).await
 }
 
 #[tauri::command]
@@ -88,18 +246,36 @@ async fn new_conversation(app: State<'_, App>) -> CmdResult<()> {
     let Ok(_guard) = app.busy.try_lock() else {
         return Err("Wait until the current question is done.".into());
     };
-    app.assistant.new_conversation().map_err(err)
+    let ended = app.assistant.new_conversation().map_err(err)?;
+    // The old conversation gets a summary in the background, for search.
+    if ended.is_some() {
+        app.summarize(ended);
+    }
+    Ok(())
 }
 
-// The task file has its own lock (tasks.rs), so these do not need the busy lock.
+// The database has its own locks (db.rs), so these do not need the busy lock.
 #[tauri::command]
 async fn tasks(app: State<'_, App>) -> CmdResult<Vec<Task>> {
     blocking(&app, |a| a.tasks().load()).await
 }
 
+/// `notes` is the optional description.
 #[tauri::command]
-async fn add_task(app: State<'_, App>, title: String) -> CmdResult<Task> {
-    blocking(&app, move |a| a.tasks().add(&title, "", "you")).await
+async fn add_task(app: State<'_, App>, title: String, notes: Option<String>) -> CmdResult<Task> {
+    let t = blocking(&app, move |a| a.tasks().add(&title, notes.as_deref().unwrap_or(""), "you")).await?;
+    app.fill_vectors();
+    app.summarize_items();
+    Ok(t)
+}
+
+/// Changes the title and the description of a local task.
+#[tauri::command]
+async fn edit_task(app: State<'_, App>, id: String, title: String, notes: String) -> CmdResult<Task> {
+    let t = blocking(&app, move |a| a.tasks().edit(&id, &title, &notes)).await?;
+    app.fill_vectors();
+    app.summarize_items();
+    Ok(t)
 }
 
 #[tauri::command]
@@ -127,7 +303,13 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
         }
     }
     match github::my_items(&github::owners_from_env()).await {
-        Ok(f) => blocking(&app, move |_| GithubStore::new(&dir).save_fetch(f.items, &f.no_links, now())).await,
+        Ok(f) => {
+            let list = blocking(&app, move |_| GithubStore::new(&dir).save_fetch(f.items, &f.no_links, now())).await?;
+            // Only new and changed items get new vectors and summaries.
+            app.fill_vectors();
+            app.summarize_items();
+            Ok(list)
+        }
         Err(e) => {
             let e = err(e);
             let saved = blocking(&app, move |_| GithubStore::new(&dir).cached(u64::MAX, now())).await;
@@ -172,7 +354,12 @@ async fn clickup_items(app: State<'_, App>, force: bool) -> CmdResult<ClickupLis
         }
     }
     match client.my_tasks().await {
-        Ok(items) => blocking(&app, move |_| ClickupStore::new(&dir).save(&account, items, now())).await,
+        Ok(items) => {
+            let list = blocking(&app, move |_| ClickupStore::new(&dir).save(&account, items, now())).await?;
+            app.fill_vectors();
+            app.summarize_items();
+            Ok(list)
+        }
         Err(e) => {
             let e = err(e);
             match blocking(&app, move |_| ClickupStore::new(&dir).cached(&account, u64::MAX, now())).await {
@@ -246,6 +433,18 @@ async fn set_settings(app: State<'_, App>, settings: Settings) -> CmdResult<()> 
     blocking(&app, move |a| settings::save(&a.dir, &settings)).await
 }
 
+/// The model that the chat box shows: the one the user picked last, or None for the default.
+#[tauri::command]
+async fn chat_model(app: State<'_, App>) -> CmdResult<Option<String>> {
+    blocking(&app, |a| settings::chat_model(&a.dir)).await
+}
+
+/// Saves the model for the next messages. None goes back to the default.
+#[tauri::command]
+async fn set_chat_model(app: State<'_, App>, model: Option<String>) -> CmdResult<()> {
+    blocking(&app, move |a| settings::set_chat_model(&a.dir, model.as_deref())).await
+}
+
 #[tauri::command]
 fn info(app: State<'_, App>) -> Info {
     Info {
@@ -253,6 +452,7 @@ fn info(app: State<'_, App>) -> Info {
         backend: "Claude (your login)".into(),
         github_owners: std::env::var("AIFRED_GITHUB_OWNERS").ok(),
         api_key_set: std::env::var_os("ANTHROPIC_API_KEY").is_some(),
+        meaning_search: app.meaning.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     }
 }
 
@@ -261,11 +461,16 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
     builder.manage(app).invoke_handler(tauri::generate_handler![
         ask,
         history,
-        get_memory,
-        set_memory,
+        memory_facts,
+        add_fact,
+        edit_fact,
+        set_fact_core,
+        forget_fact,
+        restore_fact,
         new_conversation,
         tasks,
         add_task,
+        edit_task,
         set_task_done,
         delete_task,
         github_items,
@@ -277,6 +482,8 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         remove_clickup_token,
         get_settings,
         set_settings,
+        chat_model,
+        set_chat_model,
         info
     ])
 }
@@ -294,7 +501,12 @@ fn main() -> anyhow::Result<()> {
     // of the user's own window.
     let keep_window_state = std::env::var_os("AIFRED_NO_WINDOW_STATE").is_none();
 
-    let mut builder = with_commands(tauri::Builder::default(), App { assistant, busy: Mutex::new(()) })
+    let app = App::new(assistant, true);
+    // Vectors for the data from before, or from the command-line program and
+    // the tool servers. The first start also downloads the model here.
+    app.fill_vectors();
+    app.summarize_old();
+    let mut builder = with_commands(tauri::Builder::default(), app)
         .plugin(tauri_plugin_opener::init());
     if keep_window_state {
         // Saves the window size and maximized state when the app closes, and
@@ -344,7 +556,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let backend = ClaudeBackend { work_dir: dir.join("claude"), model: None };
         let assistant = Arc::new(Assistant::new(dir.clone(), backend, dir.clone()).unwrap());
-        let app = with_commands(mock_builder(), App { assistant, busy: Mutex::new(()) })
+        let app = with_commands(mock_builder(), App::new(assistant, false))
             .build(mock_context(noop_assets()))
             .unwrap();
         let win = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
@@ -378,6 +590,12 @@ mod tests {
         assert_eq!(t["added_by"], "you", "tasks from the window are yours");
         let id = t["id"].as_str().unwrap().to_string();
 
+        let edited = call(&win, "edit_task", json!({ "id": id, "title": "Call Sam today", "notes": " About the invoice. " })).unwrap();
+        assert_eq!((edited["title"].clone(), edited["notes"].clone()), (json!("Call Sam today"), json!("About the invoice.")));
+        let with_notes = call(&win, "add_task", json!({ "title": "Pay rent", "notes": "Before Friday" })).unwrap();
+        assert_eq!(with_notes["notes"], "Before Friday");
+        call(&win, "delete_task", json!({ "id": with_notes["id"] })).unwrap();
+
         let done = call(&win, "set_task_done", json!({ "id": id, "done": true })).unwrap();
         assert_eq!(done["done"], true);
         assert_eq!(call(&win, "tasks", json!({})).unwrap()[0]["done"], true);
@@ -398,11 +616,21 @@ mod tests {
     }
 
     #[test]
-    fn memory_round_trip_and_empty_history() {
+    fn memory_facts_round_trip_and_empty_history() {
         let (_app, win, dir) = window("memory");
-        assert_eq!(call(&win, "get_memory", json!({})).unwrap(), "");
-        call(&win, "set_memory", json!({ "text": "- I like short answers." })).unwrap();
-        assert_eq!(call(&win, "get_memory", json!({})).unwrap(), "- I like short answers.");
+        assert_eq!(call(&win, "memory_facts", json!({})).unwrap(), json!([]));
+        let f = call(&win, "add_fact", json!({ "text": "I like short answers." })).unwrap();
+        assert_eq!((f["core"].clone(), f["added_by"].clone()), (json!(true), json!("you")));
+        let id = f["id"].clone();
+        call(&win, "edit_fact", json!({ "id": id, "text": "I like very short answers." })).unwrap();
+        call(&win, "set_fact_core", json!({ "id": id, "core": false })).unwrap();
+        call(&win, "forget_fact", json!({ "id": id })).unwrap();
+        let all = call(&win, "memory_facts", json!({})).unwrap();
+        assert_eq!(all[0]["text"], "I like very short answers.");
+        assert_eq!(all[0]["core"], false);
+        assert!(all[0]["forgotten"].is_number());
+        assert!(call(&win, "restore_fact", json!({ "id": id })).unwrap()["forgotten"].is_null());
+        assert!(call(&win, "edit_fact", json!({ "id": 999, "text": "x" })).is_err());
         assert_eq!(call(&win, "history", json!({})).unwrap(), json!([]));
         call(&win, "new_conversation", json!({})).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -495,7 +723,19 @@ mod tests {
         assert_eq!(l["items"][0]["title"], "Write notes");
         call(&win, "remove_clickup_token", json!({})).unwrap();
         assert!(!dir.join("clickup-token").exists());
-        assert!(!dir.join("clickup-cache.json").exists(), "the list of the old account is gone");
+        assert!(ClickupStore::new(&dir).cached(&account, u64::MAX, now()).unwrap().is_none(), "the list of the old account is gone");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_chat_model_is_remembered() {
+        let (_app, win, dir) = window("chat-model");
+        assert_eq!(call(&win, "chat_model", json!({})).unwrap(), Value::Null);
+        call(&win, "set_chat_model", json!({ "model": "haiku" })).unwrap();
+        assert_eq!(call(&win, "chat_model", json!({})).unwrap(), "haiku");
+        assert!(call(&win, "set_chat_model", json!({ "model": "nope" })).is_err());
+        call(&win, "set_chat_model", json!({ "model": null })).unwrap();
+        assert_eq!(call(&win, "chat_model", json!({})).unwrap(), Value::Null);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
