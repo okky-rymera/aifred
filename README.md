@@ -90,6 +90,14 @@ cd apps/desktop && npx tauri dev
 
 The tool servers and the meaning search helper are in the same program, so you do not build them separately.
 
+### Tray
+
+- AIfred shows an icon in the system tray. Closing the window does not quit AIfred: the window hides and AIfred keeps running.
+- To show the window again, click the tray icon and choose "Show AIfred". To quit, choose "Quit" in the tray menu.
+- On Linux, a click on the tray icon opens the menu.
+- On Linux, the tray needs libayatana-appindicator (or libappindicator) and a desktop that shows tray icons. GNOME needs the AppIndicator extension.
+- If AIfred cannot make the tray icon, closing the window quits AIfred.
+
 ## Tests
 
 The tests do not call Claude or GitHub. They cost nothing and open no windows.
@@ -114,6 +122,7 @@ cd apps/desktop && npx tauri build --no-bundle
 - Use the Tauri command, not `cargo build --release`. Only the Tauri command puts the window files into the program.
 - Release builds remove the debug symbols (`[profile.release]` in `Cargo.toml`).
 - The program needs WebKitGTK 4.1 on the computer.
+- The tray icon needs libayatana-appindicator at run time.
 
 ## Use
 
@@ -134,9 +143,9 @@ The release program updates itself from the GitHub releases of this repository.
 2. When it finds one, it downloads the file for your computer (for example `aifred-0.1.2-linux-x86_64`) next to the program, under a temporary name.
 3. It compares the file's SHA-256 sum with the sum from GitHub. Then it runs `<file> version` one time, to see that the file starts on your computer. Only then does it rename the file to `.aifred-update`. If a step fails, it removes the new file, keeps an earlier checked file, and shows the error on the Settings page. A download stops when no data comes for 60 seconds, or after 30 minutes.
 4. The sidebar shows "AIfred <version> is ready" and a "Restart now" button. The button puts the new file in place of the program, starts it, and closes this window. The chat, the tasks, and the window size stay.
-5. If you close AIfred without a restart, AIfred puts the new file in place when it closes. The next start uses it.
+5. If you quit AIfred (tray menu "Quit") without a restart, AIfred puts the new file in place when it quits. The next start uses it.
 
-- AIfred replaces the program file only at a restart or a close. Before that, the AI tool servers that Claude Code starts use the same version as the window.
+- AIfred replaces the program file only at a restart or a quit. Before that, the AI tool servers that Claude Code starts use the same version as the window.
 - Only one AIfred window at a time checks for updates. A second window shows "Another AIfred window checks for updates."
 - If a newer release is removed from GitHub, the next check removes its downloaded file, so AIfred does not install it.
 - AIfred must be able to write to the folder of the program file. If it cannot, the Settings page shows the error.

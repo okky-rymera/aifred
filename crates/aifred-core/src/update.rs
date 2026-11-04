@@ -11,7 +11,7 @@
 //!
 //! Only one window at a time can update the program: it holds `UpdateLock`.
 //!
-//! The window applies the update only when it restarts or closes. Before
+//! The window applies the update only when it restarts or quits. Before
 //! that, the program file stays the old one. This is important: Claude Code
 //! starts the AI tool servers from the program file for each message, and a
 //! new tool server must not run next to an old window.
