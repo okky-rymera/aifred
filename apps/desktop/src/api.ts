@@ -65,9 +65,44 @@ export type GithubList = {
   warning?: string;
 };
 
+export type ClickupItem = {
+  id: string;
+  /** The team's own task id, like "DEV-42", when the workspace uses them. */
+  custom_id?: string;
+  title: string;
+  url: string;
+  /** The status name, like "in progress". */
+  status: string;
+  /** The status color, like "#4194f6". */
+  status_color: string;
+  /** The list that holds the task. */
+  list: string;
+  workspace: string;
+  priority?: "urgent" | "high" | "normal" | "low";
+  /** Unix milliseconds. */
+  due?: number;
+  /** Unix milliseconds. */
+  updated: number;
+};
+
+export type ClickupList = {
+  /** Open tasks assigned to you, newest change first. */
+  items: ClickupItem[];
+  /** When the list came from ClickUp, in Unix seconds. */
+  fetched_at: number;
+  /** Set when ClickUp could not be asked and this is the older saved list. */
+  warning?: string;
+};
+
+export type ClickupTokenStatus = {
+  set: boolean;
+  /** True when AIFRED_CLICKUP_TOKEN gives the token. The window cannot change it. */
+  from_env: boolean;
+};
+
 export type Settings = {
-  /** 0 means only when you click reload. */
-  github_refresh_minutes: number;
+  /** How often the GitHub and ClickUp lists reload. 0 means only when you click reload. */
+  refresh_minutes: number;
 };
 
 export function ask(prompt: string, onEvent: (e: ProgressEvent) => void): Promise<Answer> {
@@ -86,6 +121,15 @@ export const setTaskDone = (id: string, done: boolean) => invoke<Task>("set_task
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
 /** force: ask GitHub now, and do not use the saved list. */
 export const githubItems = (force: boolean) => invoke<GithubList>("github_items", { force });
+/** force: ask ClickUp now, and do not use the saved list. */
+export const clickupItems = (force: boolean) => invoke<ClickupList>("clickup_items", { force });
+/** Closes the task in ClickUp. Returns the status it had before, for the undo. */
+export const clickupMarkDone = (id: string) => invoke<string>("clickup_mark_done", { id });
+export const clickupUndoDone = (id: string, status: string) => invoke<void>("clickup_undo_done", { id, status });
+export const clickupTokenStatus = () => invoke<ClickupTokenStatus>("clickup_token_status");
+/** Checks the token with ClickUp and saves it. Returns your ClickUp user name. */
+export const setClickupToken = (token: string) => invoke<string>("set_clickup_token", { token });
+export const removeClickupToken = () => invoke<void>("remove_clickup_token");
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");
@@ -107,6 +151,10 @@ export function describe(e: ProgressEvent): string {
       return `Adding task: ${(e.input as { title?: string }).title ?? ""}`;
     case "complete_task":
       return "Marking a task done";
+    case "my_tasks":
+      return "Checking your ClickUp tasks";
+    case "task_details":
+      return `Reading ClickUp task ${(e.input as { id?: string }).id ?? ""}`.trim();
     case "item_details":
       return `Reading ${i.repo ?? "item"}#${i.number ?? "?"}`;
     default:

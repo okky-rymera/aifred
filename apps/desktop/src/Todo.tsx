@@ -1,7 +1,23 @@
 import { useState } from "react";
 import * as api from "./api";
 
-type Filter = "all" | "local" | "github";
+type Filter = "all" | "local" | "github" | "clickup";
+
+const PRIORITY: Record<NonNullable<api.ClickupItem["priority"]>, string> = {
+  urgent: "text-red-600",
+  high: "text-amber-600",
+  normal: "text-stone-500",
+  low: "text-stone-400",
+};
+
+/** "due today", "due in 3d", "3d overdue", for a time in Unix milliseconds. */
+function dueText(ms: number): { text: string; late: boolean } {
+  const day = (t: number) => Math.floor((t - new Date(t).getTimezoneOffset() * 60_000) / 86400_000);
+  const days = day(ms) - day(Date.now());
+  if (days === 0) return { text: "due today", late: false };
+  if (days < 0) return { text: `${-days}d overdue`, late: true };
+  return { text: `due in ${days}d`, late: false };
+}
 
 const REASON: Record<api.GithubItem["reason"], { label: string; cls: string }> = {
   review_requested: { label: "Review", cls: "bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300" },
@@ -84,9 +100,23 @@ function Chip({ active, onClick, children, disabled }: {
   );
 }
 
+/** A task that was just marked done in ClickUp, so the user can undo it.
+ * The list keeps each one: a second tick must not lose the undo of the first. */
+type Closed = { id: string; title: string; before: string };
+
 export function TodoList(props: {
   tasks: api.Task[];
   github: api.GithubItem[];
+  /** The ClickUp tasks. Leave out when ClickUp is not connected. */
+  clickup?: api.ClickupItem[];
+  /** "off" when ClickUp is not connected. */
+  clickupState?: "off" | "loading" | "ok" | string;
+  clickupFetchedAt?: number;
+  clickupWarning?: string;
+  /** A ClickUp task is done in ClickUp. Take it out of the list. */
+  onClickupDone?: (id: string) => void;
+  /** Load the ClickUp list from ClickUp again (after an undo). */
+  onClickupReload?: () => void;
   /** When the GitHub list came from GitHub, in Unix seconds. */
   fetchedAt?: number;
   /** Set when GitHub could not be asked and the list is the older saved one. */
@@ -102,12 +132,19 @@ export function TodoList(props: {
   const [draft, setDraft] = useState("");
   const [showDone, setShowDone] = useState(false);
   const [error, setError] = useState("");
+  /** ClickUp tasks that wait for ClickUp to answer, so they cannot be clicked twice. */
+  const [closing, setClosing] = useState<string[]>([]);
+  const [closed, setClosed] = useState<Closed[]>([]);
+  const clickup = props.clickup ?? [];
+  const clickupState = props.clickupState ?? "off";
 
   const open = tasks.filter((t) => !t.done).sort((a, b) => b.created - a.created);
   const done = tasks.filter((t) => t.done).sort((a, b) => (b.done_at ?? 0) - (a.done_at ?? 0));
-  const showLocal = filter !== "github";
-  const showGithub = filter !== "local";
-  const count = (showLocal ? open.length : 0) + (showGithub ? github.length : 0);
+  const showLocal = filter === "all" || filter === "local";
+  const showGithub = filter === "all" || filter === "github";
+  const showClickup = filter === "all" || filter === "clickup";
+  const count =
+    (showLocal ? open.length : 0) + (showGithub ? github.length : 0) + (showClickup ? clickup.length : 0);
   const doneCount = showLocal ? done.length : 0;
 
   /** Runs a change. Returns true if it worked. */
@@ -120,6 +157,33 @@ export function TodoList(props: {
     } catch (e) {
       setError(String(e));
       return false;
+    }
+  }
+
+  /** Closes the task in ClickUp. This changes the real task, so the row
+   * offers an undo after it. */
+  async function markClickupDone(c: api.ClickupItem) {
+    setClosing((l) => [...l, c.id]);
+    try {
+      setError("");
+      const before = await api.clickupMarkDone(c.id);
+      setClosed((l) => [...l.filter((x) => x.id !== c.id), { id: c.id, title: c.title, before }]);
+      props.onClickupDone?.(c.id);
+    } catch (e) {
+      setError(`ClickUp: ${e}`);
+    } finally {
+      setClosing((l) => l.filter((x) => x !== c.id));
+    }
+  }
+
+  async function undoClickupDone(c: Closed) {
+    try {
+      setError("");
+      await api.clickupUndoDone(c.id, c.before);
+      setClosed((l) => l.filter((x) => x.id !== c.id));
+      props.onClickupReload?.();
+    } catch (e) {
+      setError(`ClickUp undo failed: ${e}`);
     }
   }
 
@@ -142,10 +206,15 @@ export function TodoList(props: {
               GitHub {agoSecs(props.fetchedAt)}
             </span>
           )}
+          {showClickup && clickupState === "ok" && !!props.clickupFetchedAt && (
+            <span className="mr-1 text-xs text-stone-400" title="When the ClickUp list last came from ClickUp">
+              ClickUp {agoSecs(props.clickupFetchedAt)}
+            </span>
+          )}
           <Chip active={filter === "all"} onClick={() => setFilter("all")}>All</Chip>
           <Chip active={filter === "local"} onClick={() => setFilter("local")}>Mine</Chip>
           <Chip active={filter === "github"} onClick={() => setFilter("github")}>GitHub</Chip>
-          <Chip disabled>ClickUp</Chip>
+          <Chip active={filter === "clickup"} onClick={() => setFilter("clickup")}>ClickUp</Chip>
           <button
             onClick={props.onRefresh}
             title="Reload the list"
@@ -166,6 +235,25 @@ export function TodoList(props: {
         />
       )}
       {error && <div className="mt-2 text-sm text-red-600">{error}</div>}
+      {closed.map((c) => (
+        <div key={c.id} role="status" className="mt-2 flex items-center gap-2 text-sm text-stone-600 dark:text-stone-300">
+          <span className="min-w-0 truncate">Closed in ClickUp: {c.title}</span>
+          <button
+            onClick={() => undoClickupDone(c)}
+            aria-label={`Undo: ${c.title}`}
+            className="text-amber-700 hover:underline dark:text-amber-400"
+          >
+            Undo
+          </button>
+          <button
+            onClick={() => setClosed((l) => l.filter((x) => x.id !== c.id))}
+            title="Hide this message"
+            className="text-stone-400 hover:text-stone-600"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
       {showLocal && props.tasksError && (
         <div className="mt-2 text-sm text-red-600">Cannot load your tasks: {props.tasksError}</div>
       )}
@@ -224,7 +312,62 @@ export function TodoList(props: {
               </span>
             </li>
           ))}
+
+        {/* The tick closes the task in ClickUp. This is the only change
+            AIfred makes in ClickUp. */}
+        {showClickup &&
+          clickup.map((c) => {
+            const due = c.due ? dueText(c.due) : null;
+            return (
+              <li key={`cu-${c.id}`} className="flex items-center gap-3 py-2.5">
+                <input
+                  type="checkbox"
+                  checked={false}
+                  disabled={closing.includes(c.id)}
+                  onChange={() => markClickupDone(c)}
+                  title="Close this task in ClickUp"
+                  aria-label={`Close in ClickUp: ${c.title}`}
+                  className="size-4 accent-amber-500 disabled:opacity-40"
+                />
+                <div className="min-w-0 flex-1">
+                  <a href={c.url} className="text-sm hover:underline">
+                    {c.title}
+                  </a>
+                  <div className="truncate text-xs text-stone-500">
+                    {c.custom_id ? `${c.custom_id} · ` : ""}
+                    {c.list} · {agoSecs(c.updated / 1000)}
+                    {due && <span className={due.late ? "text-red-600" : ""}> · {due.text}</span>}
+                    {c.priority && c.priority !== "normal" && (
+                      <span className={PRIORITY[c.priority]}> · {c.priority}</span>
+                    )}
+                  </div>
+                </div>
+                <span
+                  className="flex items-center gap-1 rounded bg-stone-100 px-1.5 py-0.5 text-[11px] text-stone-700 dark:bg-stone-800 dark:text-stone-300"
+                  title={`ClickUp status in ${c.workspace}`}
+                >
+                  <span className="size-2 rounded-full" style={{ background: c.status_color || "#a8a29e" }} aria-hidden />
+                  {c.status}
+                </span>
+              </li>
+            );
+          })}
       </ul>
+
+      {showClickup && clickupState === "loading" && (
+        <div className="py-3 text-sm text-stone-500 animate-pulse">Loading ClickUp tasks…</div>
+      )}
+      {showClickup && clickupState === "ok" && props.clickupWarning && (
+        <div className="py-3 text-sm text-amber-700 dark:text-amber-400">{props.clickupWarning}</div>
+      )}
+      {showClickup && !["off", "loading", "ok"].includes(clickupState) && (
+        <div className="py-3 text-sm text-red-600">ClickUp: {clickupState}</div>
+      )}
+      {filter === "clickup" && clickupState === "off" && (
+        <div className="py-6 text-center text-sm text-stone-500">
+          ClickUp is not connected. Add your ClickUp token on the Settings page.
+        </div>
+      )}
 
       {showGithub && githubState === "loading" && (
         <div className="py-3 text-sm text-stone-500 animate-pulse">Loading GitHub items…</div>
@@ -235,11 +378,15 @@ export function TodoList(props: {
       {showGithub && githubState !== "loading" && githubState !== "ok" && (
         <div className="py-3 text-sm text-red-600">GitHub: {githubState}</div>
       )}
-      {count === 0 && !(showGithub && githubState !== "ok") && !(showLocal && props.tasksError) && (
-        <div className="py-6 text-center text-sm text-stone-500">
-          {showLocal ? "Nothing to do. Add a task above." : "Nothing from GitHub."}
-        </div>
-      )}
+      {count === 0 &&
+        !(showGithub && githubState !== "ok") &&
+        !(showClickup && clickupState !== "ok" && clickupState !== "off") &&
+        !(filter === "clickup" && clickupState === "off") &&
+        !(showLocal && props.tasksError) && (
+          <div className="py-6 text-center text-sm text-stone-500">
+            {showLocal ? "Nothing to do. Add a task above." : filter === "github" ? "Nothing from GitHub." : "Nothing from ClickUp."}
+          </div>
+        )}
 
       {doneCount > 0 && (
         <div className="mt-3">

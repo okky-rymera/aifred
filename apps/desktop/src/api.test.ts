@@ -13,7 +13,7 @@ describe("command wrappers", () => {
     await api.setMemory("- likes tea");
     await api.githubItems(true);
     await api.getSettings();
-    await api.setSettings({ github_refresh_minutes: 30 });
+    await api.setSettings({ refresh_minutes: 30 });
     expect(fake.calls).toEqual([
       { cmd: "add_task", args: { title: "Call Sam" } },
       { cmd: "set_task_done", args: { id: t.id, done: true } },
@@ -21,7 +21,7 @@ describe("command wrappers", () => {
       { cmd: "set_memory", args: { text: "- likes tea" } },
       { cmd: "github_items", args: { force: true } },
       { cmd: "get_settings", args: {} },
-      { cmd: "set_settings", args: { settings: { github_refresh_minutes: 30 } } },
+      { cmd: "set_settings", args: { settings: { refresh_minutes: 30 } } },
     ]);
   });
 
@@ -51,8 +51,8 @@ describe("describe()", () => {
   });
 
   it("falls back to server and tool name for unknown tools", () => {
-    expect(api.describe({ kind: "tool_call", server: "clickup", tool: "search", input: {} })).toBe(
-      "Using clickup → search",
+    expect(api.describe({ kind: "tool_call", server: "slack", tool: "search", input: {} })).toBe(
+      "Using slack → search",
     );
   });
 });

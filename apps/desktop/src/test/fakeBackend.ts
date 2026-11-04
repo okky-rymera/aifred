@@ -2,7 +2,7 @@
 // the Rust app (src-tauri/src/main.rs), but keeps everything in memory.
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Answer, GithubItem, ProgressEvent, Settings, Task, Turn } from "../api";
+import type { Answer, ClickupItem, GithubItem, ProgressEvent, Settings, Task, Turn } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void) => Promise<Answer> | Answer;
 
@@ -18,6 +18,16 @@ export type Fake = {
   onGithubItems?: (force: boolean) => Promise<void> | void;
   /** How many times the window asked GitHub (not the saved list). */
   githubFetches: number;
+  /** The ClickUp token, or "" when ClickUp is not connected. */
+  clickupToken: string;
+  /** Open tasks assigned to you on "ClickUp". A task closed here leaves this list. */
+  clickup: ClickupItem[];
+  /** Tasks that were closed, by id, as they were before. */
+  clickupClosed: Record<string, ClickupItem>;
+  clickupError?: string;
+  clickupWarning?: string;
+  /** How many times the window asked ClickUp (not the saved list). */
+  clickupFetches: number;
   settings: Settings;
   history: Turn[];
   memory: string;
@@ -51,6 +61,20 @@ export function githubItem(n: number, reason: GithubItem["reason"], title = `Ite
   };
 }
 
+export function clickupItem(id: string, title = `Task ${id}`, extra: Partial<ClickupItem> = {}): ClickupItem {
+  return {
+    id,
+    title,
+    url: `https://app.clickup.com/t/${id}`,
+    status: "in progress",
+    status_color: "#4194f6",
+    list: "Sprint 12",
+    workspace: "Rymera",
+    updated: Date.now() - 3 * 3600_000,
+    ...extra,
+  };
+}
+
 export function answer(text: string, extra: Partial<Answer> = {}): Answer {
   return { text, stats: { startup_ms: 10, total_ms: 1500, tool_calls: [] }, model_ms: 1000, cost_usd: 0.005, ...extra };
 }
@@ -60,7 +84,11 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     tasks: [],
     github: [],
     githubFetches: 0,
-    settings: { github_refresh_minutes: 15 },
+    clickupToken: "",
+    clickup: [],
+    clickupClosed: {},
+    clickupFetches: 0,
+    settings: { refresh_minutes: 15 },
     history: [],
     memory: "",
     fail: {},
@@ -123,6 +151,37 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         };
         await fake.onGithubItems?.(Boolean(args.force));
         return list;
+      }
+      case "clickup_token_status":
+        return { set: fake.clickupToken !== "", from_env: false };
+      case "set_clickup_token":
+        if (!String(args.token).startsWith("pk_")) throw "ClickUp refused the token. (Token invalid)";
+        fake.clickupToken = args.token;
+        return "okky";
+      case "remove_clickup_token":
+        fake.clickupToken = "";
+        return null;
+      case "clickup_items": {
+        if (!fake.clickupToken) throw "ClickUp is not connected. Add a token on the Settings page.";
+        if (args.force || fake.clickupFetches === 0) {
+          if (fake.clickupError) throw fake.clickupError;
+          fake.clickupFetches++;
+        }
+        return { items: structuredClone(fake.clickup), fetched_at: nowSecs(), warning: fake.clickupWarning };
+      }
+      case "clickup_mark_done": {
+        const t = fake.clickup.find((c) => c.id === args.id);
+        if (!t) throw `ClickUp said 404: no task ${args.id}`;
+        fake.clickup = fake.clickup.filter((c) => c.id !== args.id);
+        fake.clickupClosed[t.id] = t;
+        return t.status;
+      }
+      case "clickup_undo_done": {
+        const before = fake.clickupClosed[args.id];
+        if (!before) throw `no closed task ${args.id}`;
+        delete fake.clickupClosed[args.id];
+        fake.clickup.push({ ...before, status: args.status });
+        return null;
       }
       case "get_settings":
         return structuredClone(fake.settings);

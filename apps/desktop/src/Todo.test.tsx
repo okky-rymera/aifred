@@ -90,7 +90,7 @@ describe("TodoList", () => {
     expect(screen.getByText("Fix cart")).toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/Add a task/)).not.toBeInTheDocument();
 
-    expect(screen.getByRole("button", { name: "ClickUp" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "ClickUp" })).toBeEnabled();
   });
 
   it("adds a task when you press Enter, then asks for a reload", async () => {

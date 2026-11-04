@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import { answer, deferred, fakeBackend, githubItem, task } from "./test/fakeBackend";
+import { answer, clickupItem, deferred, fakeBackend, githubItem, task } from "./test/fakeBackend";
 import type { Answer } from "./api";
 
 const panel = () => screen.queryByRole("complementary", { name: "Conversation" });
@@ -201,7 +201,7 @@ describe("GitHub list: saved copy and timer", () => {
   it("reloads from GitHub on the timer from the settings", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      const fake = await startApp({ github: [githubItem(7, "assigned")], settings: { github_refresh_minutes: 5 } });
+      const fake = await startApp({ github: [githubItem(7, "assigned")], settings: { refresh_minutes: 5 } });
       await waitFor(() => expect(fake.githubFetches).toBe(1));
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       await waitFor(() => expect(fake.githubFetches).toBe(2));
@@ -213,7 +213,7 @@ describe("GitHub list: saved copy and timer", () => {
   it("does not reload on a timer when the setting is 'only when I click reload'", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      const fake = await startApp({ github: [githubItem(7, "assigned")], settings: { github_refresh_minutes: 0 } });
+      const fake = await startApp({ github: [githubItem(7, "assigned")], settings: { refresh_minutes: 0 } });
       await waitFor(() => expect(fake.githubFetches).toBe(1));
       await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
       expect(fake.githubFetches).toBe(1);
@@ -253,13 +253,13 @@ describe("settings page", () => {
   it("saves the GitHub reload time", async () => {
     const fake = await startApp();
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const select = screen.getByLabelText("Reload GitHub items");
+    const select = screen.getByLabelText("Reload GitHub and ClickUp items");
     expect(select).toHaveValue("15");
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     await userEvent.selectOptions(select, "Only when I click reload");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Saved")).toBeInTheDocument();
-    expect(fake.settings.github_refresh_minutes).toBe(0);
+    expect(fake.settings.refresh_minutes).toBe(0);
     await userEvent.click(screen.getByRole("button", { name: "← Back" }));
     expect(screen.getByText("Good to see you.")).toBeInTheDocument();
   });
@@ -267,8 +267,112 @@ describe("settings page", () => {
   it("shows a failed save", async () => {
     await startApp({ fail: { set_settings: "read-only folder" } });
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    await userEvent.selectOptions(screen.getByLabelText("Reload GitHub items"), "Every hour");
+    await userEvent.selectOptions(screen.getByLabelText("Reload GitHub and ClickUp items"), "Every hour");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Not saved: read-only folder")).toBeInTheDocument();
+  });
+});
+
+describe("ClickUp", () => {
+  const connected = { clickupToken: "pk_test" };
+
+  it("shows nothing from ClickUp and makes no ClickUp call when it is not connected", async () => {
+    const fake = await startApp({ clickup: [clickupItem("86a", "Write notes")] });
+    await userEvent.click(screen.getByRole("button", { name: "ClickUp" }));
+    expect(screen.getByText(/ClickUp is not connected/)).toBeInTheDocument();
+    expect(screen.queryByText("Write notes")).not.toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "clickup_items")).toBe(false);
+  });
+
+  it("shows your ClickUp tasks next to the others, with status and list", async () => {
+    await startApp({ ...connected, tasks: [task("Call Sam")], clickup: [clickupItem("86a", "Write notes", { custom_id: "DEV-42" })] });
+    const row = (await screen.findByText("Write notes")).closest("li")!;
+    expect(within(row).getByText("in progress")).toBeInTheDocument();
+    expect(within(row).getByText(/DEV-42 · Sprint 12/)).toBeInTheDocument();
+    expect(screen.getByText("Call Sam")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "ClickUp" }));
+    expect(screen.queryByText("Call Sam")).not.toBeInTheDocument();
+    expect(screen.getByText("Write notes")).toBeInTheDocument();
+  });
+
+  it("the tick closes the task in ClickUp, and Undo puts the old status back", async () => {
+    const fake = await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes", { status: "review" })] });
+    await userEvent.click(await screen.findByRole("checkbox", { name: "Close in ClickUp: Write notes" }));
+    expect(await screen.findByText("Closed in ClickUp: Write notes")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Write notes" })).not.toBeInTheDocument();
+    expect(fake.clickup).toEqual([]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Undo: Write notes" }));
+    expect(await screen.findByRole("link", { name: "Write notes" })).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.cmd === "clickup_undo_done")!.args).toEqual({ id: "86a", status: "review" });
+    expect(screen.queryByText(/Closed in ClickUp/)).not.toBeInTheDocument();
+  });
+
+  it("a second tick keeps the undo of the first task", async () => {
+    const fake = await startApp({
+      ...connected,
+      clickup: [clickupItem("86a", "Write notes", { status: "review" }), clickupItem("86b", "Fix login", { status: "to do" })],
+    });
+    await userEvent.click(await screen.findByRole("checkbox", { name: "Close in ClickUp: Write notes" }));
+    await screen.findByText("Closed in ClickUp: Write notes");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Close in ClickUp: Fix login" }));
+    await screen.findByText("Closed in ClickUp: Fix login");
+    expect(screen.getByText("Closed in ClickUp: Write notes")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Undo: Write notes" }));
+    expect(await screen.findByRole("link", { name: "Write notes" })).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.cmd === "clickup_undo_done")!.args).toEqual({ id: "86a", status: "review" });
+    expect(screen.queryByText("Closed in ClickUp: Write notes")).not.toBeInTheDocument();
+    expect(screen.getByText("Closed in ClickUp: Fix login")).toBeInTheDocument();
+  });
+
+  it("a failed close keeps the task and says why", async () => {
+    await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes")], fail: { clickup_mark_done: "ClickUp said 403: no access" } });
+    await userEvent.click(await screen.findByRole("checkbox", { name: "Close in ClickUp: Write notes" }));
+    expect(await screen.findByText("ClickUp: ClickUp said 403: no access")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Write notes" })).toBeInTheDocument();
+  });
+
+  it("the reload button and the timer ask ClickUp again", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fake = await startApp({ ...connected, clickup: [clickupItem("86a")], settings: { refresh_minutes: 5 } });
+      await waitFor(() => expect(fake.clickupFetches).toBe(1));
+      await userEvent.click(screen.getByTitle("Reload the list"));
+      await waitFor(() => expect(fake.clickupFetches).toBe(2));
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await waitFor(() => expect(fake.clickupFetches).toBe(3));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows the saved list with a warning, or the error, when ClickUp cannot be reached", async () => {
+    await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes")], clickupWarning: "Cannot reach ClickUp, so this is the saved list." });
+    expect(await screen.findByText("Write notes")).toBeInTheDocument();
+    expect(screen.getByText(/Cannot reach ClickUp/)).toBeInTheDocument();
+  });
+
+  it("connects with a token on the Settings page, then loads the tasks", async () => {
+    const fake = await startApp({ clickup: [clickupItem("86a", "Write notes")] });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await userEvent.type(screen.getByLabelText("ClickUp"), "bad");
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByText(/ClickUp refused the token/)).toBeInTheDocument();
+
+    await userEvent.clear(screen.getByLabelText("ClickUp"));
+    await userEvent.type(screen.getByLabelText("ClickUp"), "pk_123");
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("Connected as okky.")).toBeInTheDocument();
+    expect(fake.clickupToken).toBe("pk_123");
+
+    await userEvent.click(screen.getByRole("button", { name: "← Back" }));
+    expect(await screen.findByText("Write notes")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    expect(await screen.findByText(/Disconnected/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "← Back" }));
+    await waitFor(() => expect(screen.queryByText("Write notes")).not.toBeInTheDocument());
   });
 });

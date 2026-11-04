@@ -17,7 +17,8 @@ You are aifred, the user's personal assistant.
 - When you list items, give each one a markdown link and a one-line summary.
 - You can add tasks to the user's local to-do list and mark them done.
 - Add a task only when the user asks you to track, note, or remember to do something.
-- GitHub is read-only. If the user asks for a change there, say what you would change.";
+- GitHub is read-only. If the user asks for a change there, say what you would change.
+- ClickUp is read-only for you. The user marks ClickUp tasks done in the AIfred to-do list.";
 
 /// What the backend reported for one message.
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +171,22 @@ impl<B: Backend> Assistant<B> {
             }
             None => notice("aifred-github-mcp", "GitHub tools"),
         }
+
+        // ClickUp tools only when the user connected ClickUp. The server reads
+        // the token from the data folder itself, so the token never goes into
+        // the tool settings file.
+        if crate::clickup::token(&self.dir).is_some() {
+            match self.tool_path("aifred-clickup-mcp") {
+                Some(command) => servers.push(ToolServer {
+                    name: "clickup".into(),
+                    command,
+                    args: vec![],
+                    env: vec![("AIFRED_HOME".into(), self.dir.display().to_string())],
+                    allowed_tools: ["my_tasks", "task_details"].map(String::from).to_vec(),
+                }),
+                None => notice("aifred-clickup-mcp", "ClickUp tools"),
+            }
+        }
         (servers, missing)
     }
 
@@ -247,6 +264,8 @@ mod tests {
         let dir = temp("no-tools");
         let (servers, missing) = assistant(dir.clone(), dir.join("empty")).tool_servers();
         assert!(servers.is_empty());
+        // AIFRED_CLICKUP_TOKEN in the developer's shell also adds a ClickUp notice.
+        let missing = without_clickup(missing);
         assert_eq!(missing.len(), 2);
         assert!(missing[0].contains("aifred-tasks-mcp"), "got {missing:?}");
         assert!(missing[1].contains("aifred-github-mcp"), "got {missing:?}");
@@ -262,7 +281,30 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "tasks");
         assert_eq!(servers[0].env, vec![("AIFRED_HOME".to_string(), a.dir.display().to_string())]);
-        assert_eq!(missing.len(), 1, "only GitHub is missing");
+        assert_eq!(without_clickup(missing).len(), 1, "only GitHub is missing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The notices without the ClickUp one. It shows only when a token is set,
+    /// and AIFRED_CLICKUP_TOKEN can set one outside the test.
+    fn without_clickup(missing: Vec<String>) -> Vec<String> {
+        missing.into_iter().filter(|m| !m.contains("aifred-clickup-mcp")).collect()
+    }
+
+    #[test]
+    fn clickup_tools_start_only_with_a_token_and_never_get_it() {
+        let dir = temp("clickup-tool");
+        std::fs::write(dir.join("aifred-clickup-mcp"), "").unwrap();
+        let a = assistant(dir.clone(), dir.clone());
+        let names = |a: &Assistant<ClaudeBackend>| a.tool_servers().0.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        if std::env::var_os("AIFRED_CLICKUP_TOKEN").is_none() {
+            assert!(!names(&a).contains(&"clickup".to_string()), "no token, no ClickUp tools");
+        }
+        crate::clickup::save_token(&a.dir, "pk_1_SECRET").unwrap();
+        let (servers, _) = a.tool_servers();
+        let s = servers.iter().find(|s| s.name == "clickup").expect("ClickUp tools start");
+        assert_eq!(s.allowed_tools, vec!["my_tasks", "task_details"], "read-only tools only");
+        assert!(!format!("{:?}", s.env).contains("SECRET"), "the token stays out of the tool settings");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

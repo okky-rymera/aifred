@@ -18,7 +18,7 @@ const BRIEF_PROMPT =
 const SUGGESTIONS = [
   { label: "Brief me", prompt: BRIEF_PROMPT },
   { label: "What should I review?", prompt: "Which pull requests wait for my review? One line each." },
-  { label: "Plan my day", prompt: "Look at my to-do list and GitHub items. Suggest an order for today." },
+  { label: "Plan my day", prompt: "Look at my to-do list, GitHub items, and ClickUp tasks. Suggest an order for today." },
 ];
 
 function formatMeta(a: api.Answer): string {
@@ -82,6 +82,11 @@ export default function App() {
   const [settings, setSettings] = useState<api.Settings | null>(null);
   const [page, setPage] = useState<"home" | "settings">("home");
   const [githubState, setGithubState] = useState("loading");
+  const [clickup, setClickup] = useState<api.ClickupList>({ items: [], fetched_at: 0 });
+  const [clickupState, setClickupState] = useState("loading");
+  const [clickupToken, setClickupToken] = useState<api.ClickupTokenStatus | null>(null);
+  /** Counts ClickUp loads. Only the newest load may change the screen. */
+  const clickupLoad = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
   /** Counts GitHub loads. Only the newest load may change the screen. */
   const githubLoad = useRef(0);
@@ -115,6 +120,43 @@ export default function App() {
       });
   }, []);
 
+  /** Like loadGithub. Does nothing when ClickUp is not connected. */
+  const loadClickup = useCallback((force: boolean, connected: boolean) => {
+    const n = ++clickupLoad.current;
+    if (!connected) {
+      setClickup({ items: [], fetched_at: 0 });
+      setClickupState("off");
+      return;
+    }
+    setClickupState("loading");
+    api
+      .clickupItems(force)
+      .then((list) => {
+        if (n !== clickupLoad.current) return;
+        setClickup(list);
+        setClickupState("ok");
+      })
+      .catch((e) => {
+        if (n !== clickupLoad.current) return;
+        setClickupState(String(e));
+      });
+  }, []);
+
+  /** Reads whether ClickUp is connected, then loads its list. */
+  const checkClickup = useCallback(
+    (force: boolean) => {
+      api
+        .clickupTokenStatus()
+        .then((t) => {
+          setClickupToken(t);
+          loadClickup(force, t.set);
+        })
+        .catch((e) => setClickupState(String(e)));
+    },
+    [loadClickup],
+  );
+  const clickupOn = clickupToken?.set ?? false;
+
   useEffect(() => {
     const failed = (what: string) => (e: unknown) => setLoadError(`Cannot load ${what}: ${e}`);
     api
@@ -128,19 +170,23 @@ export default function App() {
       .then(setSettings)
       .catch((e) => {
         failed("settings")(e);
-        setSettings({ github_refresh_minutes: 15 });
+        setSettings({ refresh_minutes: 15 });
       });
     loadTasks();
     loadGithub(false);
-  }, [loadTasks, loadGithub]);
+    checkClickup(false);
+  }, [loadTasks, loadGithub, checkClickup]);
 
   // Reload the GitHub list on the timer from the settings. 0 means never.
-  const refreshMinutes = settings?.github_refresh_minutes ?? 0;
+  const refreshMinutes = settings?.refresh_minutes ?? 0;
   useEffect(() => {
     if (refreshMinutes <= 0) return;
-    const timer = setInterval(() => loadGithub(true), refreshMinutes * 60_000);
+    const timer = setInterval(() => {
+      loadGithub(true);
+      loadClickup(true, clickupOn);
+    }, refreshMinutes * 60_000);
     return () => clearInterval(timer);
-  }, [refreshMinutes, loadGithub]);
+  }, [refreshMinutes, loadGithub, loadClickup, clickupOn]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
@@ -278,7 +324,13 @@ export default function App() {
       <main className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-6 py-8">
           {page === "settings" && settings && (
-            <SettingsPage settings={settings} onSaved={setSettings} onBack={() => setPage("home")} />
+            <SettingsPage
+              settings={settings}
+              onSaved={setSettings}
+              onBack={() => setPage("home")}
+              clickupToken={clickupToken}
+              onClickupTokenChanged={() => checkClickup(true)}
+            />
           )}
           {page === "home" && !chatOpen && (
             <div className="mb-10">
@@ -314,10 +366,17 @@ export default function App() {
               githubWarning={github.warning}
               githubState={githubState}
               tasksError={tasksError}
+              clickup={clickup.items}
+              clickupState={clickupState}
+              clickupFetchedAt={clickup.fetched_at}
+              clickupWarning={clickup.warning}
+              onClickupDone={(id) => setClickup((l) => ({ ...l, items: l.items.filter((i) => i.id !== id) }))}
+              onClickupReload={() => loadClickup(true, clickupOn)}
               onChange={loadTasks}
               onRefresh={() => {
                 loadTasks();
                 loadGithub(true);
+                loadClickup(true, clickupOn);
               }}
             />
           )}

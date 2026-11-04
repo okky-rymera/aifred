@@ -10,6 +10,7 @@ AIfred owns the memory, the conversation history, the tools, and the access rule
 - `crates/aifred`: the terminal commands.
 - `apps/desktop`: the desktop app (Tauri 2, React, Tailwind).
 - `crates/aifred-github-mcp`: a read-only GitHub tool server (MCP, stdio). It uses your `gh` login.
+- `crates/aifred-clickup-mcp`: a read-only ClickUp tool server (MCP, stdio). It reads your ClickUp token from the data folder.
 - `crates/aifred-tasks-mcp`: a local task tool server. AIfred uses it to add, list, and finish tasks. It can only change `tasks.json` in the data folder.
 
 ## Desktop app
@@ -17,7 +18,7 @@ AIfred owns the memory, the conversation history, the tools, and the access rule
 Run these commands one time:
 
 ```bash
-cargo build                    # builds the GitHub and task tool servers
+cargo build                    # builds the GitHub, ClickUp, and task tool servers
 cd apps/desktop && npm install
 ```
 
@@ -27,7 +28,7 @@ Start the app:
 cd apps/desktop && npx tauri dev
 ```
 
-The app looks for the tool servers (`aifred-github-mcp`, `aifred-tasks-mcp`) in the same folder as the app program (`target/debug`). If one is missing, the chat still works without those tools, and the chat panel shows a notice. An installed app package does not include the tool servers yet.
+The app looks for the tool servers (`aifred-github-mcp`, `aifred-clickup-mcp`, `aifred-tasks-mcp`) in the same folder as the app program (`target/debug`). If one is missing, the chat still works without those tools, and the chat panel shows a notice. An installed app package does not include the tool servers yet.
 
 ## Tests
 
@@ -62,6 +63,7 @@ aifred new                         # start a new conversation
 
 - `AIFRED_HOME`: data folder. Default: `~/.aifred`.
 - `AIFRED_GITHUB_OWNERS`: comma-separated GitHub owners. GitHub tools refuse all other owners.
+- `AIFRED_CLICKUP_TOKEN`: ClickUp personal token. It overrides the token from the Settings page.
 - `AIFRED_MODEL`: Claude model name. Default: the Claude Code default.
 
 Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not your login.
@@ -70,7 +72,7 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 
 - Claude gets no built-in tools: no shell, no file access, no web.
 - Claude gets only the MCP servers and tools that AIfred names. All other tools are denied.
-- The GitHub tools that Claude uses can only read.
+- The GitHub and ClickUp tools that Claude uses can only read.
 - The desktop app also only reads GitHub. It never changes or closes an issue or pull request.
 
 ## GitHub list
@@ -79,6 +81,14 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - AIfred loads the list from GitHub again on a timer. Set the time on the Settings page (default: 15 minutes). The reload button always loads from GitHub.
 - GitHub items have no checkbox. An item leaves the list when it is closed on GitHub, at the next reload.
 - When your pull request closes one of your issues, the list shows one row for the issue. The pull request shows as a badge under the issue title.
+
+## ClickUp list
+
+- Connect ClickUp on the Settings page. Paste your personal API token (ClickUp: Settings > Apps > API Token). AIfred checks the token with ClickUp, then saves it in `clickup-token` in the data folder. Only you can read that file.
+- The list shows the open ClickUp tasks assigned to you, in all your workspaces. Tasks in a "done" or "closed" status do not show. It uses the same saved copy and timer as the GitHub list (`clickup-cache.json`).
+- Tick a ClickUp task to close it in ClickUp. AIfred moves the task to the "closed" status of its list, like the ClickUp "mark complete" button. An Undo puts the old status back.
+- This tick is the only change AIfred makes in ClickUp. The chat can only read ClickUp.
+- The token never goes into the tool settings file that Claude reads. The ClickUp tool server reads the token itself.
 
 ## Check the app without a window on your screen
 

@@ -2,6 +2,8 @@
 
 pub mod assistant;
 pub mod backend;
+pub mod clickup;
+pub mod clickup_list;
 pub mod files;
 pub mod github;
 pub mod github_list;

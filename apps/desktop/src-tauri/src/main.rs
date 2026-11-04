@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use aifred_core::backend::{Event, claude::ClaudeBackend};
 use aifred_core::files::now;
 use aifred_core::settings::{self, Settings};
+use aifred_core::clickup::{self, TokenStatus};
+use aifred_core::clickup_list::{ClickupList, ClickupStore};
 use aifred_core::github;
 use aifred_core::github_list::{GithubList, GithubStore};
 use aifred_core::history::Turn;
@@ -119,14 +121,7 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
     let dir = app.assistant.dir.clone();
     if !force {
         let d = dir.clone();
-        let saved = blocking(&app, move |_| {
-            // A broken settings file must not hide the list: use the defaults.
-            let minutes = settings::load_or_default(&d).github_refresh_minutes;
-            // 0 means "only when I click reload": the saved list never gets too old.
-            let max_age = if minutes == 0 { u64::MAX } else { u64::from(minutes) * 60 };
-            GithubStore::new(&d).cached(max_age, now())
-        })
-        .await?;
+        let saved = blocking(&app, move |_| GithubStore::new(&d).cached(max_age(&d), now())).await?;
         if let Some(list) = saved {
             return Ok(list);
         }
@@ -145,6 +140,100 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
             }
         }
     }
+}
+
+/// The saved list may be used while it is younger than the refresh time in the settings.
+fn max_age(dir: &std::path::Path) -> u64 {
+    settings::max_age_secs(dir)
+}
+
+fn clickup_token(dir: &std::path::Path) -> CmdResult<String> {
+    clickup::token(dir).ok_or_else(|| "ClickUp is not connected. Add a token on the Settings page.".to_string())
+}
+
+fn clickup_client(dir: &std::path::Path) -> CmdResult<clickup::Client> {
+    clickup_token(dir).map(|t| clickup::Client::new(&t))
+}
+
+/// The ClickUp list. It works like github_items: the saved list while it is
+/// fresh, and the saved list with a warning when ClickUp cannot be asked.
+#[tauri::command]
+async fn clickup_items(app: State<'_, App>, force: bool) -> CmdResult<ClickupList> {
+    let dir = app.assistant.dir.clone();
+    let token = clickup_token(&dir)?;
+    let client = clickup::Client::new(&token);
+    // The saved list is used only for the same token. AIFRED_CLICKUP_TOKEN can
+    // change between starts, and then the saved list is of another account.
+    let account = clickup::account_key(&token);
+    if !force {
+        let (d, acc) = (dir.clone(), account.clone());
+        if let Some(list) = blocking(&app, move |_| ClickupStore::new(&d).cached(&acc, max_age(&d), now())).await? {
+            return Ok(list);
+        }
+    }
+    match client.my_tasks().await {
+        Ok(items) => blocking(&app, move |_| ClickupStore::new(&dir).save(&account, items, now())).await,
+        Err(e) => {
+            let e = err(e);
+            match blocking(&app, move |_| ClickupStore::new(&dir).cached(&account, u64::MAX, now())).await {
+                Ok(Some(mut list)) => {
+                    let cut = list.warning.take().map(|w| format!(" {w}")).unwrap_or_default();
+                    list.warning = Some(format!("Cannot reach ClickUp, so this is the saved list. {e}{cut}"));
+                    Ok(list)
+                }
+                _ => Err(e),
+            }
+        }
+    }
+}
+
+/// Moves one task to the closed status of its ClickUp list. This is the only
+/// change AIfred makes in ClickUp, and only the user starts it.
+/// Returns the status the task had before, for the undo.
+#[tauri::command]
+async fn clickup_mark_done(app: State<'_, App>, id: String) -> CmdResult<String> {
+    let dir = app.assistant.dir.clone();
+    let before = clickup_client(&dir)?.mark_done(&id).await.map_err(err)?;
+    // ClickUp has the change. If the saved list cannot change, the task only
+    // shows until the next reload, so this is not an error.
+    if let Err(e) = blocking(&app, move |_| ClickupStore::new(&dir).remove(&id)).await {
+        eprintln!("aifred: cannot update the saved ClickUp list: {e}");
+    }
+    Ok(before)
+}
+
+/// Puts a task back to the status it had before clickup_mark_done.
+#[tauri::command]
+async fn clickup_undo_done(app: State<'_, App>, id: String, status: String) -> CmdResult<()> {
+    clickup_client(&app.assistant.dir)?.set_status(&id, &status).await.map_err(err)
+}
+
+#[tauri::command]
+async fn clickup_token_status(app: State<'_, App>) -> CmdResult<TokenStatus> {
+    blocking(&app, |a| Ok(clickup::token_status(&a.dir))).await
+}
+
+/// Checks the token with ClickUp, then saves it. Returns the ClickUp user name.
+#[tauri::command]
+async fn set_clickup_token(app: State<'_, App>, token: String) -> CmdResult<String> {
+    let token = token.trim().to_string();
+    let (_, name) = clickup::Client::new(&token).me().await.map_err(err)?;
+    blocking(&app, move |a| {
+        clickup::save_token(&a.dir, &token)?;
+        // The old list can belong to another ClickUp account.
+        ClickupStore::new(&a.dir).clear()
+    })
+    .await?;
+    Ok(name)
+}
+
+#[tauri::command]
+async fn remove_clickup_token(app: State<'_, App>) -> CmdResult<()> {
+    blocking(&app, |a| {
+        clickup::remove_token(&a.dir)?;
+        ClickupStore::new(&a.dir).clear()
+    })
+    .await
 }
 
 #[tauri::command]
@@ -180,6 +269,12 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         set_task_done,
         delete_task,
         github_items,
+        clickup_items,
+        clickup_mark_done,
+        clickup_undo_done,
+        clickup_token_status,
+        set_clickup_token,
+        remove_clickup_token,
         get_settings,
         set_settings,
         info
@@ -316,10 +411,10 @@ mod tests {
     #[test]
     fn settings_round_trip_and_bad_value_is_refused() {
         let (_app, win, dir) = window("settings");
-        assert_eq!(call(&win, "get_settings", json!({})).unwrap()["github_refresh_minutes"], 15);
-        call(&win, "set_settings", json!({ "settings": { "github_refresh_minutes": 30 } })).unwrap();
-        assert_eq!(call(&win, "get_settings", json!({})).unwrap()["github_refresh_minutes"], 30);
-        assert!(call(&win, "set_settings", json!({ "settings": { "github_refresh_minutes": 99999 } })).is_err());
+        assert_eq!(call(&win, "get_settings", json!({})).unwrap()["refresh_minutes"], 15);
+        call(&win, "set_settings", json!({ "settings": { "refresh_minutes": 30 } })).unwrap();
+        assert_eq!(call(&win, "get_settings", json!({})).unwrap()["refresh_minutes"], 30);
+        assert!(call(&win, "set_settings", json!({ "settings": { "refresh_minutes": 99999 } })).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -346,7 +441,7 @@ mod tests {
     #[test]
     fn manual_only_setting_never_makes_the_saved_list_old() {
         let (_app, win, dir) = window("gh-manual");
-        call(&win, "set_settings", json!({ "settings": { "github_refresh_minutes": 0 } })).unwrap();
+        call(&win, "set_settings", json!({ "settings": { "refresh_minutes": 0 } })).unwrap();
         save_list(&dir, 30 * 86400); // 30 days old
         let l = call(&win, "github_items", json!({ "force": false })).unwrap();
         assert_eq!(l["items"].as_array().unwrap().len(), 1);
@@ -360,8 +455,8 @@ mod tests {
         std::fs::write(dir.join("settings.json"), "{ not json").unwrap();
         let l = call(&win, "github_items", json!({ "force": false })).unwrap();
         assert_eq!(l["items"][0]["title"], "Fix cart");
-        call(&win, "set_settings", json!({ "settings": { "github_refresh_minutes": 30 } })).unwrap();
-        assert_eq!(call(&win, "get_settings", json!({})).unwrap()["github_refresh_minutes"], 30);
+        call(&win, "set_settings", json!({ "settings": { "refresh_minutes": 30 } })).unwrap();
+        assert_eq!(call(&win, "get_settings", json!({})).unwrap()["refresh_minutes"], 30);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -373,6 +468,34 @@ mod tests {
         for cmd in ["github_mark_done", "github_close", "github_undo"] {
             assert!(call(&win, cmd, json!({ "id": "acme/shop#7" })).is_err(), "{cmd} must not exist");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn clickup_list_comes_from_the_saved_list_while_it_is_fresh() {
+        let (_app, win, dir) = window("cu-cache");
+        let item: clickup::ClickupItem = serde_json::from_value(json!({
+            "id": "86abc", "title": "Write notes", "url": "https://app.clickup.com/t/86abc",
+            "status": "to do", "list": "Sprint", "workspace": "Rymera", "updated": 1
+        }))
+        .unwrap();
+        if std::env::var_os("AIFRED_CLICKUP_TOKEN").is_none() {
+            ClickupStore::new(&dir).save("x", clickup::MyTasks { items: vec![item.clone()], cut: vec![] }, now() - 60).unwrap();
+            let e = call(&win, "clickup_items", json!({ "force": false })).unwrap_err();
+            assert!(e.as_str().unwrap().contains("Settings page"), "no token: {e}");
+            assert_eq!(call(&win, "clickup_token_status", json!({})).unwrap()["set"], false);
+        }
+        clickup::save_token(&dir, "pk_test").unwrap();
+        assert_eq!(call(&win, "clickup_token_status", json!({})).unwrap()["set"], true);
+        // The token in use: the file, or AIFRED_CLICKUP_TOKEN when it is set.
+        let account = clickup::account_key(&clickup::token(&dir).unwrap());
+        ClickupStore::new(&dir).save(&account, clickup::MyTasks { items: vec![item], cut: vec![] }, now() - 60).unwrap();
+        // No ClickUp call here: the saved list is fresh.
+        let l = call(&win, "clickup_items", json!({ "force": false })).unwrap();
+        assert_eq!(l["items"][0]["title"], "Write notes");
+        call(&win, "remove_clickup_token", json!({})).unwrap();
+        assert!(!dir.join("clickup-token").exists());
+        assert!(!dir.join("clickup-cache.json").exists(), "the list of the old account is gone");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
