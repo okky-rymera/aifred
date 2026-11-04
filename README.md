@@ -1,8 +1,8 @@
-# aifred
+# AIfred
 
-aifred is a personal assistant. This is a prototype.
+AIfred is a personal assistant. This is a prototype.
 
-aifred owns the memory, the conversation history, the tools, and the access rules. The AI service is a part that you can replace. The first service is Claude Code in headless mode (`claude -p`) with your own login. See `docs/research.md` for the decisions.
+AIfred owns the memory, the conversation history, the tools, and the access rules. The AI service is a part that you can replace. The first service is Claude Code in headless mode (`claude -p`) with your own login. See `docs/research.md` for the decisions.
 
 ## Parts
 
@@ -10,7 +10,7 @@ aifred owns the memory, the conversation history, the tools, and the access rule
 - `crates/aifred`: the terminal commands.
 - `apps/desktop`: the desktop app (Tauri 2, React, Tailwind).
 - `crates/aifred-github-mcp`: a read-only GitHub tool server (MCP, stdio). It uses your `gh` login.
-- `crates/aifred-tasks-mcp`: a local task tool server. aifred uses it to add, list, and finish tasks. It can only change `tasks.json` in the data folder.
+- `crates/aifred-tasks-mcp`: a local task tool server. AIfred uses it to add, list, and finish tasks. It can only change `tasks.json` in the data folder.
 
 ## Desktop app
 
@@ -69,13 +69,13 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 ## Access limits
 
 - Claude gets no built-in tools: no shell, no file access, no web.
-- Claude gets only the MCP servers and tools that aifred names. All other tools are denied.
+- Claude gets only the MCP servers and tools that AIfred names. All other tools are denied.
 - The GitHub tools that Claude uses can only read.
 - The desktop app can close a GitHub issue or pull request. It does this only when you tick the item and then click "Close on GitHub". It never closes a pull request that only asks for your review.
 
 ## GitHub list
 
-- aifred saves the last GitHub list in `github-cache.json` in the data folder. When the window opens, it shows the saved list.
-- aifred loads the list from GitHub again on a timer. Set the time on the Settings page (default: 15 minutes). The reload button always loads from GitHub.
-- When you tick a GitHub item, aifred hides it and checks GitHub. If the item is still open, aifred asks if you want to close it.
+- AIfred saves the last GitHub list in `github-cache.json` in the data folder. When the window opens, it shows the saved list.
+- AIfred loads the list from GitHub again on a timer. Set the time on the Settings page (default: 15 minutes). The reload button always loads from GitHub.
+- When you tick a GitHub item, AIfred hides it and checks GitHub. If the item is still open, AIfred asks if you want to close it.
 - The ticked items are in `github-done.json`. Use "Show done" to undo a tick.

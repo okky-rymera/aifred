@@ -19,7 +19,7 @@ describe("home page", () => {
   it("shows the chat box and the to-do list, and no chat panel", async () => {
     await startApp({ tasks: [task("Call Sam")], github: [githubItem(7, "review_requested", "Fix cart")] });
     expect(screen.getByText("Good to see you.")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Ask aifred anything about your work…")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Ask AIfred anything about your work…")).toBeInTheDocument();
     expect(await screen.findByText("Fix cart")).toBeInTheDocument();
     expect(screen.getByText("Call Sam")).toBeInTheDocument();
     expect(panel()).not.toBeInTheDocument();
@@ -42,7 +42,7 @@ describe("sending a message", () => {
     const reply = deferred<Answer>();
     await startApp({ tasks: [task("Call Sam")], onAsk: () => reply.promise });
 
-    await userEvent.type(screen.getByPlaceholderText("Ask aifred anything about your work…"), "What is new?{Enter}");
+    await userEvent.type(screen.getByPlaceholderText("Ask AIfred anything about your work…"), "What is new?{Enter}");
 
     const side = panel()!;
     expect(side).toBeInTheDocument();
@@ -57,7 +57,7 @@ describe("sending a message", () => {
     expect(within(side).queryByText("Thinking…")).not.toBeInTheDocument();
   });
 
-  it("shows progress while aifred works", async () => {
+  it("shows progress while AIfred works", async () => {
     const reply = deferred<Answer>();
     await startApp({
       onAsk: (_p, progress) => {
@@ -65,7 +65,7 @@ describe("sending a message", () => {
         return reply.promise;
       },
     });
-    await userEvent.type(screen.getByPlaceholderText(/Ask aifred anything/), "Reviews?{Enter}");
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Reviews?{Enter}");
     expect(await within(panel()!).findByText("✓ Checking reviews you were asked to do")).toBeInTheDocument();
     reply.resolve(answer("None."));
     expect(await within(panel()!).findByText("None.")).toBeInTheDocument();
@@ -80,35 +80,35 @@ describe("sending a message", () => {
 
   it("Shift+Enter makes a new line and does not send", async () => {
     const fake = await startApp();
-    const box = screen.getByPlaceholderText(/Ask aifred anything/);
+    const box = screen.getByPlaceholderText(/Ask AIfred anything/);
     await userEvent.type(box, "line one{Shift>}{Enter}{/Shift}line two");
     expect(box).toHaveValue("line one\nline two");
     expect(fake.calls.some((c) => c.cmd === "ask")).toBe(false);
   });
 
-  it("reloads the to-do list after the answer, so tasks aifred added show", async () => {
+  it("reloads the to-do list after the answer, so tasks AIfred added show", async () => {
     const fake = await startApp({
       onAsk: () => {
         fake.tasks.push(task("Send the April invoice to Sam", { added_by: "aifred" }));
         return answer("Added it.");
       },
     });
-    await userEvent.type(screen.getByPlaceholderText(/Ask aifred anything/), "Remind me to send the invoice{Enter}");
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Remind me to send the invoice{Enter}");
     expect(await screen.findByText("Send the April invoice to Sam")).toBeInTheDocument();
-    expect(screen.getByText("added by aifred")).toBeInTheDocument();
+    expect(screen.getByText("added by AIfred")).toBeInTheDocument();
   });
 
   it("shows an error in the panel when the question fails", async () => {
     await startApp({ onAsk: () => Promise.reject("claude is not logged in") });
-    await userEvent.type(screen.getByPlaceholderText(/Ask aifred anything/), "Hi{Enter}");
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
     expect(await within(panel()!).findByText("claude is not logged in")).toBeInTheDocument();
   });
 
-  it("does not send while aifred is still working", async () => {
+  it("does not send while AIfred is still working", async () => {
     const reply = deferred<Answer>();
     const fake = await startApp({ onAsk: () => reply.promise });
-    await userEvent.type(screen.getByPlaceholderText(/Ask aifred anything/), "First{Enter}");
-    const box = within(panel()!).getByPlaceholderText("Ask aifred…");
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "First{Enter}");
+    const box = within(panel()!).getByPlaceholderText("Ask AIfred…");
     await userEvent.type(box, "Second{Enter}");
     expect(within(panel()!).getByRole("button", { name: "Send" })).toBeDisabled();
     expect(fake.calls.filter((c) => c.cmd === "ask")).toHaveLength(1);
@@ -120,7 +120,7 @@ describe("sending a message", () => {
 describe("closing the chat panel", () => {
   it("✕ goes back to the home page and keeps the conversation", async () => {
     await startApp();
-    await userEvent.type(screen.getByPlaceholderText(/Ask aifred anything/), "Hi{Enter}");
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
     await within(panel()!).findByText("You said: Hi");
 
     await userEvent.click(screen.getByTitle("Close the conversation panel"));
@@ -131,7 +131,7 @@ describe("closing the chat panel", () => {
 
   it("New starts a new conversation and closes the panel", async () => {
     const fake = await startApp();
-    await userEvent.type(screen.getByPlaceholderText(/Ask aifred anything/), "Hi{Enter}");
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
     await within(panel()!).findByText("You said: Hi");
 
     await userEvent.click(within(panel()!).getByRole("button", { name: "New" }));
@@ -142,7 +142,7 @@ describe("closing the chat panel", () => {
 
   it("the logo goes back home", async () => {
     await startApp();
-    await userEvent.type(screen.getByPlaceholderText(/Ask aifred anything/), "Hi{Enter}");
+    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
     await within(panel()!).findByText("You said: Hi");
     await userEvent.click(screen.getByTitle("Home"));
     expect(panel()).not.toBeInTheDocument();
@@ -150,9 +150,9 @@ describe("closing the chat panel", () => {
 });
 
 describe("memory editor", () => {
-  it("saves what aifred knows about you", async () => {
+  it("saves what AIfred knows about you", async () => {
     const fake = await startApp({ memory: "- I work on StoreAgent." });
-    await userEvent.click(screen.getByRole("button", { name: /What aifred knows about you/ }));
+    await userEvent.click(screen.getByRole("button", { name: /What AIfred knows about you/ }));
     const box = screen.getByDisplayValue("- I work on StoreAgent.");
     await userEvent.type(box, "\n- I like short answers.");
     await userEvent.click(screen.getByRole("button", { name: "Save memory" }));
@@ -164,7 +164,7 @@ describe("memory editor", () => {
 describe("errors the window must show", () => {
   it("a failed memory save says so and keeps the edit", async () => {
     await startApp({ memory: "", fail: { set_memory: "read-only folder" } });
-    await userEvent.click(screen.getByRole("button", { name: /What aifred knows about you/ }));
+    await userEvent.click(screen.getByRole("button", { name: /What AIfred knows about you/ }));
     await userEvent.type(screen.getByPlaceholderText(/StoreAgent/), "- Note");
     await userEvent.click(screen.getByRole("button", { name: "Save memory" }));
     expect(await screen.findByText("Not saved: read-only folder")).toBeInTheDocument();
@@ -252,7 +252,7 @@ describe("marking a GitHub item done", () => {
     await waitFor(() => expect(screen.queryByText(/still open on GitHub/)).not.toBeInTheDocument());
   });
 
-  it("'Keep it open' marks it done in aifred only", async () => {
+  it("'Keep it open' marks it done in AIfred only", async () => {
     const fake = await startApp({ github: [githubItem(7, "your_pr", "My PR")] });
     await tick("My PR");
     expect(await screen.findByText(/without a merge/)).toBeInTheDocument();

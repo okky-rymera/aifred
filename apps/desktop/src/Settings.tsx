@@ -38,7 +38,7 @@ export function SettingsPage(props: { settings: api.Settings; onSaved: (s: api.S
           Reload GitHub items
         </label>
         <p className="text-sm text-stone-500">
-          aifred keeps the last GitHub list. Between reloads, the list comes from that copy.
+          AIfred keeps the last GitHub list. Between reloads, the list comes from that copy.
         </p>
         <select
           id="github-refresh"

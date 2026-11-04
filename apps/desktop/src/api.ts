@@ -83,7 +83,7 @@ export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");
 
-/** Plain-language label for a tool call, shown while aifred works. */
+/** Plain-language label for a tool call, shown while AIfred works. */
 export function describe(e: ProgressEvent): string {
   if (e.kind === "notice") return e.message;
   const i = e.input as { repo?: string; number?: number };

@@ -1,4 +1,4 @@
-// A fake aifred backend for window tests. It answers the same commands as
+// A fake AIfred backend for window tests. It answers the same commands as
 // the Rust app (src-tauri/src/main.rs), but keeps everything in memory.
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
@@ -169,7 +169,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
   return fake;
 }
 
-/** A promise you can finish later, to hold aifred in the "thinking" state. */
+/** A promise you can finish later, to hold AIfred in the "thinking" state. */
 export function deferred<T>() {
   let resolve!: (v: T) => void;
   let reject!: (e: unknown) => void;

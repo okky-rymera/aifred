@@ -49,7 +49,7 @@ function ChatInput(props: { busy: boolean; onSend: (text: string) => void; big?:
           }
         }}
         rows={props.big ? 2 : 1}
-        placeholder={props.big ? "Ask aifred anything about your work…" : "Ask aifred…"}
+        placeholder={props.big ? "Ask AIfred anything about your work…" : "Ask AIfred…"}
         className={`max-h-40 flex-1 resize-none rounded-xl border border-stone-300 bg-white px-4 outline-none focus:border-amber-500 dark:border-stone-700 dark:bg-stone-900 ${
           props.big ? "py-3 text-[15px] shadow-sm" : "py-2.5 text-sm"
         }`}
@@ -161,7 +161,7 @@ export default function App() {
     } finally {
       setBusy(false);
       setProgress([]);
-      // aifred can add or finish tasks while it answers.
+      // AIfred can add or finish tasks while it answers.
       loadTasks();
     }
   }
@@ -211,7 +211,7 @@ export default function App() {
             <div className="size-3.5 rounded-full border-[3px] border-amber-400" />
           </div>
           <div>
-            <div className="font-semibold leading-tight">aifred</div>
+            <div className="font-semibold leading-tight">AIfred</div>
             <div className="text-xs text-stone-500">{info?.backend ?? "…"}</div>
           </div>
         </button>
@@ -229,7 +229,7 @@ export default function App() {
             onClick={() => setShowMemory((s) => !s)}
             className="flex items-center justify-between text-left text-xs font-semibold uppercase tracking-wide text-stone-500"
           >
-            What aifred knows about you
+            What AIfred knows about you
             <span>{showMemory ? "−" : "+"}</span>
           </button>
           {showMemory && (

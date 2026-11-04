@@ -3,18 +3,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use aifred_core::backend::{Event, claude::ClaudeBackend};
 use aifred_core::files::now;
+use aifred_core::settings::{self, Settings};
 use aifred_core::github;
 use aifred_core::github_list::{GithubList, GithubStore};
-use aifred_core::settings::{self, Settings};
 use aifred_core::history::Turn;
 use aifred_core::tasks::Task;
 use aifred_core::{Answer, Assistant, default_data_dir};
 use serde::Serialize;
-use tauri::{State, ipc::Channel};
+use tauri::{Manager, State, ipc::Channel};
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use tokio::sync::Mutex;
+
+/// The window settings that are saved and restored. "Visible" is left out:
+/// a save during close can record "hidden", and the window must always show.
+const WINDOW_STATE: StateFlags = StateFlags::all().difference(StateFlags::VISIBLE);
+
+/// The window moved or changed size since the last save.
+static WINDOW_CHANGED: AtomicBool = AtomicBool::new(false);
 
 struct App {
     assistant: Arc<Assistant<ClaudeBackend>>,
@@ -39,7 +48,7 @@ fn err(e: anyhow::Error) -> String {
 #[tauri::command]
 async fn ask(app: State<'_, App>, prompt: String, on_event: Channel<Event>) -> CmdResult<Answer> {
     let Ok(_guard) = app.busy.try_lock() else {
-        return Err("aifred is still working on the last question.".into());
+        return Err("AIfred is still working on the last question.".into());
     };
     let mut send = |e: Event| {
         let _ = on_event.send(e);
@@ -142,20 +151,20 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
 struct DoneResult {
     /// The item is still open on GitHub.
     still_open: bool,
-    /// The user may close it from aifred (not a review request).
+    /// The user may close it from AIfred (not a review request).
     can_close: bool,
     /// A pull request, not an issue. The window uses it for the close question.
     is_pull_request: bool,
 }
 
-/// Marks a GitHub item done in aifred, then checks GitHub.
+/// Marks a GitHub item done in AIfred, then checks GitHub.
 #[tauri::command]
 async fn github_mark_done(app: State<'_, App>, id: String) -> CmdResult<DoneResult> {
     let dir = app.assistant.dir.clone();
     let item = blocking(&app, move |_| GithubStore::new(&dir).mark_done(&id, now())).await?;
     let open = github::is_open(&item, &github::owners_from_env())
         .await
-        .map_err(|e| format!("Marked done in aifred. Cannot check GitHub: {e:#}"))?;
+        .map_err(|e| format!("Marked done in AIfred. Cannot check GitHub: {e:#}"))?;
     Ok(DoneResult { still_open: open, can_close: open && item.can_close(), is_pull_request: item.is_pull_request() })
 }
 
@@ -228,6 +237,34 @@ fn main() -> anyhow::Result<()> {
 
     with_commands(tauri::Builder::default(), App { assistant, busy: Mutex::new(()) })
         .plugin(tauri_plugin_opener::init())
+        // Saves the window size and maximized state when the app closes, and
+        // puts them back on the next start. On X11 it also restores the
+        // position. On Wayland the app cannot read or set the position, so
+        // the desktop picks it. The window starts hidden (tauri.conf.json) so
+        // it does not show at the default size first and then jump.
+        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(WINDOW_STATE).build())
+        .setup(|app| {
+            // The plugin does not save or restore "visible", so this is the
+            // only place that shows the window. Ignore errors: some window
+            // managers refuse focus, and that must not stop the app.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            Ok(())
+        })
+        .on_window_event(|w, e| match e {
+            // The plugin writes the file only on a normal quit. A logout or a
+            // crash skips that. So also write it when the window loses focus,
+            // but only if the window moved or changed size since the last save.
+            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                WINDOW_CHANGED.store(true, Ordering::Relaxed);
+            }
+            tauri::WindowEvent::Focused(false) if WINDOW_CHANGED.swap(false, Ordering::Relaxed) => {
+                let _ = w.app_handle().save_window_state(WINDOW_STATE);
+            }
+            _ => {}
+        })
         .run(tauri::generate_context!())?;
     Ok(())
 }

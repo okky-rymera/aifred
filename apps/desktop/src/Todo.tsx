@@ -46,7 +46,7 @@ function Chip({ active, onClick, children, disabled }: {
 export function TodoList(props: {
   tasks: api.Task[];
   github: api.GithubItem[];
-  /** GitHub items you marked done in aifred. */
+  /** GitHub items you marked done in AIfred. */
   githubDone?: api.DoneItem[];
   /** When the GitHub list came from GitHub, in Unix seconds. */
   fetchedAt?: number;
@@ -95,7 +95,7 @@ export function TodoList(props: {
     }
   }
 
-  /** Tick a GitHub item: hide it in aifred, then check GitHub. */
+  /** Tick a GitHub item: hide it in AIfred, then check GitHub. */
   async function markGithubDone(g: api.GithubItem) {
     setError("");
     try {
@@ -200,7 +200,7 @@ export function TodoList(props: {
               </div>
               {t.added_by === "aifred" && (
                 <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                  added by aifred
+                  added by AIfred
                 </span>
               )}
               <button

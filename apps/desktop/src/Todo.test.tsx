@@ -23,7 +23,7 @@ describe("TodoList", () => {
     expect(screen.getByText("Call Sam")).toBeInTheDocument();
     expect(screen.getByText("Fix cart")).toBeInTheDocument();
     expect(screen.getByText("5")).toBeInTheDocument(); // 2 open tasks + 3 GitHub items; done is not counted
-    expect(screen.getAllByText("added by aifred")).toHaveLength(1);
+    expect(screen.getAllByText("added by AIfred")).toHaveLength(1);
     expect(screen.getByText("Review")).toBeInTheDocument();
     expect(screen.getByText("Assigned")).toBeInTheDocument();
     expect(screen.getByText("Your PR")).toBeInTheDocument();
