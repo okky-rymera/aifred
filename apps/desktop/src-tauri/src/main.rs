@@ -24,7 +24,9 @@ use aifred_core::memory::Fact;
 use aifred_core::tasks::{Task, TaskFields};
 use aifred_core::{Answer, Assistant, default_data_dir};
 use serde::Serialize;
-use tauri::{Manager, State, ipc::Channel};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, Runtime, State, Window, ipc::Channel};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use tokio::sync::Mutex;
 
@@ -34,6 +36,9 @@ const WINDOW_STATE: StateFlags = StateFlags::all().difference(StateFlags::VISIBL
 
 /// The window moved or changed size since the last save.
 static WINDOW_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// A tray icon was made, so closing the window only hides it.
+static TRAY_READY: AtomicBool = AtomicBool::new(false);
 
 /// The version of this program, from Cargo.toml.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -752,7 +757,7 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
     // the tool servers. The first start also downloads the model here.
     app.fill_vectors();
     app.summarize_old();
-    let mut builder = with_commands(tauri::Builder::default(), app)
+    let mut builder = with_window_events(with_commands(tauri::Builder::default(), app), keep_window_state)
         .plugin(tauri_plugin_opener::init());
     if keep_window_state {
         // Saves the window size and maximized state when the app closes, and
@@ -764,13 +769,16 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
     }
     builder
         .setup(|app| {
-            // The plugin does not save or restore "visible", so this is the
-            // only place that shows the window. Ignore errors: some window
-            // managers refuse focus, and that must not stop the app.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
+            // On Linux the tray library panics when appindicator is missing.
+            // Then there is no tray, and closing the window quits AIfred.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make_tray(app))) {
+                Ok(Ok(())) => TRAY_READY.store(true, Ordering::Relaxed),
+                Ok(Err(e)) => eprintln!("aifred: no tray icon ({e:#}); closing the window quits AIfred"),
+                Err(_) => eprintln!("aifred: no tray icon (the tray library is missing); closing the window quits AIfred"),
             }
+            // The plugin does not save or restore "visible", so this is the
+            // only place that shows the window.
+            show_main(app.handle());
             // Check for updates after the start, then on each interval.
             let update = app.state::<App>().update.clone();
             if update.program.is_some() {
@@ -783,18 +791,6 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
                 });
             }
             Ok(())
-        })
-        .on_window_event(move |w, e| match e {
-            // The plugin writes the file only on a normal quit. A logout or a
-            // crash skips that. So also write it when the window loses focus,
-            // but only if the window moved or changed size since the last save.
-            tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                WINDOW_CHANGED.store(true, Ordering::Relaxed);
-            }
-            tauri::WindowEvent::Focused(false) if keep_window_state && WINDOW_CHANGED.swap(false, Ordering::Relaxed) => {
-                let _ = w.app_handle().save_window_state(WINDOW_STATE);
-            }
-            _ => {}
         })
         .build(tauri::generate_context!())?
         .run(|handle, event| {
@@ -811,6 +807,80 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
             }
         });
     Ok(())
+}
+
+/// Shows the main window, also when it is hidden or minimized. Ignore
+/// errors: some window managers refuse focus, and that must not stop the app.
+fn show_main<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// The tray icon with its menu: "Show AIfred" and "Quit".
+fn make_tray(app: &tauri::App) -> anyhow::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show AIfred", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let icon = app.default_window_icon().cloned().ok_or_else(|| anyhow::anyhow!("the app has no icon"))?;
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .tooltip("AIfred")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main(app),
+            // The window-state plugin saves the window on this exit.
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        // Linux sends no clicks: there a click opens the menu.
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Closing the main window hides it when there is a tray. Returns true if it
+/// hid the window (the caller then stops the close). With no tray the close
+/// goes on and the app quits, so the user can always quit.
+fn hide_on_close<R: Runtime>(w: &Window<R>, tray: bool, keep_window_state: bool) -> bool {
+    if !tray || w.label() != "main" {
+        return false;
+    }
+    // Save first: the size and place of a shown window are sure to be right.
+    if keep_window_state {
+        let _ = w.app_handle().save_window_state(WINDOW_STATE);
+        WINDOW_CHANGED.store(false, Ordering::Relaxed);
+    }
+    let _ = w.hide();
+    true
+}
+
+/// Adds the window events. The tests use the same handler.
+fn with_window_events<R: Runtime>(builder: tauri::Builder<R>, keep_window_state: bool) -> tauri::Builder<R> {
+    builder.on_window_event(move |w, e| match e {
+        // The plugin writes the file only on a normal quit. A logout or a
+        // crash skips that. So also write it when the window loses focus,
+        // but only if the window moved or changed size since the last save.
+        tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+            WINDOW_CHANGED.store(true, Ordering::Relaxed);
+        }
+        tauri::WindowEvent::Focused(false) if keep_window_state && WINDOW_CHANGED.swap(false, Ordering::Relaxed) => {
+            let _ = w.app_handle().save_window_state(WINDOW_STATE);
+        }
+        tauri::WindowEvent::CloseRequested { api, .. }
+            if hide_on_close(w, TRAY_READY.load(Ordering::Relaxed), keep_window_state) =>
+        {
+            api.prevent_close();
+        }
+        _ => {}
+    })
 }
 
 /// The updater of this window. Updates are off in a development build, and
@@ -848,7 +918,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let backend = ClaudeBackend { work_dir: dir.join("claude"), model: None };
         let assistant = Arc::new(Assistant::new(dir.clone(), backend, dir.clone()).unwrap());
-        let app = with_commands(mock_builder(), App::new(assistant, false, Updater::off("Updates are off in tests.")))
+        let app = with_commands(mock_builder(), App::new(assistant, false, Updater::off("Updates are off in tests.")));
+        let app = with_window_events(app, false)
             .build(mock_context(noop_assets()))
             .unwrap();
         let win = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
@@ -1055,6 +1126,29 @@ mod tests {
         let (_app, win, dir) = window("info");
         let i = call(&win, "info", json!({})).unwrap();
         assert_eq!(i["data_dir"], dir.display().to_string());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn close_hides_the_main_window_when_there_is_a_tray() {
+        let (_app, win, dir) = window("close-tray");
+        assert!(hide_on_close(&win.as_ref().window(), true, false));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn close_quits_when_there_is_no_tray() {
+        let (app, win, dir) = window("close-no-tray");
+        assert!(!hide_on_close(&win.as_ref().window(), false, false));
+        assert!(app.get_webview_window("main").is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_main_window_hides() {
+        let (app, _win, dir) = window("close-other");
+        let other = tauri::WebviewWindowBuilder::new(&app, "other", Default::default()).build().unwrap();
+        assert!(!hide_on_close(&other.as_ref().window(), true, false));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
