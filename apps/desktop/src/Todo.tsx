@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import * as api from "./api";
 
 type Filter = "all" | "local" | "github" | "clickup";
@@ -10,13 +10,63 @@ const PRIORITY: Record<NonNullable<api.ClickupItem["priority"]>, string> = {
   low: "text-stone-400",
 };
 
-/** "due today", "due in 3d", "3d overdue", for a time in Unix milliseconds. */
-function dueText(ms: number): { text: string; late: boolean } {
-  const day = (t: number) => Math.floor((t - new Date(t).getTimezoneOffset() * 60_000) / 86400_000);
-  const days = day(ms) - day(Date.now());
+/** "due today", "due in 3d", "3d overdue", for a number of days from today. */
+function dueLabel(days: number): { text: string; late: boolean } {
   if (days === 0) return { text: "due today", late: false };
   if (days < 0) return { text: `${-days}d overdue`, late: true };
   return { text: `due in ${days}d`, late: false };
+}
+
+/** The due text for a time in Unix milliseconds. */
+function dueText(ms: number): { text: string; late: boolean } {
+  const day = (t: number) => Math.floor((t - new Date(t).getTimezoneOffset() * 60_000) / 86400_000);
+  return dueLabel(day(ms) - day(Date.now()));
+}
+
+/** Today in your own time zone, as "YYYY-MM-DD". */
+export function today(now = new Date()): string {
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+}
+
+/** Today, as "YYYY-MM-DD". It changes at midnight, and the list draws
+ * itself again. A check each minute also works after the computer sleeps. */
+function useToday(): string {
+  const [day, setDay] = useState(today);
+  useEffect(() => {
+    const timer = setInterval(() => setDay(today()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+  return day;
+}
+
+/** The number of days from today to a "YYYY-MM-DD" day. Negative for a day in the past. */
+function daysUntil(day: string): number {
+  const utc = (d: string) => {
+    const [y, m, n] = d.split("-").map(Number);
+    return Date.UTC(y, m - 1, n);
+  };
+  return Math.round((utc(day) - utc(today())) / 86400_000);
+}
+
+/** No priority counts as normal. */
+const RANK: Record<api.Priority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+/** The order of open tasks: the nearest due day first (no due day last),
+ * then the highest priority, then the newest. */
+function byPlan(a: api.Task, b: api.Task): number {
+  if (a.due !== b.due) {
+    if (!a.due) return 1;
+    if (!b.due) return -1;
+    return a.due < b.due ? -1 : 1;
+  }
+  const rank = (t: api.Task) => RANK[t.priority ?? "normal"];
+  return rank(a) - rank(b) || b.created - a.created;
+}
+
+/** "work, Home" to ["work", "Home"]. */
+function splitTags(text: string): string[] {
+  return text.split(",").map((t) => t.trim()).filter(Boolean);
 }
 
 const REASON: Record<api.GithubItem["reason"], { label: string; cls: string }> = {
@@ -100,22 +150,194 @@ function Chip({ active, onClick, children, disabled }: {
   );
 }
 
-/** One open local task. Click the title to change the title or the description. */
+const BOX =
+  "rounded border border-stone-300 bg-transparent px-2 py-1 text-xs outline-none focus:border-amber-500 dark:border-stone-700";
+
+/** The fields of the form that are not the same as in the task. */
+function changedFields(t: api.Task, f: Required<api.TaskChanges>): api.TaskChanges {
+  const out: api.TaskChanges = {};
+  if (f.title.trim() !== t.title) out.title = f.title;
+  if (f.notes.trim() !== t.notes) out.notes = f.notes;
+  if (f.due !== (t.due ?? "")) out.due = f.due;
+  if (f.start !== (t.start ?? "")) out.start = f.start;
+  if (f.priority !== (t.priority ?? "")) out.priority = f.priority;
+  if (JSON.stringify(f.tags) !== JSON.stringify(t.tags)) out.tags = f.tags;
+  if (JSON.stringify(f.checklist) !== JSON.stringify(t.checklist)) out.checklist = f.checklist;
+  return out;
+}
+
+/** The edit form of a local task. Save sends only the fields that you
+ * changed, so it does not undo changes that AIfred made while the form was open. */
+function TaskEditor(props: {
+  task: api.Task;
+  onSave: (changes: api.TaskChanges) => void;
+  onCancel: () => void;
+}) {
+  // The task as it was when the form opened. The list can reload while
+  // the form is open, so the props can be newer than the form fields.
+  const [t] = useState(props.task);
+  const [title, setTitle] = useState(t.title);
+  const [notes, setNotes] = useState(t.notes);
+  const [due, setDue] = useState(t.due ?? "");
+  const [start, setStart] = useState(t.start ?? "");
+  const [priority, setPriority] = useState<api.Priority | "">(t.priority ?? "");
+  const [tags, setTags] = useState(t.tags.join(", "));
+  const [checklist, setChecklist] = useState(t.checklist);
+  const [step, setStep] = useState("");
+
+  function save() {
+    if (!title.trim()) return;
+    // A step that you typed but did not add with Enter is kept too.
+    const steps = step.trim() ? [...checklist, { text: step.trim(), done: false }] : checklist;
+    props.onSave(changedFields(t, { title, notes, due, start, priority, tags: splitTags(tags), checklist: steps }));
+  }
+
+  const keys = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") props.onCancel();
+  };
+  const setStepAt = (i: number, item: api.ChecklistItem) => setChecklist((l) => l.map((c, j) => (j === i ? item : c)));
+
+  return (
+    <div className="min-w-0 flex-1 space-y-1.5" onKeyDown={keys}>
+      <input
+        aria-label="Task title"
+        value={title}
+        autoFocus
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && save()}
+        className="w-full rounded border border-stone-300 bg-transparent px-2 py-1 text-sm outline-none focus:border-amber-500 dark:border-stone-700"
+      />
+      <textarea
+        aria-label="Task description"
+        value={notes}
+        rows={Math.max(2, notes.split("\n").length)}
+        placeholder="Description (optional)"
+        onChange={(e) => setNotes(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && (e.ctrlKey || e.metaKey) && save()}
+        className={`w-full resize-none ${BOX}`}
+      />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-stone-500">
+        <label className="flex items-center gap-1">
+          Due
+          <input type="date" aria-label="Due date" value={due} onChange={(e) => setDue(e.target.value)} className={BOX} />
+        </label>
+        <label className="flex items-center gap-1" title="The task waits under Later until this day">
+          Start
+          <input type="date" aria-label="Start date" value={start} onChange={(e) => setStart(e.target.value)} className={BOX} />
+        </label>
+        <select
+          aria-label="Priority"
+          value={priority}
+          onChange={(e) => setPriority(e.target.value as api.Priority | "")}
+          className={`${BOX} dark:bg-stone-900`}
+        >
+          <option value="">No priority</option>
+          <option value="urgent">Urgent</option>
+          <option value="high">High</option>
+          <option value="normal">Normal</option>
+          <option value="low">Low</option>
+        </select>
+      </div>
+      <input
+        aria-label="Tags"
+        value={tags}
+        placeholder="Tags, with commas between them. Example: work, travel"
+        onChange={(e) => setTags(e.target.value)}
+        className={`w-full ${BOX}`}
+      />
+      <ul className="space-y-1">
+        {checklist.map((c, i) => (
+          <li key={i} className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              aria-label={`Step ${i + 1} done`}
+              checked={c.done}
+              onChange={() => setStepAt(i, { ...c, done: !c.done })}
+              className="size-3.5 accent-amber-500"
+            />
+            <input
+              aria-label={`Step ${i + 1}`}
+              value={c.text}
+              onChange={(e) => setStepAt(i, { ...c, text: e.target.value })}
+              className={`min-w-0 flex-1 ${BOX}`}
+            />
+            <button
+              onClick={() => setChecklist((l) => l.filter((_, j) => j !== i))}
+              aria-label={`Remove step ${i + 1}`}
+              className="text-stone-400 hover:text-red-600"
+            >
+              ✕
+            </button>
+          </li>
+        ))}
+      </ul>
+      <input
+        aria-label="New step"
+        value={step}
+        placeholder="+ Add a step and press Enter"
+        onChange={(e) => setStep(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && step.trim()) {
+            setChecklist((l) => [...l, { text: step.trim(), done: false }]);
+            setStep("");
+          }
+        }}
+        className={`w-full border-dashed ${BOX}`}
+      />
+      <div className="flex gap-2 text-xs">
+        <button onClick={save} disabled={!title.trim()} className="rounded bg-[#252e4a] px-2 py-1 text-stone-50 disabled:opacity-40">
+          Save
+        </button>
+        <button onClick={props.onCancel} className="rounded px-2 py-1 text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The due day, start day, priority, tags, and checklist count of a task, in one short line. */
+function TaskMeta({ task: t }: { task: api.Task }) {
+  const due = t.due ? dueLabel(daysUntil(t.due)) : null;
+  const startsIn = t.start ? daysUntil(t.start) : 0;
+  const stepsDone = t.checklist.filter((c) => c.done).length;
+  const parts: React.ReactNode[] = [];
+  if (due) parts.push(<span key="due" title={`Due ${t.due}`} className={due.late ? "text-red-600" : ""}>{due.text}</span>);
+  if (startsIn > 0) parts.push(<span key="start" title={`Starts ${t.start}`}>starts in {startsIn}d</span>);
+  if (t.priority && t.priority !== "normal") parts.push(<span key="p" className={PRIORITY[t.priority]}>{t.priority}</span>);
+  if (t.checklist.length) parts.push(<span key="steps">{stepsDone}/{t.checklist.length} steps</span>);
+  if (parts.length === 0 && t.tags.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-1 text-xs text-stone-500">
+      {parts.map((p, i) => (
+        <span key={i}>
+          {i > 0 && " · "}
+          {p}
+        </span>
+      ))}
+      {t.tags.map((tag) => (
+        <span key={tag} className="rounded bg-stone-100 px-1.5 text-[11px] text-stone-600 dark:bg-stone-800 dark:text-stone-300">
+          #{tag}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** One open local task. Click the title to change the task. The steps of
+ * the checklist can be ticked here, with no edit. */
 function TaskRow(props: { task: api.Task; run: (p: Promise<unknown>) => Promise<boolean> }) {
   const t = props.task;
   const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(t.title);
-  const [notes, setNotes] = useState(t.notes);
 
-  function start() {
-    setTitle(t.title);
-    setNotes(t.notes);
-    setEditing(true);
+  async function save(changes: api.TaskChanges) {
+    if (await props.run(api.editTask(t.id, changes))) setEditing(false);
   }
 
-  async function save() {
-    if (!title.trim()) return;
-    if (await props.run(api.editTask(t.id, title, notes))) setEditing(false);
+  /** Changes only this step, so a fast second tick does not undo the first. */
+  function tick(i: number) {
+    const c = t.checklist[i];
+    props.run(api.setTaskStep(t.id, i, c.text, !c.done));
   }
 
   return (
@@ -128,44 +350,31 @@ function TaskRow(props: { task: api.Task; run: (p: Promise<unknown>) => Promise<
         className="mt-0.5 size-4 accent-amber-500"
       />
       {editing ? (
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <input
-            aria-label="Task title"
-            value={title}
-            autoFocus
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") save();
-              if (e.key === "Escape") setEditing(false);
-            }}
-            className="w-full rounded border border-stone-300 bg-transparent px-2 py-1 text-sm outline-none focus:border-amber-500 dark:border-stone-700"
-          />
-          <textarea
-            aria-label="Task description"
-            value={notes}
-            rows={Math.max(2, notes.split("\n").length)}
-            placeholder="Description (optional)"
-            onChange={(e) => setNotes(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) save();
-              if (e.key === "Escape") setEditing(false);
-            }}
-            className="w-full resize-none rounded border border-stone-300 bg-transparent px-2 py-1 text-xs outline-none focus:border-amber-500 dark:border-stone-700"
-          />
-          <div className="flex gap-2 text-xs">
-            <button onClick={save} disabled={!title.trim()} className="rounded bg-[#252e4a] px-2 py-1 text-stone-50 disabled:opacity-40">
-              Save
-            </button>
-            <button onClick={() => setEditing(false)} className="rounded px-2 py-1 text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800">
-              Cancel
-            </button>
-          </div>
-        </div>
+        <TaskEditor task={t} onSave={save} onCancel={() => setEditing(false)} />
       ) : (
-        <button onClick={start} title="Change the title or the description" className="min-w-0 flex-1 text-left">
-          <div className="text-sm">{t.title}</div>
-          {t.notes && <div className="line-clamp-2 whitespace-pre-line text-xs text-stone-500">{t.notes}</div>}
-        </button>
+        <div className="min-w-0 flex-1">
+          <button onClick={() => setEditing(true)} title="Change the task" className="block w-full text-left">
+            <div className="text-sm">{t.title}</div>
+            <TaskMeta task={t} />
+            {t.notes && <div className="line-clamp-2 whitespace-pre-line text-xs text-stone-500">{t.notes}</div>}
+          </button>
+          {t.checklist.length > 0 && (
+            <ul className="mt-1 space-y-0.5">
+              {t.checklist.map((c, i) => (
+                <li key={i} className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    aria-label={`Step done: ${c.text}`}
+                    checked={c.done}
+                    onChange={() => tick(i)}
+                    className="size-3.5 accent-amber-500"
+                  />
+                  <span className={c.done ? "text-stone-400 line-through" : "text-stone-600 dark:text-stone-300"}>{c.text}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       {t.added_by === "aifred" && (
         <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800 dark:bg-amber-950 dark:text-amber-300">
@@ -215,6 +424,7 @@ export function TodoList(props: {
   const [draft, setDraft] = useState("");
   const [draftNotes, setDraftNotes] = useState("");
   const [showDone, setShowDone] = useState(false);
+  const [showLater, setShowLater] = useState(false);
   const [error, setError] = useState("");
   /** ClickUp tasks that wait for ClickUp to answer, so they cannot be clicked twice. */
   const [closing, setClosing] = useState<string[]>([]);
@@ -222,7 +432,12 @@ export function TodoList(props: {
   const clickup = props.clickup ?? [];
   const clickupState = props.clickupState ?? "off";
 
-  const open = tasks.filter((t) => !t.done).sort((a, b) => b.created - a.created);
+  // A new day redraws the list: tasks leave "Later", and the due labels change.
+  const day = useToday();
+  const notDone = tasks.filter((t) => !t.done).sort(byPlan);
+  // A task with a start day after today waits under "Later".
+  const open = notDone.filter((t) => !t.start || t.start <= day);
+  const later = notDone.filter((t) => t.start && t.start > day);
   const done = tasks.filter((t) => t.done).sort((a, b) => (b.done_at ?? 0) - (a.done_at ?? 0));
   const showLocal = filter === "all" || filter === "local";
   const showGithub = filter === "all" || filter === "github";
@@ -459,9 +674,32 @@ export function TodoList(props: {
         !(filter === "clickup" && clickupState === "off") &&
         !(showLocal && props.tasksError) && (
           <div className="py-6 text-center text-sm text-stone-500">
-            {showLocal ? "Nothing to do. Add a task above." : filter === "github" ? "Nothing from GitHub." : "Nothing from ClickUp."}
+            {showLocal
+              ? later.length > 0
+                ? "Nothing to do today. Some tasks start later."
+                : "Nothing to do. Add a task above."
+              : filter === "github"
+                ? "Nothing from GitHub."
+                : "Nothing from ClickUp."}
           </div>
         )}
+
+      {showLocal && later.length > 0 && (
+        <div className="mt-3">
+          <button
+            onClick={() => setShowLater((s) => !s)}
+            title="Tasks with a start day after today"
+            className="text-xs text-stone-500 hover:underline"
+          >
+            {showLater ? "Hide" : "Show"} later ({later.length})
+          </button>
+          {showLater && (
+            <ul className="mt-1 divide-y divide-stone-200 opacity-70 dark:divide-stone-800">
+              {later.map((t) => <TaskRow key={t.id} task={t} run={run} />)}
+            </ul>
+          )}
+        </div>
+      )}
 
       {doneCount > 0 && (
         <div className="mt-3">

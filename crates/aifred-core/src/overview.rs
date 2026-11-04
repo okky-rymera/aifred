@@ -12,18 +12,36 @@ use crate::clickup::ClickupItem;
 use crate::db;
 use crate::github::GithubItem;
 use crate::summaries::for_item;
+use crate::tasks::{ChecklistItem, json_column};
 
 /// The overview. `clickup_account` is the account of the ClickUp token
 /// (clickup::account_key), or None when ClickUp is not connected.
 pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value> {
     db::read(dir, |c| {
-        let mut q = c.prepare("SELECT id, title, notes, summary, created FROM task WHERE done = 0 ORDER BY created DESC")?;
+        let mut q = c.prepare(
+            "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM task WHERE done = 0 ORDER BY created DESC",
+        )?;
         let tasks: Vec<Value> = q
             .query_map([], |r| {
                 let notes: String = r.get(2)?;
                 let mut t = json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "created": r.get::<_, i64>(4)? });
                 if let Some(s) = for_item(r.get(3)?, &notes) {
                     t["summary"] = s.into();
+                }
+                // Only the fields that are set, so the answer stays short.
+                for (key, i) in [("due", 5), ("start", 6), ("priority", 7)] {
+                    if let Some(v) = r.get::<_, Option<String>>(i)? {
+                        t[key] = v.into();
+                    }
+                }
+                // The same read as the task list (tasks.rs): a bad value is an error.
+                let tags: Vec<String> = json_column(r, 8)?;
+                if !tags.is_empty() {
+                    t["tags"] = tags.into();
+                }
+                let list: Vec<ChecklistItem> = json_column(r, 9)?;
+                if !list.is_empty() {
+                    t["checklist"] = format!("{} of {} done", list.iter().filter(|i| i.done).count(), list.len()).into();
                 }
                 Ok(t)
             })?
@@ -115,12 +133,34 @@ mod tests {
     use crate::tasks::TaskStore;
 
     #[test]
+    fn a_bad_tag_list_is_an_error_like_in_the_task_list() {
+        let d = std::env::temp_dir().join(format!("aifred-overview-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let tasks = TaskStore::new(&d);
+        tasks.add("Call Sam", "", "you").unwrap();
+        db::write(&d, |tx| Ok(tx.execute("UPDATE task SET tags = 'not json'", [])?)).unwrap();
+        assert!(tasks.load().is_err());
+        assert!(build(&d, None).is_err(), "the overview does not hide the bad value");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn the_overview_has_all_open_items_with_their_summaries() {
         let d = std::env::temp_dir().join(format!("aifred-overview-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let tasks = TaskStore::new(&d);
-        tasks.add("Call Sam", "Before 5pm.", "you").unwrap();
+        let sam = tasks.add("Call Sam", "Before 5pm.", "you").unwrap();
+        tasks
+            .update(&sam.id, crate::tasks::TaskFields {
+                due: Some("2026-12-01".into()),
+                priority: Some("urgent".into()),
+                tags: Some(vec!["work".into()]),
+                checklist: Some(vec![ChecklistItem { text: "Find number".into(), done: true }.into(), ChecklistItem { text: "Call".into(), done: false }.into()]),
+                ..Default::default()
+            })
+            .unwrap();
         let done = tasks.add("Old", "", "you").unwrap();
         tasks.set_done(&done.id, true).unwrap();
 
@@ -140,6 +180,9 @@ mod tests {
         let o = build(&d, Some("acct")).unwrap();
         assert_eq!(o["local_tasks"].as_array().unwrap().len(), 1, "done tasks are left out");
         assert_eq!(o["local_tasks"][0]["summary"], "Before 5pm.");
+        let t = &o["local_tasks"][0];
+        assert_eq!((&t["due"], &t["priority"], &t["tags"], &t["checklist"]), (&json!("2026-12-01"), &json!("urgent"), &json!(["work"]), &json!("1 of 2 done")));
+        assert!(t.get("start").is_none(), "a field that is not set is left out");
         assert_eq!(o["github"]["fetched_at"], 1000);
         assert_eq!(o["github"]["items"][0]["summary"], "The cart loses items on reload.", "the download saved the body");
         assert_eq!(o["clickup"]["tasks"][0]["priority"], "high");

@@ -180,7 +180,11 @@ pub fn for_item(summary: Option<String>, text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::TaskStore;
+    use crate::tasks::{TaskFields, TaskStore};
+
+    fn notes(text: &str) -> TaskFields {
+        TaskFields { notes: Some(text.into()), ..Default::default() }
+    }
 
     fn temp(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("aifred-summaries-{name}-{}", std::process::id()));
@@ -204,8 +208,12 @@ mod tests {
         assert_eq!(save(&d, &p, &[Some("Plan the release.".into())]).unwrap(), 1);
         assert!(pending(&d, 10, &HashSet::new()).unwrap().is_empty());
 
+        // A new due date or tag keeps the summary: it is only of the description.
+        s.update(&long.id, TaskFields { due: Some("2026-12-01".into()), tags: Some(vec!["work".into()]), ..Default::default() }).unwrap();
+        assert!(pending(&d, 10, &HashSet::new()).unwrap().is_empty());
+
         // A new description makes the summary old: the item needs a new one.
-        s.edit(&long.id, "Long", &"Plan the next release. ".repeat(30)).unwrap();
+        s.update(&long.id, notes(&"Plan the next release. ".repeat(30))).unwrap();
         assert_eq!(pending(&d, 10, &HashSet::new()).unwrap().len(), 1);
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -216,7 +224,7 @@ mod tests {
         let s = TaskStore::new(&d);
         let t = s.add("Long", &"Plan the release. ".repeat(30), "you").unwrap();
         let p = pending(&d, 10, &HashSet::new()).unwrap();
-        s.edit(&t.id, "Long", &"Something else. ".repeat(30)).unwrap();
+        s.update(&t.id, notes(&"Something else. ".repeat(30))).unwrap();
         assert_eq!(save(&d, &p, &[Some("Plan the release.".into())]).unwrap(), 0);
         std::fs::remove_dir_all(&d).unwrap();
     }

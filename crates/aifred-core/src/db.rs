@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 7;
+const VERSION: i64 = 8;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -336,6 +336,16 @@ CREATE TRIGGER work_item_fts_update AFTER UPDATE OF title, place, details ON wor
 END;
 ";
 
+/// More fields on local tasks (tasks.rs). Dates are "YYYY-MM-DD" in the
+/// user's own time zone, or NULL. Tags and the checklist are JSON lists.
+const SCHEMA_8: &str = "
+ALTER TABLE task ADD COLUMN due       TEXT;                       -- the day the task must be done
+ALTER TABLE task ADD COLUMN start     TEXT;                       -- the first day to work on it
+ALTER TABLE task ADD COLUMN priority  TEXT;                       -- 'urgent', 'high', 'normal', 'low', or NULL
+ALTER TABLE task ADD COLUMN tags      TEXT NOT NULL DEFAULT '[]'; -- [\"work\", ...]
+ALTER TABLE task ADD COLUMN checklist TEXT NOT NULL DEFAULT '[]'; -- [{\"text\": ..., \"done\": false}, ...]
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -414,6 +424,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 7 {
         tx.execute_batch(SCHEMA_7)?;
+    }
+    if version < 8 {
+        tx.execute_batch(SCHEMA_8)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

@@ -1,8 +1,8 @@
 // The to-do list on the home page: local tasks plus GitHub items.
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { TodoList } from "./Todo";
+import { TodoList, today } from "./Todo";
 import { fakeBackend, githubItem, task } from "./test/fakeBackend";
 import type { GithubItem, Task } from "./api";
 
@@ -11,6 +11,13 @@ function show(tasks: Task[], github: GithubItem[] = [], githubState = "ok") {
   const onRefresh = vi.fn();
   render(<TodoList tasks={tasks} github={github} githubState={githubState} onChange={onChange} onRefresh={onRefresh} />);
   return { onChange, onRefresh };
+}
+
+/** The day `n` days from today, "YYYY-MM-DD". */
+function dayFromNow(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return today(d);
 }
 
 describe("TodoList", () => {
@@ -250,5 +257,134 @@ describe("TodoList", () => {
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await userEvent.click(screen.getByText("Call Sam now"));
     expect(screen.getByRole("textbox", { name: "Task title" })).toHaveValue("Call Sam now");
+  });
+
+  it("shows the due day, priority, tags, and steps, and sorts by due day then priority", () => {
+    fakeBackend();
+    show([
+      task("No due day", { priority: "urgent" }),
+      task("Late", { due: dayFromNow(-2), tags: ["work", "home"] }),
+      task("Next week, low", { due: dayFromNow(7), priority: "low" }),
+      task("Next week, high", { due: dayFromNow(7), priority: "high", checklist: [{ text: "Plan", done: true }, { text: "Do", done: false }] }),
+    ]);
+    const titles = screen.getAllByTitle("Change the task").map((b) => b.querySelector("div")?.textContent);
+    expect(titles).toEqual(["Late", "Next week, high", "Next week, low", "No due day"]);
+    expect(screen.getByText("2d overdue")).toHaveClass("text-red-600");
+    expect(screen.getByText("#work")).toBeInTheDocument();
+    expect(screen.getByText("1/2 steps")).toBeInTheDocument();
+    expect(screen.getByText("urgent")).toHaveClass("text-red-600");
+  });
+
+  it("changes the due day, start day, priority, tags, and steps of a task", async () => {
+    const t = task("Book flights", { checklist: [{ text: "Pick dates", done: false }] });
+    const fake = fakeBackend({ tasks: [t] });
+    const { onChange } = show([t]);
+    await userEvent.click(screen.getByText("Book flights"));
+    // A date box takes its value as one change, like the date picker.
+    fireEvent.change(screen.getByLabelText("Due date"), { target: { value: "2026-12-20" } });
+    fireEvent.change(screen.getByLabelText("Start date"), { target: { value: "2026-12-01" } });
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Priority" }), "high");
+    await userEvent.type(screen.getByRole("textbox", { name: "Tags" }), "travel, , family ");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Step 1 done" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "New step" }), "Pay{Enter}Pack");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    expect(fake.tasks[0]).toMatchObject({
+      due: "2026-12-20",
+      start: "2026-12-01",
+      priority: "high",
+      tags: ["travel", "family"],
+      checklist: [{ text: "Pick dates", done: true }, { text: "Pay", done: false }, { text: "Pack", done: false }],
+    });
+  });
+
+  it("clears the due day and the priority", async () => {
+    const t = task("Pay rent", { due: "2026-12-01", priority: "high" });
+    const fake = fakeBackend({ tasks: [t] });
+    const { onChange } = show([t]);
+    await userEvent.click(screen.getByText("Pay rent"));
+    fireEvent.change(screen.getByLabelText("Due date"), { target: { value: "" } });
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Priority" }), "");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    expect(fake.tasks[0]).toMatchObject({ due: null, priority: null });
+  });
+
+  it("ticks a step without an edit", async () => {
+    const t = task("Book flights", { checklist: [{ text: "Pick dates", done: false }, { text: "Pay", done: false }] });
+    const fake = fakeBackend({ tasks: [t] });
+    show([t]);
+    await userEvent.click(screen.getByRole("checkbox", { name: "Step done: Pay" }));
+    await waitFor(() => expect(fake.tasks[0].checklist[1].done).toBe(true));
+    expect(fake.tasks[0].checklist[0].done).toBe(false);
+    expect(fake.calls.find((c) => c.cmd === "set_task_step")?.args).toEqual({ id: t.id, index: 1, text: "Pay", done: true });
+  });
+
+  it("keeps both of two fast ticks", async () => {
+    const t = task("Book flights", { checklist: [{ text: "Pick dates", done: false }, { text: "Pay", done: false }] });
+    const fake = fakeBackend({ tasks: [t] });
+    // The list does not reload between the two ticks.
+    show([t]);
+    await userEvent.click(screen.getByRole("checkbox", { name: "Step done: Pick dates" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Step done: Pay" }));
+    await waitFor(() => expect(fake.tasks[0].checklist.map((c) => c.done)).toEqual([true, true]));
+  });
+
+  it("saves only the changed fields, so a newer change from AIfred stays", async () => {
+    const t = task("Book flights", { tags: ["travel"], checklist: [{ text: "Pick dates", done: false }] });
+    const fake = fakeBackend({ tasks: [t] });
+    const { onChange } = show([t]);
+    await userEvent.click(screen.getByText("Book flights"));
+    // While the form is open, AIfred ticks the step and adds a tag.
+    fake.tasks[0] = { ...structuredClone(t), tags: ["travel", "family"], checklist: [{ text: "Pick dates", done: true }] };
+    await userEvent.type(screen.getByRole("textbox", { name: "Task title" }), " to Rome");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    expect(fake.calls.find((c) => c.cmd === "edit_task")?.args).toEqual({ id: t.id, changes: { title: "Book flights to Rome" } });
+    expect(fake.tasks[0]).toMatchObject({ title: "Book flights to Rome", tags: ["travel", "family"], checklist: [{ text: "Pick dates", done: true }] });
+  });
+
+  it("keeps a task with a later start day under Later", async () => {
+    fakeBackend();
+    show([task("Now"), task("Started today", { start: dayFromNow(0) }), task("Next month", { start: dayFromNow(30) })]);
+    expect(screen.getByText("Started today")).toBeInTheDocument();
+    expect(screen.queryByText("Next month")).not.toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument(); // the waiting task is not counted
+    await userEvent.click(screen.getByRole("button", { name: "Show later (1)" }));
+    expect(screen.getByText("Next month")).toBeInTheDocument();
+    expect(screen.getByText("starts in 30d")).toBeInTheDocument();
+  });
+
+  it("moves a task out of Later at midnight, with no reload", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 10, 4, 23, 59, 30));
+      fakeBackend();
+      show([task("Starts tomorrow", { start: "2026-11-05", due: "2026-11-05" })]);
+      expect(screen.queryByText("Starts tomorrow")).not.toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(screen.getByText("Starts tomorrow")).toBeInTheDocument();
+      expect(screen.getByText("due today")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cleans the tags like the real app: no '#', no copies", async () => {
+    const t = task("Book flights");
+    const fake = fakeBackend({ tasks: [t] });
+    const { onChange } = show([t]);
+    await userEvent.click(screen.getByText("Book flights"));
+    await userEvent.type(screen.getByRole("textbox", { name: "Tags" }), "#Work, work, travel");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    expect(fake.tasks[0].tags).toEqual(["Work", "travel"]);
+  });
+
+  it("does not say 'add a task' when all tasks start later", () => {
+    fakeBackend();
+    show([task("Next month", { start: dayFromNow(30) })]);
+    expect(screen.getByText("Nothing to do today. Some tasks start later.")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing to do. Add a task above.")).not.toBeInTheDocument();
   });
 });

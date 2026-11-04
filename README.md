@@ -41,6 +41,15 @@ AIfred owns the memory, the conversation history, the tools, and the access rule
   - A long conversation gets a new summary each time 20,000 tokens (about 80,000 characters) of new messages are not in the summary yet.
   - AIfred searches the summaries together with the messages. When Claude cannot continue a session, AIfred sends the summary and the messages after it (at most 100,000 characters, newest first).
 - AIfred saves the description of each GitHub item and ClickUp task when it downloads the list. A local task can have a description too: click the task to change it.
+- Click a local task to change it. A local task can have these fields:
+  - a description,
+  - a due day,
+  - a start day: before this day, the task waits under "Later" in the list,
+  - a priority: urgent, high, normal, or low,
+  - tags, for example "work" or "travel",
+  - a checklist of steps. You can tick a step in the list without opening the task.
+- Open tasks show the nearest due day first. Tasks with the same due day show the highest priority first.
+- AIfred can set these fields when you give them in the chat, for example "remind me to pay rent by Friday, high priority".
 - A long description (more than 300 characters) gets a short summary. A shorter description is its own summary.
   - The fast model (Haiku) writes the summaries in the background, 15 items in one AI call on your Claude login.
   - It runs after a list download, after an answer, and after you add or change a task. It only writes the summaries that are missing.

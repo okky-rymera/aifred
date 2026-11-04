@@ -49,6 +49,10 @@ export type Fact = {
   forgotten: number | null;
 };
 
+export type Priority = "urgent" | "high" | "normal" | "low";
+
+export type ChecklistItem = { text: string; done: boolean };
+
 export type Task = {
   id: string;
   title: string;
@@ -57,6 +61,25 @@ export type Task = {
   added_by: "you" | "aifred";
   created: number;
   done_at: number | null;
+  /** The day the task must be done, "YYYY-MM-DD". */
+  due: string | null;
+  /** The first day to work on the task, "YYYY-MM-DD". Before it, the task waits. */
+  start: string | null;
+  priority: Priority | null;
+  tags: string[];
+  checklist: ChecklistItem[];
+};
+
+/** The fields to set. A field that is left out stays as it is. For due,
+ * start, and priority, "" clears the field. */
+export type TaskChanges = {
+  title?: string;
+  notes?: string;
+  due?: string;
+  start?: string;
+  priority?: Priority | "";
+  tags?: string[];
+  checklist?: ChecklistItem[];
 };
 
 export type GithubItem = {
@@ -150,7 +173,7 @@ export const restoreFact = (id: number) => invoke<Fact>("restore_fact", { id });
 export const newConversation = () => invoke<void>("new_conversation");
 export const tasks = () => invoke<Task[]>("tasks");
 /** notes: the optional description. */
-export const addTask = (title: string, notes = "") => invoke<Task>("add_task", { title, notes });
+export const addTask = (title: string, notes = "") => invoke<Task>("add_task", { task: { title, notes } });
 export const setTaskDone = (id: string, done: boolean) => invoke<Task>("set_task_done", { id, done });
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
 /** force: ask GitHub now, and do not use the saved list. */
@@ -167,8 +190,12 @@ export const removeClickupToken = () => invoke<void>("remove_clickup_token");
 /** The model you picked last in the chat box. null: the default model. */
 export const chatModel = () => invoke<string | null>("chat_model");
 export const setChatModel = (model: string | null) => invoke<void>("set_chat_model", { model });
-/** Changes the title and the description of a local task. */
-export const editTask = (id: string, title: string, notes: string) => invoke<Task>("edit_task", { id, title, notes });
+/** Changes the given fields of a local task. */
+export const editTask = (id: string, changes: TaskChanges) => invoke<Task>("edit_task", { id, changes });
+/** Ticks or un-ticks one step. Only this step changes. `text` is the step's
+ * text: the tick fails when the checklist changed after the list loaded. */
+export const setTaskStep = (id: string, index: number, text: string, done: boolean) =>
+  invoke<Task>("set_task_step", { id, index, text, done });
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");
@@ -188,6 +215,8 @@ export function describe(e: ProgressEvent): string {
       return "Checking your to-do list";
     case "add_task":
       return `Adding task: ${(e.input as { title?: string }).title ?? ""}`;
+    case "update_task":
+      return "Changing a task";
     case "complete_task":
       return "Marking a task done";
     case "my_tasks":

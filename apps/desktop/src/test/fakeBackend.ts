@@ -2,7 +2,7 @@
 // the Rust app (src-tauri/src/main.rs), but keeps everything in memory.
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Answer, ClickupItem, Fact, GithubItem, ProgressEvent, Settings, Task, Turn } from "../api";
+import type { Answer, ClickupItem, Fact, GithubItem, ProgressEvent, Settings, Task, TaskChanges, Turn } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void) => Promise<Answer> | Answer;
 
@@ -48,7 +48,67 @@ const nowSecs = () => Math.floor(Date.now() / 1000);
 export function task(title: string, extra: Partial<Task> = {}): Task {
   const n = nextId++;
   // Each new task is one second newer, so the sort order is known.
-  return { id: `t${n}`, title, notes: "", done: false, added_by: "you", created: nowSecs() + n, done_at: null, ...extra };
+  return {
+    id: `t${n}`,
+    title,
+    notes: "",
+    done: false,
+    added_by: "you",
+    created: nowSecs() + n,
+    done_at: null,
+    due: null,
+    start: null,
+    priority: null,
+    tags: [],
+    checklist: [],
+    ...extra,
+  };
+}
+
+/** "YYYY-MM-DD" for a real day, like is_date in tasks.rs. Empty clears the field. */
+function cleanDate(name: string, s: string): string | null {
+  const v = s.trim();
+  if (!v) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  const d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  if (!m || !d || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) {
+    throw `the ${name} date "${v}" is not a day in the form YYYY-MM-DD`;
+  }
+  return v;
+}
+
+/** Like apply() in tasks.rs: the same cleaning and the same checks. */
+function applyChanges(t: Task, c: TaskChanges) {
+  if (c.title !== undefined) t.title = c.title.trim();
+  if (!t.title) throw "the task title is empty";
+  if (c.notes !== undefined) t.notes = c.notes.trim();
+  if (c.due !== undefined) t.due = cleanDate("due", c.due);
+  if (c.start !== undefined) t.start = cleanDate("start", c.start);
+  if (c.priority !== undefined) {
+    const p = c.priority.trim().toLowerCase();
+    if (p && p !== "none" && !["urgent", "high", "normal", "low"].includes(p)) throw `the priority "${p}" is not one of: urgent, high, normal, low`;
+    t.priority = p && p !== "none" ? (p as Task["priority"]) : null;
+  }
+  if (c.tags !== undefined) {
+    const tags: string[] = [];
+    for (const raw of c.tags) {
+      const tag = raw.trim().replace(/^#+/, "").trim();
+      if (tag && !tags.some((x) => x.toLowerCase() === tag.toLowerCase())) tags.push(tag);
+    }
+    t.tags = tags;
+  }
+  if (c.checklist !== undefined) {
+    // A step with no done value keeps the tick of the old step with the same text.
+    const old = t.checklist;
+    t.checklist = c.checklist
+      .map((i) => {
+        const text = i.text.trim();
+        const was = old.some((o) => o.done && o.text.toLowerCase() === text.toLowerCase());
+        return { text, done: i.done ?? was };
+      })
+      .filter((i) => i.text);
+  }
+  if (t.start && t.due && t.start > t.due) throw `the start date ${t.start} is after the due date ${t.due}`;
 }
 
 export function fact(text: string, extra: Partial<Fact> = {}): Fact {
@@ -167,16 +227,25 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       case "tasks":
         return structuredClone(fake.tasks);
       case "add_task": {
-        if (!String(args.title).trim()) throw "the task title is empty";
-        const t = task(String(args.title).trim(), { notes: String(args.notes ?? "").trim() });
+        const f = args.task as TaskChanges;
+        if (!String(f.title ?? "").trim()) throw "the task title is empty";
+        const t = task(String(f.title).trim());
+        applyChanges(t, f);
         fake.tasks.push(t);
         return t;
       }
       case "edit_task": {
-        if (!String(args.title).trim()) throw "the task title is empty";
         const t = find(args.id);
-        t.title = String(args.title).trim();
-        t.notes = String(args.notes).trim();
+        const next = structuredClone(t);
+        applyChanges(next, args.changes as TaskChanges);
+        Object.assign(t, next);
+        return structuredClone(t);
+      }
+      case "set_task_step": {
+        const t = find(args.id);
+        const step = t.checklist[args.index];
+        if (!step || step.text !== args.text) throw "the checklist changed. Reload the list and try again";
+        step.done = args.done;
         return structuredClone(t);
       }
       case "set_task_done": {

@@ -14,7 +14,7 @@ use aifred_core::github;
 use aifred_core::github_list::{GithubList, GithubStore};
 use aifred_core::history::Turn;
 use aifred_core::memory::Fact;
-use aifred_core::tasks::Task;
+use aifred_core::tasks::{Task, TaskFields};
 use aifred_core::{Answer, Assistant, default_data_dir};
 use serde::Serialize;
 use tauri::{Manager, State, ipc::Channel};
@@ -260,22 +260,35 @@ async fn tasks(app: State<'_, App>) -> CmdResult<Vec<Task>> {
     blocking(&app, |a| a.tasks().load()).await
 }
 
-/// `notes` is the optional description.
+/// Adds a task. Only the title is necessary.
 #[tauri::command]
-async fn add_task(app: State<'_, App>, title: String, notes: Option<String>) -> CmdResult<Task> {
-    let t = blocking(&app, move |a| a.tasks().add(&title, notes.as_deref().unwrap_or(""), "you")).await?;
+async fn add_task(app: State<'_, App>, task: TaskFields) -> CmdResult<Task> {
+    let t = blocking(&app, move |a| a.tasks().create(task, "you")).await?;
     app.fill_vectors();
     app.summarize_items();
     Ok(t)
 }
 
-/// Changes the title and the description of a local task.
+/// Changes the fields in `changes` of a local task. The other fields stay.
 #[tauri::command]
-async fn edit_task(app: State<'_, App>, id: String, title: String, notes: String) -> CmdResult<Task> {
-    let t = blocking(&app, move |a| a.tasks().edit(&id, &title, &notes)).await?;
-    app.fill_vectors();
-    app.summarize_items();
+async fn edit_task(app: State<'_, App>, id: String, changes: TaskFields) -> CmdResult<Task> {
+    // Meaning search and summaries read only the title and the description.
+    // The edit form sends only the changed fields, so this skips both jobs
+    // for a change of the tags, the dates, the priority, or the checklist.
+    let text = changes.title.is_some() || changes.notes.is_some();
+    let t = blocking(&app, move |a| a.tasks().update(&id, changes)).await?;
+    if text {
+        app.fill_vectors();
+        app.summarize_items();
+    }
     Ok(t)
+}
+
+/// Ticks or un-ticks one step. `text` must be the step's text, so a tick
+/// fails when the checklist changed after the list was loaded.
+#[tauri::command]
+async fn set_task_step(app: State<'_, App>, id: String, index: usize, text: String, done: bool) -> CmdResult<Task> {
+    blocking(&app, move |a| a.tasks().set_step(&id, index, &text, done)).await
 }
 
 #[tauri::command]
@@ -471,6 +484,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         tasks,
         add_task,
         edit_task,
+        set_task_step,
         set_task_done,
         delete_task,
         github_items,
@@ -585,16 +599,24 @@ mod tests {
         let (_app, win, dir) = window("tasks");
         assert_eq!(call(&win, "tasks", json!({})).unwrap(), json!([]));
 
-        let t = call(&win, "add_task", json!({ "title": "Call Sam" })).unwrap();
+        let t = call(&win, "add_task", json!({ "task": { "title": "Call Sam" } })).unwrap();
         assert_eq!(t["title"], "Call Sam");
         assert_eq!(t["added_by"], "you", "tasks from the window are yours");
         let id = t["id"].as_str().unwrap().to_string();
 
-        let edited = call(&win, "edit_task", json!({ "id": id, "title": "Call Sam today", "notes": " About the invoice. " })).unwrap();
+        let edited = call(&win, "edit_task", json!({ "id": id, "changes": { "title": "Call Sam today", "notes": " About the invoice. " } })).unwrap();
         assert_eq!((edited["title"].clone(), edited["notes"].clone()), (json!("Call Sam today"), json!("About the invoice.")));
-        let with_notes = call(&win, "add_task", json!({ "title": "Pay rent", "notes": "Before Friday" })).unwrap();
+        let changes = json!({ "due": "2026-12-01", "priority": "high", "tags": ["work"], "checklist": [{ "text": "Find number", "done": true }] });
+        let more = call(&win, "edit_task", json!({ "id": id, "changes": changes })).unwrap();
+        assert_eq!((&more["title"], &more["due"], &more["priority"]), (&json!("Call Sam today"), &json!("2026-12-01"), &json!("high")));
+        assert_eq!((&more["tags"], &more["checklist"]), (&json!(["work"]), &json!([{ "text": "Find number", "done": true }])));
+        let with_notes = call(&win, "add_task", json!({ "task": { "title": "Pay rent", "notes": "Before Friday" } })).unwrap();
         assert_eq!(with_notes["notes"], "Before Friday");
         call(&win, "delete_task", json!({ "id": with_notes["id"] })).unwrap();
+
+        let step = call(&win, "set_task_step", json!({ "id": id, "index": 0, "text": "Find number", "done": false })).unwrap();
+        assert_eq!(step["checklist"], json!([{ "text": "Find number", "done": false }]));
+        assert!(call(&win, "set_task_step", json!({ "id": id, "index": 0, "text": "Other", "done": true })).is_err(), "the checklist changed");
 
         let done = call(&win, "set_task_done", json!({ "id": id, "done": true })).unwrap();
         assert_eq!(done["done"], true);
@@ -608,7 +630,7 @@ mod tests {
     #[test]
     fn task_command_errors_reach_the_window_as_text() {
         let (_app, win, dir) = window("errors");
-        let e = call(&win, "add_task", json!({ "title": "  " })).unwrap_err();
+        let e = call(&win, "add_task", json!({ "task": { "title": "  " } })).unwrap_err();
         assert!(e.as_str().unwrap().contains("empty"), "got {e}");
         let e = call(&win, "delete_task", json!({ "id": "nope" })).unwrap_err();
         assert!(e.as_str().unwrap().contains("no task"), "got {e}");

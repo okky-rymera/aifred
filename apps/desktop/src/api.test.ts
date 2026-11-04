@@ -19,7 +19,7 @@ describe("command wrappers", () => {
     await api.getSettings();
     await api.setSettings({ refresh_minutes: 30 });
     expect(fake.calls).toEqual([
-      { cmd: "add_task", args: { title: "Call Sam", notes: "" } },
+      { cmd: "add_task", args: { task: { title: "Call Sam", notes: "" } } },
       { cmd: "set_task_done", args: { id: t.id, done: true } },
       { cmd: "delete_task", args: { id: t.id } },
       { cmd: "add_fact", args: { text: "likes tea" } },

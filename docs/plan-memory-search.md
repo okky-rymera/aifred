@@ -1,6 +1,6 @@
 # Plan: memory, chat history, tasks, GitHub, and ClickUp in SQLite, with word and meaning search
 
-Date: 2026-11-04. Status: phases 1 to 5 done (branch `feat/sqlite-storage`, not committed).
+Date: 2026-11-04. Status: phases 1 to 5 done (branch `feat/sqlite-storage`, commit 0a3028a).
 
 ## Goal
 
