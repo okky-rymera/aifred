@@ -9,6 +9,47 @@ const REASON: Record<api.GithubItem["reason"], { label: string; cls: string }> =
   your_pr: { label: "Your PR", cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" },
 };
 
+/** The most link badges on one row. The rest hide behind a "+N" button. */
+const MAX_LINKS = 3;
+
+/** Small badges that open the linked pull requests (on an issue) or issues (on a pull request). */
+function LinkBadges({ item }: { item: api.GithubItem }) {
+  const [all, setAll] = useState(false);
+  const links = item.links ?? [];
+  if (links.length === 0) return null;
+  const kind = (l: api.GithubLink) => (l.pull_request ? "PR" : "Issue");
+  const name = (l: api.GithubLink) => `${l.repo === item.repo ? "" : l.repo.split("/")[1]}#${l.number}`;
+  const hint = (l: api.GithubLink) =>
+    `${kind(l)} ${l.repo}#${l.number}: ${l.title}${l.reason ? ` (${REASON[l.reason].label})` : ""}`;
+  const extra = links.slice(MAX_LINKS);
+  return (
+    <>
+      {(all ? links : links.slice(0, MAX_LINKS)).map((l) => (
+        <a
+          key={l.id}
+          href={l.url}
+          title={hint(l)}
+          className={`rounded px-1.5 py-0.5 text-[11px] hover:underline ${
+            l.reason ? REASON[l.reason].cls : "bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-300"
+          }`}
+        >
+          {kind(l)} {name(l)}
+        </a>
+      ))}
+      {extra.length > 0 && !all && (
+        <button
+          onClick={() => setAll(true)}
+          title={extra.map(hint).join("\n")}
+          aria-label={`Show ${extra.length} more links`}
+          className="rounded px-1 text-[11px] text-stone-500 hover:bg-stone-100 hover:underline dark:hover:bg-stone-800"
+        >
+          +{extra.length}
+        </button>
+      )}
+    </>
+  );
+}
+
 function ago(iso: string): string {
   return agoSecs(new Date(iso).getTime() / 1000);
 }
@@ -46,8 +87,6 @@ function Chip({ active, onClick, children, disabled }: {
 export function TodoList(props: {
   tasks: api.Task[];
   github: api.GithubItem[];
-  /** GitHub items you marked done in AIfred. */
-  githubDone?: api.DoneItem[];
   /** When the GitHub list came from GitHub, in Unix seconds. */
   fetchedAt?: number;
   /** Set when GitHub could not be asked and the list is the older saved one. */
@@ -56,18 +95,9 @@ export function TodoList(props: {
   /** Set when the local tasks cannot be loaded. */
   tasksError?: string;
   onChange: () => void;
-  /** Load the GitHub list again (the saved copy is fine). */
-  onGithubChange?: () => void;
   onRefresh: () => void;
 }) {
   const { tasks, github, githubState } = props;
-  const githubDone = props.githubDone ?? [];
-  const githubChanged = () => props.onGithubChange?.();
-  /** The item you ticked that is still open on GitHub: we ask before we close it.
-   * It is kept here, not looked up in the list, so a list reload cannot hide
-   * the question. */
-  const [asking, setAsking] = useState<{ item: api.GithubItem; isPullRequest: boolean } | null>(null);
-  const [closing, setClosing] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [draft, setDraft] = useState("");
   const [showDone, setShowDone] = useState(false);
@@ -77,10 +107,8 @@ export function TodoList(props: {
   const done = tasks.filter((t) => t.done).sort((a, b) => (b.done_at ?? 0) - (a.done_at ?? 0));
   const showLocal = filter !== "github";
   const showGithub = filter !== "local";
-  // The item in the close question counts once, also after a reload drops it.
-  const githubOpen = github.filter((g) => g.id !== asking?.item.id);
-  const count = (showLocal ? open.length : 0) + (showGithub ? githubOpen.length + (asking ? 1 : 0) : 0);
-  const doneCount = (showLocal ? done.length : 0) + (showGithub ? githubDone.length : 0);
+  const count = (showLocal ? open.length : 0) + (showGithub ? github.length : 0);
+  const doneCount = showLocal ? done.length : 0;
 
   /** Runs a change. Returns true if it worked. */
   async function run(p: Promise<unknown>): Promise<boolean> {
@@ -93,48 +121,6 @@ export function TodoList(props: {
       setError(String(e));
       return false;
     }
-  }
-
-  /** Tick a GitHub item: hide it in AIfred, then check GitHub. */
-  async function markGithubDone(g: api.GithubItem) {
-    setError("");
-    try {
-      const r = await api.githubMarkDone(g.id);
-      if (r.can_close) {
-        setAsking({ item: g, isPullRequest: r.is_pull_request });
-        return;
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-    githubChanged();
-  }
-
-  async function answerClose(close: boolean) {
-    const g = asking?.item;
-    if (!g) return;
-    if (close) {
-      setClosing(true);
-      try {
-        await api.githubClose(g.id);
-      } catch (e) {
-        setError(`Not closed on GitHub: ${e}`);
-      } finally {
-        setClosing(false);
-      }
-    }
-    setAsking(null);
-    githubChanged();
-  }
-
-  async function undoGithub(id: string) {
-    setError("");
-    try {
-      await api.githubUndo(id);
-    } catch (e) {
-      setError(String(e));
-    }
-    githubChanged();
   }
 
   async function add() {
@@ -213,43 +199,12 @@ export function TodoList(props: {
             </li>
           ))}
 
-        {showGithub && asking && (
-          <li key={`asking-${asking.item.id}`} className="space-y-2 py-2.5">
-            <div className="text-sm">
-              <b>{asking.item.title}</b> is still open on GitHub.{" "}
-              {asking.isPullRequest
-                ? "Close this pull request on GitHub, without a merge?"
-                : "Close this issue on GitHub?"}
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => answerClose(true)}
-                disabled={closing}
-                className="rounded-lg bg-[#252e4a] px-3 py-1 text-xs font-medium text-stone-50 hover:bg-[#323d62] disabled:opacity-40"
-              >
-                {closing ? "Closing…" : "Close on GitHub"}
-              </button>
-              <button
-                onClick={() => answerClose(false)}
-                disabled={closing}
-                className="rounded-lg border border-stone-300 px-3 py-1 text-xs hover:bg-stone-200 disabled:opacity-40 dark:border-stone-700 dark:hover:bg-stone-800"
-              >
-                Keep it open
-              </button>
-            </div>
-          </li>
-        )}
+        {/* GitHub items have no checkbox: AIfred only reads GitHub. An item
+            leaves the list when it is closed on GitHub. */}
         {showGithub &&
-          githubOpen.map((g) => (
+          github.map((g) => (
             <li key={g.id} className="flex items-center gap-3 py-2.5">
-              <input
-                type="checkbox"
-                checked={false}
-                disabled={!!asking}
-                onChange={() => markGithubDone(g)}
-                title="Mark done"
-                className="size-4 accent-amber-500"
-              />
+              <span className="size-4 shrink-0" aria-hidden />
               <div className="min-w-0 flex-1">
                 <a href={g.url} className="text-sm hover:underline">
                   {g.title}
@@ -257,6 +212,12 @@ export function TodoList(props: {
                 <div className="truncate text-xs text-stone-500">
                   {g.repo}#{g.number} · {ago(g.updated)}
                 </div>
+                {/* Under the title, so many badges do not cut a long title short. */}
+                {!!g.links?.length && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1">
+                    <LinkBadges item={g} />
+                  </div>
+                )}
               </div>
               <span className={`rounded px-1.5 py-0.5 text-[11px] ${REASON[g.reason].cls}`}>
                 {REASON[g.reason].label}
@@ -287,24 +248,6 @@ export function TodoList(props: {
           </button>
           {showDone && (
             <ul className="mt-1">
-              {showGithub &&
-                githubDone.map((g) => (
-                  <li key={g.id} className="flex items-center gap-3 py-1.5 text-stone-400">
-                    <input
-                      type="checkbox"
-                      checked
-                      onChange={() => undoGithub(g.id)}
-                      title="Not done: show it again"
-                      className="size-4 accent-amber-500"
-                    />
-                    <a href={g.url} className="flex-1 text-sm line-through hover:underline">
-                      {g.title}
-                    </a>
-                    <span className="text-xs">
-                      {g.repo}#{g.number}
-                    </span>
-                  </li>
-                ))}
               {showLocal && done.map((t) => (
                 <li key={t.id} className="group flex items-center gap-3 py-1.5 text-stone-400">
                   <input

@@ -132,7 +132,7 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
         }
     }
     match github::my_items(&github::owners_from_env()).await {
-        Ok(f) => blocking(&app, move |_| GithubStore::new(&dir).save_fetch(f.items, f.complete, now())).await,
+        Ok(f) => blocking(&app, move |_| GithubStore::new(&dir).save_fetch(f.items, &f.no_links, now())).await,
         Err(e) => {
             let e = err(e);
             let saved = blocking(&app, move |_| GithubStore::new(&dir).cached(u64::MAX, now())).await;
@@ -145,45 +145,6 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
             }
         }
     }
-}
-
-#[derive(Serialize)]
-struct DoneResult {
-    /// The item is still open on GitHub.
-    still_open: bool,
-    /// The user may close it from AIfred (not a review request).
-    can_close: bool,
-    /// A pull request, not an issue. The window uses it for the close question.
-    is_pull_request: bool,
-}
-
-/// Marks a GitHub item done in AIfred, then checks GitHub.
-#[tauri::command]
-async fn github_mark_done(app: State<'_, App>, id: String) -> CmdResult<DoneResult> {
-    let dir = app.assistant.dir.clone();
-    let item = blocking(&app, move |_| GithubStore::new(&dir).mark_done(&id, now())).await?;
-    let open = github::is_open(&item, &github::owners_from_env())
-        .await
-        .map_err(|e| format!("Marked done in AIfred. Cannot check GitHub: {e:#}"))?;
-    Ok(DoneResult { still_open: open, can_close: open && item.can_close(), is_pull_request: item.is_pull_request() })
-}
-
-/// Closes a done item on GitHub. The window calls this only after the user
-/// clicks the close button.
-#[tauri::command]
-async fn github_close(app: State<'_, App>, id: String) -> CmdResult<()> {
-    let dir = app.assistant.dir.clone();
-    let d = dir.clone();
-    let i = id.clone();
-    let item = blocking(&app, move |_| GithubStore::new(&d).done_item(&i)).await?;
-    github::close_item(&item, &github::owners_from_env()).await.map_err(err)?;
-    blocking(&app, move |_| GithubStore::new(&dir).forget_open(&id)).await
-}
-
-#[tauri::command]
-async fn github_undo(app: State<'_, App>, id: String) -> CmdResult<()> {
-    let dir = app.assistant.dir.clone();
-    blocking(&app, move |_| GithubStore::new(&dir).undo(&id)).await
 }
 
 #[tauri::command]
@@ -219,9 +180,6 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         set_task_done,
         delete_task,
         github_items,
-        github_mark_done,
-        github_close,
-        github_undo,
         get_settings,
         set_settings,
         info
@@ -233,6 +191,7 @@ fn main() -> anyhow::Result<()> {
     let backend = ClaudeBackend { work_dir: dir.join("claude"), model: std::env::var("AIFRED_MODEL").ok() };
     // The GitHub tool server is built into the same folder as this app.
     let tools_dir = std::env::current_exe()?.parent().map(Into::into).unwrap_or_default();
+    GithubStore::new(&dir).remove_old_files();
     let assistant = Arc::new(Assistant::new(dir, backend, tools_dir)?);
 
     // AIFRED_NO_WINDOW_STATE: do not read or write the saved window size.
@@ -371,7 +330,7 @@ mod tests {
             "url": "https://github.com/acme/shop/pull/7", "reason": "review_requested", "updated": ""
         }))
         .unwrap();
-        GithubStore::new(dir).save_fetch(vec![item], true, now() - ago).unwrap();
+        GithubStore::new(dir).save_fetch(vec![item], &[], now() - ago).unwrap();
     }
 
     #[test]
@@ -407,13 +366,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_github_items_cannot_be_marked_done_or_closed() {
-        let (_app, win, dir) = window("gh-unknown");
+    fn the_window_cannot_change_github() {
+        // The GitHub sync goes one way: the window can only read the list.
+        let (_app, win, dir) = window("gh-read-only");
         save_list(&dir, 60);
-        let e = call(&win, "github_mark_done", json!({ "id": "evil/repo#1" })).unwrap_err();
-        assert!(e.as_str().unwrap().contains("not in the GitHub list"), "got {e}");
-        let e = call(&win, "github_close", json!({ "id": "acme/shop#7" })).unwrap_err();
-        assert!(e.as_str().unwrap().contains("not marked done"), "got {e}");
+        for cmd in ["github_mark_done", "github_close", "github_undo"] {
+            assert!(call(&win, cmd, json!({ "id": "acme/shop#7" })).is_err(), "{cmd} must not exist");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

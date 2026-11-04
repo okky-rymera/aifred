@@ -12,9 +12,6 @@ describe("command wrappers", () => {
     await api.deleteTask(t.id);
     await api.setMemory("- likes tea");
     await api.githubItems(true);
-    await api.githubMarkDone("acme/shop#7");
-    await api.githubClose("acme/shop#7");
-    await api.githubUndo("acme/shop#7");
     await api.getSettings();
     await api.setSettings({ github_refresh_minutes: 30 });
     expect(fake.calls).toEqual([
@@ -23,9 +20,6 @@ describe("command wrappers", () => {
       { cmd: "delete_task", args: { id: t.id } },
       { cmd: "set_memory", args: { text: "- likes tea" } },
       { cmd: "github_items", args: { force: true } },
-      { cmd: "github_mark_done", args: { id: "acme/shop#7" } },
-      { cmd: "github_close", args: { id: "acme/shop#7" } },
-      { cmd: "github_undo", args: { id: "acme/shop#7" } },
       { cmd: "get_settings", args: {} },
       { cmd: "set_settings", args: { settings: { github_refresh_minutes: 30 } } },
     ]);

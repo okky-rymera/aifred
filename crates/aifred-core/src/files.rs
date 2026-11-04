@@ -68,8 +68,14 @@ fn lock(path: &Path) -> anyhow::Result<std::fs::File> {
 /// Replaces the whole file, with the lock. It does not read the old file,
 /// so it also repairs a broken file.
 pub fn replace<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
+    locked(path, || save(path, value))
+}
+
+/// Runs `f` with the file locked. Use it for a read and save that must not
+/// mix with the change of another program, when update() does not fit.
+pub fn locked<R>(path: &Path, f: impl FnOnce() -> anyhow::Result<R>) -> anyhow::Result<R> {
     let _lock = lock(path)?;
-    save(path, value)
+    f()
 }
 
 /// Read, change, and save, with the file locked for the whole step.

@@ -78,7 +78,7 @@ export default function App() {
   const [tasksError, setTasksError] = useState("");
   const [memoryError, setMemoryError] = useState("");
   const [loadError, setLoadError] = useState("");
-  const [github, setGithub] = useState<api.GithubList>({ items: [], done: [], fetched_at: 0 });
+  const [github, setGithub] = useState<api.GithubList>({ items: [], fetched_at: 0 });
   const [settings, setSettings] = useState<api.Settings | null>(null);
   const [page, setPage] = useState<"home" | "settings">("home");
   const [githubState, setGithubState] = useState("loading");
@@ -310,13 +310,11 @@ export default function App() {
             <TodoList
               tasks={tasks}
               github={github.items}
-              githubDone={github.done}
               fetchedAt={github.fetched_at}
               githubWarning={github.warning}
               githubState={githubState}
               tasksError={tasksError}
               onChange={loadTasks}
-              onGithubChange={() => loadGithub(false)}
               onRefresh={() => {
                 loadTasks();
                 loadGithub(true);

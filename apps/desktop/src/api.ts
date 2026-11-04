@@ -39,21 +39,31 @@ export type GithubItem = {
   url: string;
   reason: "review_requested" | "assigned" | "your_pr";
   updated: string;
+  /** For a pull request: the issues it closes. For an issue: its pull requests,
+   * also your own pull requests that the list shows inside the issue. */
+  links?: GithubLink[];
 };
 
-export type DoneItem = GithubItem & { done_at: number; gone_since?: number };
+export type GithubLink = {
+  id: string;
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  /** True for a pull request, false for an issue. */
+  pull_request: boolean;
+  /** Set when the linked item is also in your list. */
+  reason?: GithubItem["reason"];
+};
 
 export type GithubList = {
-  /** Open items that are not marked done. */
+  /** The open items. AIfred only reads GitHub, so it never changes them. */
   items: GithubItem[];
-  done: DoneItem[];
   /** When the list came from GitHub, in Unix seconds. */
   fetched_at: number;
   /** Set when GitHub could not be asked and this is the older saved list. */
   warning?: string;
 };
-
-export type DoneResult = { still_open: boolean; can_close: boolean; is_pull_request: boolean };
 
 export type Settings = {
   /** 0 means only when you click reload. */
@@ -76,9 +86,6 @@ export const setTaskDone = (id: string, done: boolean) => invoke<Task>("set_task
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
 /** force: ask GitHub now, and do not use the saved list. */
 export const githubItems = (force: boolean) => invoke<GithubList>("github_items", { force });
-export const githubMarkDone = (id: string) => invoke<DoneResult>("github_mark_done", { id });
-export const githubClose = (id: string) => invoke<void>("github_close", { id });
-export const githubUndo = (id: string) => invoke<void>("github_undo", { id });
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");

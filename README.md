@@ -71,14 +71,14 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - Claude gets no built-in tools: no shell, no file access, no web.
 - Claude gets only the MCP servers and tools that AIfred names. All other tools are denied.
 - The GitHub tools that Claude uses can only read.
-- The desktop app can close a GitHub issue or pull request. It does this only when you tick the item and then click "Close on GitHub". It never closes a pull request that only asks for your review.
+- The desktop app also only reads GitHub. It never changes or closes an issue or pull request.
 
 ## GitHub list
 
 - AIfred saves the last GitHub list in `github-cache.json` in the data folder. When the window opens, it shows the saved list.
 - AIfred loads the list from GitHub again on a timer. Set the time on the Settings page (default: 15 minutes). The reload button always loads from GitHub.
-- When you tick a GitHub item, AIfred hides it and checks GitHub. If the item is still open, AIfred asks if you want to close it.
-- The ticked items are in `github-done.json`. Use "Show done" to undo a tick.
+- GitHub items have no checkbox. An item leaves the list when it is closed on GitHub, at the next reload.
+- When your pull request closes one of your issues, the list shows one row for the issue. The pull request shows as a badge under the issue title.
 
 ## Check the app without a window on your screen
 

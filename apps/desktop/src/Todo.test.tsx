@@ -31,6 +31,53 @@ describe("TodoList", () => {
     expect(screen.queryByText("Old")).not.toBeInTheDocument(); // done tasks are folded away
   });
 
+  it("shows linked pull requests and issues as small badges that open them", async () => {
+    fakeBackend();
+    const link = (g: GithubItem, reason?: GithubItem["reason"]) => ({
+      id: g.id, repo: g.repo, number: g.number, title: g.title, url: g.url, reason,
+      pull_request: g.url.includes("/pull/"),
+    });
+    const pr = githubItem(143, "your_pr", "Merge suite");
+    const other = { ...githubItem(9, "your_pr", "Docs PR"), id: "acme/docs#9", repo: "acme/docs" };
+    show([], [
+      // Your issue with your PR inside it, plus a PR from another repository.
+      { ...githubItem(142, "assigned", "Merge branch"), links: [link(pr, "your_pr"), link(other)] },
+      // Your PR for an issue that is not in your list.
+      { ...githubItem(150, "your_pr", "Fix cart"), links: [link(githubItem(149, "assigned", "Cart bug"))] },
+      // Many links: only 3 badges, then "+2".
+      { ...githubItem(160, "assigned", "Big"), links: [1, 2, 3, 4, 5].map((n) => link(githubItem(n, "your_pr"))) },
+    ]);
+    const prBadge = screen.getByRole("link", { name: "PR #143" });
+    expect(prBadge).toHaveAttribute("href", pr.url);
+    expect(prBadge).toHaveAttribute("title", "PR acme/shop#143: Merge suite (Your PR)");
+    expect(prBadge.className).toContain("emerald");
+    expect(screen.getByRole("link", { name: "PR docs#9" })).toHaveAttribute("title", "PR acme/docs#9: Docs PR");
+    expect(screen.getByRole("link", { name: "Issue #149" })).toHaveAttribute(
+      "href",
+      "https://github.com/acme/shop/issues/149",
+    );
+    expect(screen.getByText("3")).toBeInTheDocument(); // the badges are not rows
+    // The links after the first 3 hide behind a button that shows them.
+    const more = screen.getByRole("button", { name: "Show 2 more links" });
+    expect(more).toHaveTextContent("+2");
+    expect(more).toHaveAttribute("title", "PR acme/shop#4: Item 4\nPR acme/shop#5: Item 5");
+    expect(screen.queryByRole("link", { name: "PR #5" })).not.toBeInTheDocument();
+    await userEvent.click(more);
+    expect(screen.getByRole("link", { name: "PR #5" })).toHaveAttribute("href", "https://github.com/acme/shop/pull/5");
+    expect(screen.queryByRole("button", { name: /more links/ })).not.toBeInTheDocument();
+  });
+
+  it("puts the badges under the title, with no buttons on them", () => {
+    fakeBackend();
+    const pr = githubItem(143, "your_pr", "Merge suite");
+    show([], [{ ...githubItem(142, "assigned", "Merge branch"), links: [{ id: pr.id, repo: pr.repo, number: 143,
+      title: pr.title, url: pr.url, pull_request: true, reason: "your_pr" }] }]);
+    expect(screen.queryByRole("button", { name: /done/i })).not.toBeInTheDocument();
+    const badge = screen.getByRole("link", { name: "PR #143" });
+    const title = screen.getByRole("link", { name: "Merge branch" });
+    expect(title.parentElement?.contains(badge)).toBe(true); // same column as the title, not beside it
+  });
+
   it("filters by source", async () => {
     fakeBackend();
     show([task("Call Sam")], [githubItem(7, "assigned", "Fix cart")]);

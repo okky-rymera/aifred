@@ -185,14 +185,9 @@ describe("errors the window must show", () => {
 });
 
 describe("GitHub list: saved copy and timer", () => {
-  it("asks GitHub once at start, then uses the saved copy after a change", async () => {
-    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart"), githubItem(8, "assigned")] });
+  it("asks GitHub once at start", async () => {
+    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")] });
     await screen.findByText("Fix cart");
-    expect(fake.githubFetches).toBe(1);
-    // Ticking an item reloads the list from the saved copy, not from GitHub.
-    fake.githubClosed.push("acme/shop#8");
-    await userEvent.click(within(screen.getByText("Item 8").closest("li")!).getByTitle("Mark done"));
-    await waitFor(() => expect(screen.queryByText("Item 8")).not.toBeInTheDocument());
     expect(fake.githubFetches).toBe(1);
   });
 
@@ -228,86 +223,20 @@ describe("GitHub list: saved copy and timer", () => {
   });
 });
 
-describe("marking a GitHub item done", () => {
-  const tick = async (title: string) =>
-    userEvent.click(within((await screen.findByText(title)).closest("li")!).getByTitle("Mark done"));
-
-  it("an item that is already closed on GitHub just goes to done, with no question", async () => {
-    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")], githubClosed: ["acme/shop#7"] });
-    await tick("Fix cart");
-    await waitFor(() => expect(screen.queryByText("Fix cart")).not.toBeInTheDocument());
-    expect(screen.queryByText(/still open on GitHub/)).not.toBeInTheDocument();
-    expect(fake.calls.some((c) => c.cmd === "github_close")).toBe(false);
-    await userEvent.click(screen.getByRole("button", { name: "Show done (1)" }));
-    expect(screen.getByText("Fix cart")).toBeInTheDocument();
-  });
-
-  it("an open issue asks first, and 'Close on GitHub' closes it", async () => {
+describe("GitHub items are read-only", () => {
+  it("have no checkbox and never call a command that changes GitHub", async () => {
     const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")] });
-    await tick("Fix cart");
-    expect(await screen.findByText("Close this issue on GitHub?", { exact: false })).toBeInTheDocument();
-    expect(fake.githubClosed).toEqual([]); // nothing closed before you answer
-    await userEvent.click(screen.getByRole("button", { name: "Close on GitHub" }));
-    await waitFor(() => expect(fake.githubClosed).toEqual(["acme/shop#7"]));
-    await waitFor(() => expect(screen.queryByText(/still open on GitHub/)).not.toBeInTheDocument());
+    const row = (await screen.findByText("Fix cart")).closest("li")!;
+    expect(within(row).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(fake.calls.map((c) => c.cmd).filter((c) => c.startsWith("github_") && c !== "github_items")).toEqual([]);
   });
 
-  it("'Keep it open' marks it done in AIfred only", async () => {
-    const fake = await startApp({ github: [githubItem(7, "your_pr", "My PR")] });
-    await tick("My PR");
-    expect(await screen.findByText(/without a merge/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Keep it open" }));
-    await waitFor(() => expect(screen.queryByText("My PR")).not.toBeInTheDocument());
-    expect(fake.githubClosed).toEqual([]);
-    expect(fake.githubDone.map((d) => d.id)).toEqual(["acme/shop#7"]);
-  });
-
-  it("a review request is never offered for closing", async () => {
-    const fake = await startApp({ github: [githubItem(7, "review_requested", "Their PR")] });
-    await tick("Their PR");
-    await waitFor(() => expect(screen.queryByText("Their PR")).not.toBeInTheDocument());
-    expect(screen.queryByText(/still open on GitHub/)).not.toBeInTheDocument();
-    expect(fake.calls.some((c) => c.cmd === "github_close")).toBe(false);
-  });
-
-  it("undo in the done list shows the item again", async () => {
-    await startApp({ github: [githubItem(7, "assigned", "Fix cart")], githubClosed: ["acme/shop#7"] });
-    await tick("Fix cart");
-    await userEvent.click(await screen.findByRole("button", { name: "Show done (1)" }));
-    await userEvent.click(screen.getByTitle("Not done: show it again"));
-    expect(await screen.findByTitle("Mark done")).toBeInTheDocument();
-  });
-
-  it("a reload while the close question is open keeps the question working", async () => {
-    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart"), githubItem(8, "assigned", "Other")] });
-    await tick("Fix cart");
-    expect(await screen.findByText("Close this issue on GitHub?", { exact: false })).toBeInTheDocument();
-    await userEvent.click(screen.getByTitle("Reload the list"));
-    await waitFor(() => expect(fake.githubFetches).toBe(2));
-    expect(screen.getByText("Close this issue on GitHub?", { exact: false })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Close on GitHub" }));
-    await waitFor(() => expect(fake.githubClosed).toEqual(["acme/shop#7"]));
-    await waitFor(() => expect(screen.queryByText(/still open on GitHub/)).not.toBeInTheDocument());
-    expect(screen.getByTitle("Mark done")).toBeEnabled(); // the other item can be ticked again
-  });
-
-  it("the question names a pull request from the app's answer", async () => {
-    await startApp({ github: [githubItem(7, "your_pr", "My PR")] });
-    await tick("My PR");
-    expect(await screen.findByText("Close this pull request on GitHub, without a merge?", { exact: false })).toBeInTheDocument();
-  });
-
-  it("a slow reload that ends last does not bring back a ticked item", async () => {
-    const slow = deferred<void>();
-    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")], githubClosed: ["acme/shop#7"] });
+  it("an item closed on GitHub leaves the list on the next reload", async () => {
+    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")] });
     await screen.findByText("Fix cart");
-    fake.onGithubItems = (force) => (force ? slow.promise : undefined);
-    await userEvent.click(screen.getByTitle("Reload the list")); // slow; its list still has the item
-    await tick("Fix cart");
+    fake.github = [];
+    await userEvent.click(screen.getByTitle("Reload the list"));
     await waitFor(() => expect(screen.queryByText("Fix cart")).not.toBeInTheDocument());
-    slow.resolve();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(screen.queryByText("Fix cart")).not.toBeInTheDocument();
   });
 
   it("shows the saved list with a warning when GitHub cannot be reached", async () => {
@@ -317,13 +246,6 @@ describe("marking a GitHub item done", () => {
     });
     expect(await screen.findByText("Fix cart")).toBeInTheDocument();
     expect(screen.getByText(/Cannot reach GitHub/)).toBeInTheDocument();
-  });
-
-  it("a failed close says so", async () => {
-    await startApp({ github: [githubItem(7, "assigned", "Fix cart")], fail: { github_close: "gh failed: no access" } });
-    await tick("Fix cart");
-    await userEvent.click(await screen.findByRole("button", { name: "Close on GitHub" }));
-    expect(await screen.findByText("Not closed on GitHub: gh failed: no access")).toBeInTheDocument();
   });
 });
 

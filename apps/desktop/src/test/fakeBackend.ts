@@ -2,7 +2,7 @@
 // the Rust app (src-tauri/src/main.rs), but keeps everything in memory.
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Answer, DoneItem, GithubItem, ProgressEvent, Settings, Task, Turn } from "../api";
+import type { Answer, GithubItem, ProgressEvent, Settings, Task, Turn } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void) => Promise<Answer> | Answer;
 
@@ -16,9 +16,6 @@ export type Fake = {
   /** Runs after the list is made and before it is returned. Return a
    * promise to hold the answer, like a slow GitHub. */
   onGithubItems?: (force: boolean) => Promise<void> | void;
-  githubDone: DoneItem[];
-  /** Items that are already closed on GitHub, by id. */
-  githubClosed: string[];
   /** How many times the window asked GitHub (not the saved list). */
   githubFetches: number;
   settings: Settings;
@@ -62,8 +59,6 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
   const fake: Fake = {
     tasks: [],
     github: [],
-    githubDone: [],
-    githubClosed: [],
     githubFetches: 0,
     settings: { github_refresh_minutes: 15 },
     history: [],
@@ -121,35 +116,14 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
           if (fake.githubError) throw fake.githubError;
           fake.githubFetches++;
         }
-        const doneIds = fake.githubDone.map((d) => d.id);
         const list = {
-          items: fake.github.filter((g) => !doneIds.includes(g.id)),
-          done: structuredClone(fake.githubDone),
+          items: structuredClone(fake.github),
           fetched_at: nowSecs(),
           warning: fake.githubWarning,
         };
         await fake.onGithubItems?.(Boolean(args.force));
         return list;
       }
-      case "github_mark_done": {
-        const g = fake.github.find((g) => g.id === args.id);
-        if (!g) throw `${args.id} is not in the GitHub list. Reload the list.`;
-        if (!fake.githubDone.some((d) => d.id === g.id)) fake.githubDone.push({ ...g, done_at: nowSecs() });
-        const open = !fake.githubClosed.includes(g.id);
-        return {
-          still_open: open,
-          can_close: open && g.reason !== "review_requested",
-          is_pull_request: g.url.includes("/pull/"),
-        };
-      }
-      case "github_close":
-        if (!fake.githubDone.some((d) => d.id === args.id)) throw `${args.id} is not marked done`;
-        fake.githubClosed.push(args.id);
-        fake.github = fake.github.filter((g) => g.id !== args.id);
-        return null;
-      case "github_undo":
-        fake.githubDone = fake.githubDone.filter((d) => d.id !== args.id);
-        return null;
       case "get_settings":
         return structuredClone(fake.settings);
       case "set_settings":
