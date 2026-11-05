@@ -21,3 +21,6 @@ crates/*/Cargo.lock
 .DS_Store
 .idea/
 .vscode/
+
+# Logs from the playwright-cli browser tool
+.playwright-cli/
