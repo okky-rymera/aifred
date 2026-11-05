@@ -77,25 +77,42 @@ struct ApiAsset {
 /// The name of the release file for this computer, for example
 /// "aifred-0.1.2-linux-x86_64".
 pub fn asset_name(version: &str) -> String {
-    format!("aifred-{version}-{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+    format!(
+        "aifred-{version}-{}-{}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
 }
 
 /// The newest release in a GitHub release list (`json`) that is newer than
 /// `current`. A release without a file for this computer, or without a
 /// SHA-256 sum, does not count.
 pub fn newest(json: &[u8], current: &str) -> anyhow::Result<Option<Release>> {
-    let current = semver::Version::parse(current).with_context(|| format!("bad program version {current:?}"))?;
-    let releases: Vec<ApiRelease> = serde_json::from_slice(json).context("GitHub sent a release list that AIfred cannot read")?;
+    let current = semver::Version::parse(current)
+        .with_context(|| format!("bad program version {current:?}"))?;
+    let releases: Vec<ApiRelease> = serde_json::from_slice(json)
+        .context("GitHub sent a release list that AIfred cannot read")?;
     let mut best: Option<(semver::Version, Release)> = None;
     for r in releases.into_iter().filter(|r| !r.draft) {
-        let Ok(v) = semver::Version::parse(r.tag_name.trim_start_matches('v')) else { continue };
+        let Ok(v) = semver::Version::parse(r.tag_name.trim_start_matches('v')) else {
+            continue;
+        };
         if v <= current || best.as_ref().is_some_and(|(b, _)| v <= *b) {
             continue;
         }
         let name = asset_name(&v.to_string());
-        let Some(a) = r.assets.into_iter().find(|a| a.name == name) else { continue };
-        let Some(sha) = a.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")) else { continue };
-        let release = Release { version: v.to_string(), url: a.browser_download_url, sha256: sha.to_ascii_lowercase(), page: r.html_url };
+        let Some(a) = r.assets.into_iter().find(|a| a.name == name) else {
+            continue;
+        };
+        let Some(sha) = a.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")) else {
+            continue;
+        };
+        let release = Release {
+            version: v.to_string(),
+            url: a.browser_download_url,
+            sha256: sha.to_ascii_lowercase(),
+            page: r.html_url,
+        };
         best = Some((v, release));
     }
     Ok(best.map(|(_, r)| r))
@@ -133,7 +150,12 @@ impl UpdateLock {
             .truncate(false)
             .write(true)
             .open(&path)
-            .with_context(|| format!("AIfred cannot write to {}, so it cannot update itself", path.display()))?;
+            .with_context(|| {
+                format!(
+                    "AIfred cannot write to {}, so it cannot update itself",
+                    path.display()
+                )
+            })?;
         let until = Instant::now() + wait.unwrap_or_default();
         loop {
             match file.try_lock() {
@@ -142,7 +164,9 @@ impl UpdateLock {
                     std::thread::sleep(Duration::from_millis(200));
                 }
                 Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-                Err(std::fs::TryLockError::Error(e)) => return Err(e).context("cannot lock the update file"),
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(e).context("cannot lock the update file");
+                }
             }
         }
     }
@@ -182,8 +206,12 @@ pub fn is_staged(program: &Path) -> bool {
 /// with the `UpdateLock`, so it does not remove the files of another window.
 pub fn discard(program: &Path) {
     let _ = std::fs::remove_file(staged_path(program));
-    let Some(folder) = program.parent() else { return };
-    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    let Some(folder) = program.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
     for e in entries.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
@@ -200,7 +228,8 @@ pub async fn download(release: &Release, program: &Path) -> anyhow::Result<PathB
     let staged = staged_path(program);
     let part = program.with_file_name(format!("{STAGED}.{}{PART_END}", std::process::id()));
     let result = save_and_check(release, &part).await;
-    let result = result.and_then(|()| std::fs::rename(&part, &staged).context("cannot keep the downloaded file"));
+    let result = result
+        .and_then(|()| std::fs::rename(&part, &staged).context("cannot keep the downloaded file"));
     if result.is_err() {
         let _ = std::fs::remove_file(&part);
     }
@@ -210,15 +239,29 @@ pub async fn download(release: &Release, program: &Path) -> anyhow::Result<PathB
 async fn save_and_check(release: &Release, part: &Path) -> anyhow::Result<()> {
     tokio::time::timeout(DOWNLOAD_TIMEOUT, save(release, part))
         .await
-        .with_context(|| format!("the download did not end in {} minutes", DOWNLOAD_TIMEOUT.as_secs() / 60))??;
+        .with_context(|| {
+            format!(
+                "the download did not end in {} minutes",
+                DOWNLOAD_TIMEOUT.as_secs() / 60
+            )
+        })??;
     check_file(release, part).await
 }
 
 async fn save(release: &Release, part: &Path) -> anyhow::Result<()> {
     let folder = part.parent().unwrap_or(Path::new("."));
-    let mut file = File::create(part)
-        .with_context(|| format!("AIfred cannot write to {}, so it cannot update itself", folder.display()))?;
-    let mut reply = http()?.get(&release.url).send().await.context("cannot download the update")?.error_for_status()?;
+    let mut file = File::create(part).with_context(|| {
+        format!(
+            "AIfred cannot write to {}, so it cannot update itself",
+            folder.display()
+        )
+    })?;
+    let mut reply = http()?
+        .get(&release.url)
+        .send()
+        .await
+        .context("cannot download the update")?
+        .error_for_status()?;
     let mut sum = Sha256::new();
     while let Some(chunk) = reply.chunk().await.context("the download stopped")? {
         sum.update(&chunk);
@@ -241,7 +284,10 @@ async fn check_file(release: &Release, part: &Path) -> anyhow::Result<()> {
     }
     // The new file must start on this computer. For example, a release can
     // need a newer system library.
-    let run = tokio::process::Command::new(part).arg("version").kill_on_drop(true).output();
+    let run = tokio::process::Command::new(part)
+        .arg("version")
+        .kill_on_drop(true)
+        .output();
     let out = tokio::time::timeout(Duration::from_secs(30), run)
         .await
         .context("the new program did not answer in 30 seconds")?
@@ -249,7 +295,10 @@ async fn check_file(release: &Release, part: &Path) -> anyhow::Result<()> {
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || said != release.version {
         let err = String::from_utf8_lossy(&out.stderr);
-        bail!("the new program does not work on this computer: {}", err.trim());
+        bail!(
+            "the new program does not work on this computer: {}",
+            err.trim()
+        );
     }
     Ok(())
 }
@@ -261,7 +310,8 @@ pub fn apply(program: &Path) -> anyhow::Result<bool> {
     if !staged.is_file() {
         return Ok(false);
     }
-    std::fs::rename(&staged, program).with_context(|| format!("cannot replace {}", program.display()))?;
+    std::fs::rename(&staged, program)
+        .with_context(|| format!("cannot replace {}", program.display()))?;
     Ok(true)
 }
 
@@ -284,7 +334,9 @@ mod tests {
     }
 
     fn newest_of(list: serde_json::Value, current: &str) -> Option<String> {
-        newest(list.to_string().as_bytes(), current).unwrap().map(|r| r.version)
+        newest(list.to_string().as_bytes(), current)
+            .unwrap()
+            .map(|r| r.version)
     }
 
     #[test]
@@ -294,7 +346,9 @@ mod tests {
             release("v0.3.0", "0.3.0", Some("sha256:bb")),
             release("v0.2.0", "0.2.0", Some("sha256:cc")),
         ]);
-        let r = newest(list.to_string().as_bytes(), "0.1.1").unwrap().unwrap();
+        let r = newest(list.to_string().as_bytes(), "0.1.1")
+            .unwrap()
+            .unwrap();
         assert_eq!(r.version, "0.3.0");
         assert_eq!(r.sha256, "bb");
         assert_eq!(r.url, "https://example.com/0.3.0");
@@ -303,7 +357,10 @@ mod tests {
 
     #[test]
     fn no_update_when_this_program_is_the_newest() {
-        let list = json!([release("v0.1.1", "0.1.1", Some("sha256:aa")), release("v0.1.0", "0.1.0", Some("sha256:aa"))]);
+        let list = json!([
+            release("v0.1.1", "0.1.1", Some("sha256:aa")),
+            release("v0.1.0", "0.1.0", Some("sha256:aa"))
+        ]);
         assert_eq!(newest_of(list, "0.1.1"), None);
         assert_eq!(newest_of(json!([]), "0.1.1"), None);
     }
@@ -314,8 +371,8 @@ mod tests {
         draft["draft"] = json!(true);
         let list = json!([
             draft,
-            release("v0.4.0", "0.4.0", None),               // no SHA-256 sum
-            release("v0.3.0", "9.9.9", Some("sha256:aa")),  // no file for this version
+            release("v0.4.0", "0.4.0", None), // no SHA-256 sum
+            release("v0.3.0", "9.9.9", Some("sha256:aa")), // no file for this version
             release("nightly", "nightly", Some("sha256:aa")), // not a version
             release("v0.2.0", "0.2.0", Some("sha256:aa")),
         ]);
@@ -325,7 +382,10 @@ mod tests {
     #[test]
     fn a_pre_release_version_is_older_than_its_release() {
         let list = json!([release("v0.2.0-beta.1", "0.2.0-beta.1", Some("sha256:aa"))]);
-        assert_eq!(newest_of(list.clone(), "0.1.1"), Some("0.2.0-beta.1".into()));
+        assert_eq!(
+            newest_of(list.clone(), "0.1.1"),
+            Some("0.2.0-beta.1".into())
+        );
         assert_eq!(newest_of(list, "0.2.0"), None);
     }
 
@@ -343,7 +403,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
                 let mut head = Vec::new();
                 let mut b = [0u8; 1024];
                 while !head.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -352,7 +414,10 @@ mod tests {
                         Ok(n) => head.extend_from_slice(&b[..n]),
                     }
                 }
-                let top = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let top = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
                 let _ = sock.write_all(top.as_bytes()).await;
                 let _ = sock.write_all(&body).await;
             }
@@ -361,7 +426,10 @@ mod tests {
     }
 
     fn sha(bytes: &[u8]) -> String {
-        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// A fake new program: a shell script that answers `version`.
@@ -376,12 +444,21 @@ mod tests {
         let program = d.join("aifred");
         std::fs::write(&program, "old").unwrap();
         let body = fake_program("0.2.0");
-        let r = Release { version: "0.2.0".into(), url: serve(body.clone()).await, sha256: sha(&body), page: String::new() };
+        let r = Release {
+            version: "0.2.0".into(),
+            url: serve(body.clone()).await,
+            sha256: sha(&body),
+            page: String::new(),
+        };
 
         let staged = download(&r, &program).await.unwrap();
         assert_eq!(staged, d.join(".aifred-update"));
         assert!(is_staged(&program));
-        assert_eq!(std::fs::read_to_string(&program).unwrap(), "old", "the download does not change the program");
+        assert_eq!(
+            std::fs::read_to_string(&program).unwrap(),
+            "old",
+            "the download does not change the program"
+        );
 
         assert!(apply(&program).unwrap());
         assert_eq!(std::fs::read(&program).unwrap(), body);
@@ -397,7 +474,12 @@ mod tests {
         let program = d.join("aifred");
         std::fs::write(&program, "old").unwrap();
         let body = fake_program("0.2.0");
-        let r = Release { version: "0.2.0".into(), url: serve(body).await, sha256: sha(b"other"), page: String::new() };
+        let r = Release {
+            version: "0.2.0".into(),
+            url: serve(body).await,
+            sha256: sha(b"other"),
+            page: String::new(),
+        };
         let e = download(&r, &program).await.unwrap_err();
         assert!(format!("{e:#}").contains("damaged"), "got {e:#}");
         assert!(!is_staged(&program));
@@ -412,7 +494,12 @@ mod tests {
         std::fs::write(&program, "old").unwrap();
         // It says another version, like a file that does not belong to the release.
         let body = fake_program("0.1.0");
-        let r = Release { version: "0.2.0".into(), url: serve(body.clone()).await, sha256: sha(&body), page: String::new() };
+        let r = Release {
+            version: "0.2.0".into(),
+            url: serve(body.clone()).await,
+            sha256: sha(&body),
+            page: String::new(),
+        };
         let e = download(&r, &program).await.unwrap_err();
         assert!(format!("{e:#}").contains("does not work"), "got {e:#}");
         assert!(!is_staged(&program));
@@ -427,15 +514,35 @@ mod tests {
         let program = d.join("aifred");
         std::fs::write(&program, "old").unwrap();
         let good = fake_program("0.2.0");
-        let r = Release { version: "0.2.0".into(), url: serve(good.clone()).await, sha256: sha(&good), page: String::new() };
+        let r = Release {
+            version: "0.2.0".into(),
+            url: serve(good.clone()).await,
+            sha256: sha(&good),
+            page: String::new(),
+        };
         download(&r, &program).await.unwrap();
 
         let newer = fake_program("0.3.0");
-        let r = Release { version: "0.3.0".into(), url: serve(newer).await, sha256: sha(b"other"), page: String::new() };
+        let r = Release {
+            version: "0.3.0".into(),
+            url: serve(newer).await,
+            sha256: sha(b"other"),
+            page: String::new(),
+        };
         assert!(download(&r, &program).await.is_err());
-        assert_eq!(std::fs::read(staged_path(&program)).unwrap(), good, "the 0.2.0 file stays");
-        let names: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
-        assert!(!names.iter().any(|n| n.ends_with(PART_END)), "no incomplete file stays: {names:?}");
+        assert_eq!(
+            std::fs::read(staged_path(&program)).unwrap(),
+            good,
+            "the 0.2.0 file stays"
+        );
+        let names: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.ends_with(PART_END)),
+            "no incomplete file stays: {names:?}"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -461,9 +568,16 @@ mod tests {
         let program = d.join("aifred");
         let first = UpdateLock::take(&program, None).unwrap();
         assert!(first.is_some());
-        assert!(UpdateLock::take(&program, Some(Duration::from_millis(300))).unwrap().is_none());
+        assert!(
+            UpdateLock::take(&program, Some(Duration::from_millis(300)))
+                .unwrap()
+                .is_none()
+        );
         drop(first);
-        assert!(UpdateLock::take(&program, None).unwrap().is_some(), "the lock is free after the first window stops");
+        assert!(
+            UpdateLock::take(&program, None).unwrap().is_some(),
+            "the lock is free after the first window stops"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

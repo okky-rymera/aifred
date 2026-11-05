@@ -1,321 +1,474 @@
-// The home page and the chat panel: the full window, with a fake backend.
+// The full window with a fake backend: Home (brief and list), the task
+// panel, the chats, Day plan, Settings, and Memory.
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
+import { DEFAULT_SETTINGS, type Answer } from "./api";
+import { addDays, dayOf } from "./items";
 import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, task } from "./test/fakeBackend";
-import type { Answer } from "./api";
 
-const panel = () => screen.queryByRole("complementary", { name: "Conversation" });
+// The panel stays in the page, hidden, behind the task tab. A role query skips a hidden element.
+const panel = () => document.querySelector<HTMLElement>('aside[aria-label="Conversation"]');
+const details = () => screen.getByRole("dialog", { name: "Task details" });
+const homeBox = () => screen.getByRole("textbox", { name: "Add a task or ask AIfred" });
+const today = () => dayOf(new Date());
 
+/** Starts the window. The brief does not write itself, unless the test sets auto_brief. */
 async function startApp(init: Parameters<typeof fakeBackend>[0] = {}) {
-  const fake = fakeBackend(init);
+  const fake = fakeBackend({ ...init, settings: { ...DEFAULT_SETTINGS, auto_brief: false, ...init.settings } });
   render(<App />);
-  await screen.findByText("Claude (your login)"); // first load is done
+  await screen.findByText("Claude (your login)"); // the first load is done
   return fake;
 }
 
-describe("home page", () => {
-  it("shows the chat box and the to-do list, and no chat panel", async () => {
-    await startApp({ tasks: [task("Call Sam")], github: [githubItem(7, "review_requested", "Fix cart")] });
-    expect(screen.getByText("Good to see you.")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Ask AIfred anything about your work…")).toBeInTheDocument();
-    expect(await screen.findByText("Fix cart")).toBeInTheDocument();
-    expect(screen.getByText("Call Sam")).toBeInTheDocument();
+const openItem = async (title: string) => userEvent.click(await screen.findByRole("button", { name: `Open details: ${title}` }));
+
+describe("home", () => {
+  it("shows the brief, and the items of all sources in groups, with no chat panel", async () => {
+    await startApp({
+      clickupToken: "pk_test",
+      tasks: [task("Pay rent", { due: today(), priority: "high" }), task("Old bill", { due: addDays(today(), -2) })],
+      github: [githubItem(7, "review_requested", "Fix cart")],
+      clickup: [clickupItem("86a", "Write notes", { custom_id: "DEV-42" })],
+    });
+    expect(screen.getByRole("region", { name: "Brief" })).toBeInTheDocument();
+    const now = await screen.findByRole("list", { name: "Needs you now" });
+    expect(within(now).getByText("Old bill")).toBeInTheDocument();
+    expect(within(now).getByText("2 days late")).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Today" })).getByText("Pay rent")).toBeInTheDocument();
+    const open = await screen.findByRole("list", { name: "Open" });
+    expect(within(open).getByText("Fix cart")).toBeInTheDocument();
+    expect(within(open).getByText("Review")).toBeInTheDocument();
+    expect(await within(open).findByText("Write notes")).toBeInTheDocument();
+    expect(within(open).getByText(/DEV-42 · Rymera · Sprint 12/)).toBeInTheDocument();
     expect(panel()).not.toBeInTheDocument();
   });
 
-  it("offers to continue an old conversation", async () => {
+  it("puts new GitHub items under New, with the reason from the brief", async () => {
     await startApp({
+      github: [githubItem(9, "review_requested", "Bulk edit")],
+      newKeys: ["github:acme/shop#9"],
+      briefs: { [today()]: { day: today(), written: 1, text: "Review [the bulk edit](item:github:acme/shop#9).", why: { "github:acme/shop#9": "It blocks the release." } } },
+    });
+    const list = await screen.findByRole("list", { name: "New" });
+    expect(within(list).getByText("Bulk edit")).toBeInTheDocument();
+    expect(within(list).getByText("It blocks the release.")).toBeInTheDocument();
+  });
+
+  it("writes the brief by itself once a day when the setting is on, and the item links open the item", async () => {
+    const fake = await startApp({
+      settings: { ...DEFAULT_SETTINGS, auto_brief: true },
+      tasks: [task("Pay rent")],
+      onWriteBrief: (day) => ({ day, written: 1, text: "One thing: [the rent](item:task:t-x).", why: {} }),
+    });
+    const key = `task:${fake.tasks[0].id}`;
+    fake.onWriteBrief = (day) => ({ day, written: 1, text: `One thing: [the rent](item:${key}).`, why: {} });
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1));
+    // The first answer named an item that is not in the list: plain text, no button.
+    expect(await screen.findByText("the rent")).not.toHaveClass("ref");
+    await userEvent.click(screen.getByRole("button", { name: "Write again" }));
+    await userEvent.click(await screen.findByRole("button", { name: "the rent" }));
+    expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveValue("Pay rent");
+    expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(2);
+  });
+
+  it("does not write the brief by itself when the setting is off, and shows a failed write", async () => {
+    const fake = await startApp({ onWriteBrief: () => Promise.reject("claude is not logged in") });
+    expect(screen.getByText(/has not written today's brief yet/)).toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "write_brief")).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: "Write the brief" }));
+    expect(await screen.findByText("Cannot write the brief: claude is not logged in")).toBeInTheDocument();
+  });
+
+  it("keeps tasks with a later start day under Later, and done tasks under Finished", async () => {
+    await startApp({ tasks: [task("Book flights", { start: addDays(today(), 5) }), task("Old one", { done: true, done_at: 5 })] });
+    expect(await screen.findByText("Nothing to do today. Some tasks start later.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show later (1)" }));
+    expect(within(screen.getByRole("list", { name: "Later" })).getByText("Book flights")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show finished (1)" }));
+    expect(within(screen.getByRole("list", { name: "Finished" })).getByText("Old one")).toBeInTheDocument();
+  });
+
+  it("a finished task has an undo", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    await userEvent.click(await screen.findByRole("button", { name: "Finish: Pay rent" }));
+    expect(await screen.findByText("Finished: Pay rent")).toBeInTheDocument();
+    expect(fake.tasks[0].done).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.tasks[0].done).toBe(false));
+  });
+
+  it("Tomorrow moves a task to tomorrow, with an undo", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent", { due: today() })] });
+    await userEvent.click(await screen.findByRole("button", { name: "Tomorrow" }));
+    await waitFor(() => expect(fake.tasks[0].due).toBe(addDays(today(), 1)));
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.tasks[0].due).toBe(today()));
+  });
+});
+
+describe("the home box", () => {
+  it("adds a task with a day, a priority, and tags from one line, with an undo", async () => {
+    const fake = await startApp();
+    await userEvent.type(homeBox(), "pay rent tomorrow high #home");
+    expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
+    expect(screen.getByText("Pay rent", { selector: "b" })).toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    expect(await screen.findByText("Added: Pay rent")).toBeInTheDocument();
+    expect(fake.tasks.map((t) => [t.title, t.due, t.priority, t.tags])).toEqual([["Pay rent", addDays(today(), 1), "high", ["home"]]]);
+    expect(homeBox()).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.tasks).toEqual([]));
+  });
+
+  it("sends a question to AIfred and opens the conversation on the right", async () => {
+    const fake = await startApp({ tasks: [task("Call Sam")], onAsk: (p) => answer(`Answer to: ${p}`) });
+    await userEvent.type(homeBox(), "what is due today?");
+    expect(screen.getByRole("button", { name: "Ask AIfred" })).toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    const side = panel()!;
+    expect(await within(side).findByText("Answer to: what is due today?")).toBeInTheDocument();
+    expect(within(side).getByText("what is due today?")).toBeInTheDocument();
+    expect(screen.getByText("Call Sam")).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.cmd === "ask")!.args).toMatchObject({ prompt: "what is due today?", model: "default", files: [] });
+  });
+
+  it("the chip changes a question into a task", async () => {
+    const fake = await startApp();
+    await userEvent.type(homeBox(), "Can I renew the passport online");
+    await userEvent.click(screen.getByRole("button", { name: "Ask AIfred" }));
+    expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
+    await userEvent.type(homeBox(), "{Enter}");
+    await waitFor(() => expect(fake.tasks.map((t) => t.title)).toEqual(["Can I renew the passport online"]));
+    expect(fake.calls.some((c) => c.cmd === "ask")).toBe(false);
+  });
+
+  it("Shift+Enter makes a new line and does not send", async () => {
+    const fake = await startApp();
+    await userEvent.type(homeBox(), "line one{Shift>}{Enter}{/Shift}line two");
+    expect(homeBox()).toHaveValue("line one\nline two");
+    expect(fake.calls.some((c) => c.cmd === "ask" || c.cmd === "add_task")).toBe(false);
+  });
+
+  it("sends attached files with the question", async () => {
+    const fake = await startApp({ uploadName: "notes.txt" });
+    await userEvent.upload(screen.getAllByLabelText("Attach files")[0], new File(["hello"], "notes.txt", { type: "text/plain" }));
+    expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+    await userEvent.type(homeBox(), "what is in this file?{Enter}");
+    await within(panel()!).findByText(/You said/);
+    const id = fake.uploads[0].id;
+    expect(fake.calls.find((c) => c.cmd === "ask")!.args.files).toEqual([id]);
+    expect(within(panel()!).getByText("notes.txt")).toBeInTheDocument();
+  });
+
+  it("a file on a new task stays on the task", async () => {
+    const fake = await startApp({ uploadName: "receipt.pdf" });
+    await userEvent.upload(screen.getAllByLabelText("Attach files")[0], new File(["%PDF"], "receipt.pdf"));
+    await screen.findByText("receipt.pdf");
+    await userEvent.type(homeBox(), "file the receipt{Enter}");
+    await waitFor(() => expect(fake.tasks[0]?.files.map((f) => f.name)).toEqual(["receipt.pdf"]));
+    await openItem("File the receipt");
+    expect(within(details()).getByRole("button", { name: /Open receipt.pdf/ })).toBeInTheDocument();
+  });
+});
+
+describe("the conversation", () => {
+  it("shows progress while AIfred works, then the answer with its facts", async () => {
+    const hold = deferred<Answer>();
+    await startApp({
+      onAsk: (_p, progress) => {
+        progress({ kind: "tool_call", server: "tasks", tool: "overview", input: {} });
+        return hold.promise;
+      },
+    });
+    await userEvent.type(homeBox(), "what is open?{Enter}");
+    expect(await within(panel()!).findByText("✓ Reading all your open work")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Send" }).every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
+    hold.resolve(answer("Two things.", { memory: ["Sam sends the invoice"] }));
+    expect(await within(panel()!).findByText("Two things.")).toBeInTheDocument();
+    await userEvent.click(within(panel()!).getByText("Used 1 fact from memory"));
+    expect(within(panel()!).getByText("Sam sends the invoice")).toBeVisible();
+  });
+
+  it("shows an error in the panel when the question fails", async () => {
+    await startApp({ onAsk: () => Promise.reject("claude ended without an answer") });
+    await userEvent.type(homeBox(), "what is open?{Enter}");
+    expect(await within(panel()!).findByRole("alert")).toHaveTextContent("claude ended without an answer");
+  });
+
+  it("the model you pick is saved and used for the next message", async () => {
+    const fake = await startApp({ chatModel: "haiku" });
+    const picker = screen.getAllByRole("combobox", { name: "Model" })[0];
+    await waitFor(() => expect(picker).toHaveValue("haiku"));
+    await userEvent.selectOptions(picker, "sonnet");
+    await waitFor(() => expect(fake.chatModel).toBe("sonnet"));
+    await userEvent.type(homeBox(), "what is open?{Enter}");
+    await within(panel()!).findByText(/You said/);
+    expect(fake.calls.find((c) => c.cmd === "ask")!.args.model).toBe("sonnet");
+    expect(within(panel()!).getByText(/1\.5s · Sonnet/)).toBeInTheDocument();
+  });
+
+  it("goes back to the old model when the save fails", async () => {
+    await startApp({ fail: { set_chat_model: "database is locked" } });
+    const picker = screen.getAllByRole("combobox", { name: "Model" })[0];
+    await userEvent.selectOptions(picker, "opus");
+    expect(await screen.findByText("Cannot change the model: database is locked")).toBeInTheDocument();
+    expect(picker).toHaveValue("");
+  });
+
+  it("the rail opens an old conversation, and New starts a new one", async () => {
+    const fake = await startApp({
       history: [
         { ts: 1, role: "user", text: "Hi", backend: "claude" },
         { ts: 2, role: "assistant", text: "Hello!", backend: "claude" },
       ],
     });
-    await userEvent.click(screen.getByRole("button", { name: /Continue the conversation \(2 messages\)/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Conversation" }));
     expect(within(panel()!).getByText("Hello!")).toBeInTheDocument();
-  });
-});
-
-describe("the model picker", () => {
-  it("shows the model you picked last and uses it for the next message", async () => {
-    const fake = await startApp({ chatModel: "sonnet" });
-    const picker = await screen.findByRole("combobox", { name: "Model" });
-    await waitFor(() => expect(picker).toHaveValue("sonnet"));
-    await userEvent.selectOptions(picker, "haiku");
-    expect(fake.chatModel).toBe("haiku");
-    await userEvent.type(screen.getByPlaceholderText("Ask AIfred anything about your work…"), "hi{Enter}");
-    expect(await within(panel()!).findByText(/^1\.5s · Haiku/)).toBeInTheDocument();
-    // The chat panel has its own box with the same pick.
-    expect(within(panel()!).getByRole("combobox", { name: "Model" })).toHaveValue("haiku");
-    await userEvent.selectOptions(within(panel()!).getByRole("combobox", { name: "Model" }), "");
-    expect(fake.chatModel).toBeNull();
-  });
-
-  it("goes back to the old pick when the save fails", async () => {
-    await startApp({ fail: { set_chat_model: "the database is locked" } });
-    const picker = await screen.findByRole("combobox", { name: "Model" });
-    await userEvent.selectOptions(picker, "opus");
-    await waitFor(() => expect(picker).toHaveValue(""));
-  });
-});
-
-describe("sending a message", () => {
-  it("moves the chat into the right panel and keeps the to-do list", async () => {
-    const reply = deferred<Answer>();
-    await startApp({ tasks: [task("Call Sam")], onAsk: () => reply.promise });
-
-    await userEvent.type(screen.getByPlaceholderText("Ask AIfred anything about your work…"), "What is new?{Enter}");
-
-    const side = panel()!;
-    expect(side).toBeInTheDocument();
-    expect(within(side).getByText("What is new?")).toBeInTheDocument();
-    expect(within(side).getByText("Thinking…")).toBeInTheDocument();
-    expect(screen.queryByText("Good to see you.")).not.toBeInTheDocument(); // big chat box is gone
-    expect(screen.getByText("Call Sam")).toBeInTheDocument(); // to-do list stays
-
-    reply.resolve(answer("**Two** new reviews.", { cost_usd: 0.0054 }));
-    expect(await within(side).findByText("Two")).toBeInTheDocument(); // markdown is shown as bold
-    expect(within(side).getByText("1.5s · ~$0.005 usage")).toBeInTheDocument();
-    expect(within(side).queryByText("Thinking…")).not.toBeInTheDocument();
-  });
-
-  it("shows progress while AIfred works", async () => {
-    const reply = deferred<Answer>();
-    await startApp({
-      onAsk: (_p, progress) => {
-        progress({ kind: "tool_call", server: "github", tool: "review_requests", input: {} });
-        return reply.promise;
-      },
-    });
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Reviews?{Enter}");
-    expect(await within(panel()!).findByText("✓ Checking reviews you were asked to do")).toBeInTheDocument();
-    reply.resolve(answer("None."));
-    expect(await within(panel()!).findByText("None.")).toBeInTheDocument();
-  });
-
-  it("a suggestion button sends its question", async () => {
-    const fake = await startApp();
-    await userEvent.click(screen.getByRole("button", { name: "Brief me" }));
-    await within(panel()!).findByText(/You said: What needs my attention/);
-    expect(fake.calls.find((c) => c.cmd === "ask")?.args.prompt).toMatch(/^What needs my attention/);
-  });
-
-  it("Shift+Enter makes a new line and does not send", async () => {
-    const fake = await startApp();
-    const box = screen.getByPlaceholderText(/Ask AIfred anything/);
-    await userEvent.type(box, "line one{Shift>}{Enter}{/Shift}line two");
-    expect(box).toHaveValue("line one\nline two");
-    expect(fake.calls.some((c) => c.cmd === "ask")).toBe(false);
-  });
-
-  it("reloads the to-do list after the answer, so tasks AIfred added show", async () => {
-    const fake = await startApp({
-      onAsk: () => {
-        fake.tasks.push(task("Send the April invoice to Sam", { added_by: "aifred" }));
-        return answer("Added it.");
-      },
-    });
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Remind me to send the invoice{Enter}");
-    expect(await screen.findByText("Send the April invoice to Sam")).toBeInTheDocument();
-    expect(screen.getByText("added by AIfred")).toBeInTheDocument();
-  });
-
-  it("shows an error in the panel when the question fails", async () => {
-    await startApp({ onAsk: () => Promise.reject("claude is not logged in") });
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
-    expect(await within(panel()!).findByText("claude is not logged in")).toBeInTheDocument();
-  });
-
-  it("does not send while AIfred is still working", async () => {
-    const reply = deferred<Answer>();
-    const fake = await startApp({ onAsk: () => reply.promise });
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "First{Enter}");
-    const box = within(panel()!).getByPlaceholderText("Ask AIfred…");
-    await userEvent.type(box, "Second{Enter}");
-    expect(within(panel()!).getByRole("button", { name: "Send" })).toBeDisabled();
-    expect(fake.calls.filter((c) => c.cmd === "ask")).toHaveLength(1);
-    reply.resolve(answer("ok"));
-    await within(panel()!).findByText("ok");
-  });
-});
-
-describe("closing the chat panel", () => {
-  it("✕ goes back to the home page and keeps the conversation", async () => {
-    await startApp();
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
-    await within(panel()!).findByText("You said: Hi");
-
-    await userEvent.click(screen.getByTitle("Close the conversation panel"));
-    expect(panel()).not.toBeInTheDocument();
-    expect(screen.getByText("Good to see you.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Continue the conversation \(2 messages\)/ })).toBeInTheDocument();
-  });
-
-  it("New starts a new conversation and closes the panel", async () => {
-    const fake = await startApp();
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
-    await within(panel()!).findByText("You said: Hi");
-
     await userEvent.click(within(panel()!).getByRole("button", { name: "New" }));
     await waitFor(() => expect(panel()).not.toBeInTheDocument());
     expect(fake.calls.some((c) => c.cmd === "new_conversation")).toBe(true);
-    expect(screen.queryByText(/Continue the conversation/)).not.toBeInTheDocument();
   });
 
-  it("the logo goes back home", async () => {
-    await startApp();
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Hi{Enter}");
-    await within(panel()!).findByText("You said: Hi");
-    await userEvent.click(screen.getByTitle("Home"));
-    expect(panel()).not.toBeInTheDocument();
-  });
-});
-
-describe("memory list", () => {
-  const openMemory = () => userEvent.click(screen.getByRole("button", { name: /What AIfred knows about you/ }));
-
-  it("adds a fact that goes into every message", async () => {
-    const fake = await startApp({ memory: [fact("I work on StoreAgent.")] });
-    await openMemory();
-    expect(screen.getByText("I work on StoreAgent.")).toBeInTheDocument();
-    await userEvent.type(screen.getByPlaceholderText("Add a fact and press Enter"), "I like short answers.{Enter}");
-    expect(await screen.findByText("I like short answers.")).toBeInTheDocument();
-    expect(fake.memory.map((f) => [f.text, f.core])).toEqual([
-      ["I work on StoreAgent.", true],
-      ["I like short answers.", true],
-    ]);
-    expect(screen.getByPlaceholderText("Add a fact and press Enter")).toHaveValue("");
-  });
-
-  it("edits a fact and turns off 'Always'", async () => {
-    const fake = await startApp({ memory: [fact("Tea, no sugar")] });
-    await openMemory();
-    await userEvent.click(screen.getByText("Tea, no sugar"));
-    const box = screen.getByLabelText("Fact text");
-    await userEvent.clear(box);
-    await userEvent.type(box, "Green tea, no sugar{Enter}");
-    expect(await screen.findByText("Green tea, no sugar")).toBeInTheDocument();
-    await userEvent.click(screen.getByLabelText("Always use: Green tea, no sugar"));
-    await waitFor(() => expect(fake.memory[0].core).toBe(false));
-    expect(fake.memory[0].text).toBe("Green tea, no sugar");
-  });
-
-  it("starts the edit box with the saved text, so an unchanged fact is not saved again", async () => {
-    const fake = await startApp({ memory: [fact("Tea")] });
-    await openMemory();
-    await userEvent.click(screen.getByText("Tea"));
-    const box = screen.getByLabelText("Fact text");
-    await userEvent.clear(box);
-    // The backend joins the two lines into "likes tea".
-    await userEvent.type(box, "likes{Shift>}{Enter}{/Shift} tea{Enter}");
-    expect(await screen.findByText("likes tea")).toBeInTheDocument();
-    await userEvent.click(screen.getByText("likes tea"));
-    expect(screen.getByLabelText("Fact text")).toHaveValue("likes tea");
-    await userEvent.tab();
-    expect(fake.calls.filter((c) => c.cmd === "edit_fact")).toHaveLength(1);
-  });
-
-  it("forgets a fact and restores it", async () => {
-    const fake = await startApp({ memory: [fact("Old job at Acme", { added_by: "aifred" })] });
-    await openMemory();
-    expect(screen.getByText("by AIfred")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Forget: Old job at Acme" }));
-    await userEvent.click(await screen.findByRole("button", { name: /Forgotten \(1\)/ }));
-    expect(fake.memory[0].forgotten).not.toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Restore: Old job at Acme" }));
-    expect(await screen.findByRole("button", { name: "Forget: Old job at Acme" })).toBeInTheDocument();
-    expect(fake.memory[0].forgotten).toBeNull();
-  });
-
-  it("shows the facts that the app added to a question", async () => {
-    await startApp({ onAsk: () => answer("It comes on the 1st.", { memory: ["Sam sends the hosting invoice"] }) });
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "When is the invoice?{Enter}");
-    const side = panel()!;
-    await userEvent.click(await within(side).findByText("Used 1 fact from memory"));
-    expect(within(side).getByText("Sam sends the hosting invoice")).toBeVisible();
-  });
-
-  it("shows a fact that AIfred added in the chat", async () => {
+  it("reloads the list after the answer, so a task that AIfred added shows", async () => {
     const fake = await startApp({
       onAsk: () => {
-        fake.memory.push(fact("Sam sends the invoices", { core: false, added_by: "aifred" }));
-        return answer("Noted.");
+        fake.tasks.push(task("Reply to Sam", { added_by: "aifred" }));
+        return answer("Added.");
       },
     });
-    await openMemory();
-    await userEvent.type(screen.getByPlaceholderText(/Ask AIfred anything/), "Sam sends the invoices{Enter}");
-    expect(await screen.findByText("Sam sends the invoices", { selector: "button" })).toBeInTheDocument();
+    await userEvent.type(homeBox(), "remind me to reply to Sam?{Enter}");
+    expect(await screen.findByRole("button", { name: "Open details: Reply to Sam" })).toBeInTheDocument();
   });
 });
 
-describe("errors the window must show", () => {
-  it("a failed memory save says so and keeps the text", async () => {
-    await startApp({ fail: { add_fact: "database is locked" } });
-    await userEvent.click(screen.getByRole("button", { name: /What AIfred knows about you/ }));
-    await userEvent.type(screen.getByPlaceholderText("Add a fact and press Enter"), "Note{Enter}");
-    expect(await screen.findByText("Not saved: database is locked")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Add a fact and press Enter")).toHaveValue("Note");
+describe("the task panel", () => {
+  it("changes the title, the due day, the priority, the tags, and the description of your task", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    await openItem("Pay rent");
+    const d = details();
+    const title = within(d).getByRole("textbox", { name: "Task title" });
+    await userEvent.clear(title);
+    await userEvent.type(title, "Pay the rent{Enter}");
+    await waitFor(() => expect(fake.tasks[0].title).toBe("Pay the rent"));
+    fireEvent.change(within(d).getByLabelText("Due date"), { target: { value: "2026-12-01" } });
+    await waitFor(() => expect(fake.tasks[0].due).toBe("2026-12-01"));
+    await userEvent.selectOptions(within(d).getByLabelText("Priority"), "urgent");
+    await waitFor(() => expect(fake.tasks[0].priority).toBe("urgent"));
+    await userEvent.type(within(d).getByLabelText("Tags"), "home, #money{Enter}");
+    await waitFor(() => expect(fake.tasks[0].tags).toEqual(["home", "money"]));
+    await userEvent.type(within(d).getByLabelText("Task description"), "Before Friday.");
+    await userEvent.tab();
+    await waitFor(() => expect(fake.tasks[0].notes).toBe("Before Friday."));
   });
 
-  it("a task file that cannot load shows the reason, not an empty list", async () => {
-    await startApp({ fail: { tasks: "cannot read /x/tasks.json" } });
-    expect(await screen.findByText("Cannot load your tasks: cannot read /x/tasks.json")).toBeInTheDocument();
-    expect(screen.queryByText(/Nothing to do/)).not.toBeInTheDocument();
+  it("adds, ticks, and removes steps", async () => {
+    const fake = await startApp({ tasks: [task("Book flights")] });
+    await openItem("Book flights");
+    await userEvent.type(within(details()).getByLabelText("New step"), "Pick dates{Enter}");
+    await waitFor(() => expect(fake.tasks[0].checklist).toEqual([{ text: "Pick dates", done: false }]));
+    await userEvent.click(await within(details()).findByRole("button", { name: "Step done: Pick dates" }));
+    await waitFor(() => expect(fake.tasks[0].checklist[0].done).toBe(true));
+    await userEvent.click(within(details()).getByRole("button", { name: "Remove step: Pick dates" }));
+    await waitFor(() => expect(fake.tasks[0].checklist).toEqual([]));
   });
 
-  it("a failed start-up load shows the reason in the sidebar", async () => {
-    fakeBackend({ fail: { history: "bad history file" } });
-    render(<App />);
-    expect(await screen.findByText("Cannot load the conversation: bad history file")).toBeInTheDocument();
+  it("deletes a task and closes the panel", async () => {
+    const fake = await startApp({ tasks: [task("Old idea")] });
+    await openItem("Old idea");
+    await userEvent.click(within(details()).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(fake.tasks).toEqual([]));
+    expect(screen.queryByRole("dialog", { name: "Task details" })).not.toBeInTheDocument();
+  });
+
+  it("shows a GitHub item read-only, with its description, summary, and links", async () => {
+    const g = { ...githubItem(7, "assigned", "Fix cart"), links: [{ id: "acme/shop#8", repo: "acme/shop", number: 8, title: "Fix it", url: "https://github.com/acme/shop/pull/8", pull_request: true }] };
+    const fake = await startApp({ github: [g], details: { "github:acme/shop#7": "The cart **loses** items." }, summaries: { "github:acme/shop#7": "Items vanish on reload." } });
+    await openItem("Fix cart");
+    const d = details();
+    expect(await within(d).findByText("loses")).toBeInTheDocument();
+    expect(within(d).getByText("Items vanish on reload.")).toBeInTheDocument();
+    expect(within(d).getByRole("link", { name: "Open in GitHub ↗" })).toHaveAttribute("href", g.url);
+    expect(within(d).getByRole("link", { name: "PR #8" })).toBeInTheDocument();
+    expect(within(d).queryByRole("button", { name: /Mark as finished|Close in ClickUp/ })).not.toBeInTheDocument();
+    expect(fake.calls.map((c) => c.cmd).filter((c) => c.startsWith("github_") && c !== "github_items")).toEqual([]);
+  });
+
+  it("asks AIfred about the item in its own chat, with the fast model first", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")], onAskSide: (p) => answer(`About it: ${p}`) });
+    await openItem("Pay rent");
+    const key = `task:${fake.tasks[0].id}`;
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Ask AIfred about this item" }), "when is it due?{Enter}");
+    expect(await within(details()).findByText("About it: when is it due?")).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.cmd === "ask_side")!.args).toMatchObject({ thread: `item:${key}`, model: "haiku" });
+    expect(fake.history).toEqual([]);
+  });
+
+  it("a file with no text in the item chat asks AIfred to look at the file", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")], uploadName: "bill.pdf" });
+    await openItem("Pay rent");
+    await userEvent.upload(within(details()).getByLabelText("Attach files"), new File(["%PDF"], "bill.pdf"));
+    await within(details()).findByText("bill.pdf");
+    await userEvent.click(within(details()).getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(fake.calls.find((c) => c.cmd === "ask_side")?.args).toMatchObject({ prompt: "Look at these files.", files: [fake.uploads[0].id] }));
+  });
+
+  it("the item chat remembers Default as its model", async () => {
+    localStorage.setItem("aifred-model-item", "");
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    await openItem("Pay rent");
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Ask AIfred about this item" }), "hi{Enter}");
+    await waitFor(() => expect(fake.calls.find((c) => c.cmd === "ask_side")?.args).toMatchObject({ model: "default" }));
+    localStorage.removeItem("aifred-model-item");
+  });
+
+  it("the time guess changes in steps of 15 minutes", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    await openItem("Pay rent");
+    expect(within(details()).getByText("30 m")).toBeInTheDocument();
+    await userEvent.click(within(details()).getByRole("button", { name: "More time" }));
+    expect(within(details()).getByText("45 m")).toBeInTheDocument();
+    await waitFor(() => expect(fake.estimates[`task:${fake.tasks[0].id}`]).toEqual({ minutes: 45, by: "you" }));
   });
 });
 
-describe("GitHub list: saved copy and timer", () => {
-  it("asks GitHub once at start", async () => {
+describe("tabs on the right side", () => {
+  it("show the conversation and the task when both are open, and mark a new answer", async () => {
+    const hold = deferred<Answer>();
+    await startApp({ tasks: [task("Pay rent")], onAsk: () => hold.promise });
+    await userEvent.type(homeBox(), "what is open?{Enter}");
+    await openItem("Pay rent");
+    const tabs = screen.getByRole("tablist", { name: "Open on the right" });
+    expect(within(tabs).getByRole("tab", { name: /Pay rent/ })).toHaveAttribute("aria-selected", "true");
+    expect(panel()).not.toBeVisible();
+    hold.resolve(answer("Two things."));
+    // Both panels have the tabs. One of them is hidden.
+    expect((await screen.findAllByTitle("New answer")).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getAllByRole("tab", { name: /Conversation/ })[0]);
+    expect(panel()).toBeVisible();
+    expect(within(panel()!).getByText("Two things.")).toBeInTheDocument();
+    expect(screen.queryAllByTitle("New answer")).toEqual([]);
+  });
+
+  it("the width of the side changes with the arrow keys, is kept, and double-click resets it", async () => {
+    await startApp({ tasks: [task("Pay rent")] });
+    await openItem("Pay rent");
+    const edge = within(details()).getByRole("separator");
+    // jsdom has no layout: the panel is 0 px wide, so the width starts at the smallest, 300 px.
+    fireEvent.keyDown(edge, { key: "ArrowLeft" });
+    expect(localStorage.getItem("aifred-side-w")).toBe("300");
+    fireEvent.doubleClick(edge);
+    expect(localStorage.getItem("aifred-side-w")).toBeNull();
+  });
+});
+
+describe("day plan", () => {
+  it("I plan it myself: add items, change the time, and take them out", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent"), task("Call Sam")], github: [githubItem(7, "review_requested", "Fix cart")] });
+    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    await userEvent.click(screen.getByRole("button", { name: /I plan it myself/ }));
+    expect(await screen.findByText("Your plan is empty")).toBeInTheDocument();
+    const off = screen.getByRole("list", { name: "Not in today's plan" });
+    await userEvent.click(within(within(off).getByText("Fix cart").closest("li")!).getByRole("button", { name: /Add/ }));
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key: "github:acme/shop#7" }]));
+    expect(fake.plans[today()].mode).toBe("self");
+    expect(screen.getAllByText("9:00").length).toBeGreaterThan(0);
+    await userEvent.click(screen.getAllByRole("button", { name: "More time" })[0]);
+    expect(await screen.findByText("9:00–9:45")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Take out of the plan: Fix cart" }));
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([]));
+  });
+
+  it("Plan it for me asks AIfred in the plan chat, and shows the plan it saved", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent", { priority: "urgent" })] });
+    const key = `task:${fake.tasks[0].id}`;
+    fake.onAskSide = (p, _progress, args) => {
+      fake.plans[args.thread.slice(5)] = { day: args.thread.slice(5), mode: "ai", items: [{ key, why: "It is urgent." }], updated: 1 };
+      return answer(`I put [the rent](item:${key}) first.`);
+    };
+    await userEvent.click(screen.getByRole("button", { name: "Plan it for me" }));
+    const chat = screen.getByRole("complementary", { name: "Plan chat" });
+    expect(await within(chat).findByText(/first\./)).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.cmd === "ask_side")!.args).toMatchObject({ thread: `plan:${today()}`, prompt: "Plan my day." });
+    expect(await screen.findByText("✦ Made by AIfred")).toBeInTheDocument();
+    expect(screen.getByText("It is urgent.")).toBeInTheDocument();
+    // The link in the answer opens the item, with tabs to go back to the chat.
+    await userEvent.click(within(chat).getByRole("button", { name: "the rent" }));
+    expect(screen.getByRole("tab", { name: /Plan chat/ })).toHaveAttribute("aria-selected", "false");
+    await userEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(screen.getByText("Pay rent", { selector: ".strip b" })).toBeInTheDocument();
+    expect(screen.getByText("AIfred made this plan", { exact: false })).toBeInTheDocument();
+  });
+
+  it("Start over removes the plan and the plan chat", async () => {
+    const rent = task("Pay rent");
+    const fake = await startApp({
+      tasks: [rent],
+      plans: { [today()]: { day: today(), mode: "self", items: [{ key: `task:${rent.id}` }], updated: 1 } },
+      side: { [`plan:${today()}`]: [{ id: 1, ts: 1, role: "user", text: "Plan my day", files: [] }] },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    expect(await screen.findByText("Made by you")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Start over" }));
+    expect(await screen.findByText("How do you want to plan today?")).toBeInTheDocument();
+    expect(fake.plans[today()]).toBeUndefined();
+    expect(fake.side[`plan:${today()}`]).toBeUndefined();
+  });
+
+  it("a plan change keeps the plan items of a list that did not load", async () => {
+    const rent = task("Pay rent");
+    const bill = task("Pay bill");
+    const gh = "github:acme/shop#7";
+    const fake = await startApp({
+      tasks: [rent, bill],
+      fail: { github_items: "Cannot reach GitHub" },
+      plans: { [today()]: { day: today(), mode: "self", items: [{ key: gh, why: "A review." }, { key: `task:${rent.id}` }], updated: 1 } },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    expect(await screen.findByText("Made by you")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Take out of the plan: Pay rent" }));
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key: gh, why: "A review." }]));
+  });
+
+  it("a plan change waits until the plan of the day is loaded", async () => {
+    const load = deferred<void>();
+    const fake = await startApp({ tasks: [task("Pay rent")], onDayPlan: () => load.promise });
+    await userEvent.click(await screen.findByRole("button", { name: "+ Plan" }));
+    expect(await screen.findByText(/still loading/)).toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "set_day_plan")).toBe(false);
+    load.resolve();
+    await userEvent.click(screen.getByRole("button", { name: "+ Plan" }));
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key: `task:${fake.tasks[0].id}` }]));
+  });
+
+  it("+ Plan on the home list adds the item to today's plan", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    await userEvent.click(await screen.findByRole("button", { name: "+ Plan" }));
+    expect(await screen.findByText("Planned 9:00")).toBeInTheDocument();
+    expect(fake.plans[today()].items).toEqual([{ key: `task:${fake.tasks[0].id}` }]);
+  });
+});
+
+describe("GitHub list", () => {
+  it("asks GitHub once at start, and again with the reload button", async () => {
     const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")] });
     await screen.findByText("Fix cart");
     expect(fake.githubFetches).toBe(1);
-  });
-
-  it("the reload button asks GitHub again", async () => {
-    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")] });
-    await screen.findByText("Fix cart");
     await userEvent.click(screen.getByTitle("Reload the list"));
     await waitFor(() => expect(fake.githubFetches).toBe(2));
   });
 
-  it("reloads from GitHub on the timer from the settings", async () => {
+  it("reloads on the timer from the settings, and never when it is 'only when I click reload'", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      const fake = await startApp({ github: [githubItem(7, "assigned")], settings: { refresh_minutes: 5 } });
+      const fake = await startApp({ github: [githubItem(7, "assigned")], settings: { ...DEFAULT_SETTINGS, refresh_minutes: 5 } });
       await waitFor(() => expect(fake.githubFetches).toBe(1));
       await vi.advanceTimersByTimeAsync(5 * 60_000);
       await waitFor(() => expect(fake.githubFetches).toBe(2));
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("does not reload on a timer when the setting is 'only when I click reload'", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const fake = await startApp({ github: [githubItem(7, "assigned")], settings: { refresh_minutes: 0 } });
-      await waitFor(() => expect(fake.githubFetches).toBe(1));
-      await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
-      expect(fake.githubFetches).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("GitHub items are read-only", () => {
-  it("have no checkbox and never call a command that changes GitHub", async () => {
-    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")] });
-    const row = (await screen.findByText("Fix cart")).closest("li")!;
-    expect(within(row).queryByRole("checkbox")).not.toBeInTheDocument();
-    expect(fake.calls.map((c) => c.cmd).filter((c) => c.startsWith("github_") && c !== "github_items")).toEqual([]);
   });
 
   it("an item closed on GitHub leaves the list on the next reload", async () => {
@@ -327,55 +480,71 @@ describe("GitHub items are read-only", () => {
   });
 
   it("shows the saved list with a warning when GitHub cannot be reached", async () => {
-    await startApp({
-      github: [githubItem(7, "assigned", "Fix cart")],
-      githubWarning: "Cannot reach GitHub, so this is the saved list. gh failed: offline",
-    });
+    await startApp({ github: [githubItem(7, "assigned", "Fix cart")], githubWarning: "Cannot reach GitHub, so this is the saved list." });
     expect(await screen.findByText("Fix cart")).toBeInTheDocument();
-    expect(screen.getByText(/Cannot reach GitHub/)).toBeInTheDocument();
+    expect(screen.getByText("Cannot reach GitHub, so this is the saved list.")).toBeInTheDocument();
+  });
+});
+
+describe("ClickUp", () => {
+  const connected = { clickupToken: "pk_test" };
+
+  it("makes no ClickUp call when it is not connected", async () => {
+    const fake = await startApp({ clickup: [clickupItem("86a", "Write notes")] });
+    expect(screen.queryByText("Write notes")).not.toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "clickup_items")).toBe(false);
+  });
+
+  it("the tick closes the task in ClickUp, and Undo puts the old status back", async () => {
+    const fake = await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes", { status: "review" })] });
+    await userEvent.click(await screen.findByRole("button", { name: "Close in ClickUp: Write notes" }));
+    expect(await screen.findByText("Closed in ClickUp: Write notes")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open details: Write notes" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Undo: Write notes" }));
+    expect(await screen.findByRole("button", { name: "Open details: Write notes" })).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.cmd === "clickup_undo_done")!.args).toEqual({ id: "86a", status: "review" });
+  });
+
+  it("a second close keeps the undo of the first", async () => {
+    const fake = await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes", { status: "review" }), clickupItem("86b", "Call Bob")] });
+    await userEvent.click(await screen.findByRole("button", { name: "Close in ClickUp: Write notes" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Close in ClickUp: Call Bob" }));
+    expect(await screen.findByText("Closed in ClickUp: Call Bob")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Undo: Write notes" }));
+    await waitFor(() => expect(fake.calls.find((c) => c.cmd === "clickup_undo_done")!.args).toEqual({ id: "86a", status: "review" }));
+    expect(screen.getByRole("button", { name: "Undo: Call Bob" })).toBeInTheDocument();
+  });
+
+  it("a failed close keeps the task and says why", async () => {
+    await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes")], fail: { clickup_mark_done: "ClickUp said 403: no access" } });
+    await userEvent.click(await screen.findByRole("button", { name: "Close in ClickUp: Write notes" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("ClickUp said 403: no access");
+    expect(screen.getByRole("button", { name: "Open details: Write notes" })).toBeInTheDocument();
+  });
+
+  it("connects with a token on the Settings page, then loads the tasks", async () => {
+    const fake = await startApp({ clickup: [clickupItem("86a", "Write notes")] });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await userEvent.type(screen.getByLabelText("ClickUp"), "pk_123");
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("Connected as okky.")).toBeInTheDocument();
+    expect(fake.clickupToken).toBe("pk_123");
+    await userEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(await screen.findByText("Write notes")).toBeInTheDocument();
   });
 });
 
 describe("settings page", () => {
-  it("saves the GitHub reload time", async () => {
+  it("saves the reload time and the work day", async () => {
     const fake = await startApp();
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    const select = screen.getByLabelText("Reload GitHub and ClickUp items");
-    expect(select).toHaveValue("15");
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    await userEvent.selectOptions(select, "Only when I click reload");
+    await userEvent.selectOptions(screen.getByLabelText("Reload GitHub and ClickUp items"), "Only when I click reload");
+    fireEvent.change(screen.getByLabelText("Work day starts"), { target: { value: "08:30" } });
+    await userEvent.selectOptions(screen.getByLabelText("Lunch length"), "No lunch break");
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Saved")).toBeInTheDocument();
-    expect(fake.settings.refresh_minutes).toBe(0);
-    await userEvent.click(screen.getByRole("button", { name: "← Back" }));
-    expect(screen.getByText("Good to see you.")).toBeInTheDocument();
-  });
-
-  it("checks for a new version and restarts into it", async () => {
-    const fake = await startApp({ updateTo: "0.2.0" });
-    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.getByText("This is AIfred 0.1.1.")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
-    expect(await screen.findByText(/Version 0.2.0 is downloaded/)).toBeInTheDocument();
-    // The sidebar shows it too.
-    expect(screen.getByText("AIfred 0.2.0 is ready.")).toBeInTheDocument();
-    await userEvent.click(screen.getAllByRole("button", { name: "Restart now" })[0]);
-    await waitFor(() => expect(fake.restarts).toBe(1));
-  });
-
-  it("says when there is no new version", async () => {
-    await startApp();
-    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
-    expect(await screen.findByText("You have the newest version.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Restart now" })).not.toBeInTheDocument();
-  });
-
-  it("shows why updates are off", async () => {
-    await startApp({ update: { current: "0.1.1", state: "off", latest: null, page: null, message: "Updates are off in development builds.", checked_at: null } });
-    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(await screen.findByText("Updates are off in development builds.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
+    expect(fake.settings).toMatchObject({ refresh_minutes: 0, work_start: "08:30", lunch_minutes: 0 });
   });
 
   it("shows a failed save", async () => {
@@ -385,108 +554,50 @@ describe("settings page", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Not saved: read-only folder")).toBeInTheDocument();
   });
+
+  it("checks for a new version and restarts into it", async () => {
+    const fake = await startApp({ updateTo: "0.2.0" });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText(/Version 0.2.0 is downloaded/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Restart now" }));
+    await waitFor(() => expect(fake.restarts).toBe(1));
+  });
 });
 
-describe("ClickUp", () => {
-  const connected = { clickupToken: "pk_test" };
+describe("memory page", () => {
+  const openMemory = () => userEvent.click(screen.getByRole("button", { name: "What AIfred knows about you" }));
 
-  it("shows nothing from ClickUp and makes no ClickUp call when it is not connected", async () => {
-    const fake = await startApp({ clickup: [clickupItem("86a", "Write notes")] });
-    await userEvent.click(screen.getByRole("button", { name: "ClickUp" }));
-    expect(screen.getByText(/ClickUp is not connected/)).toBeInTheDocument();
-    expect(screen.queryByText("Write notes")).not.toBeInTheDocument();
-    expect(fake.calls.some((c) => c.cmd === "clickup_items")).toBe(false);
+  it("adds a fact, and forgets and restores one", async () => {
+    const fake = await startApp({ memory: [fact("Old job at Acme", { added_by: "aifred" })] });
+    await openMemory();
+    await userEvent.type(screen.getByPlaceholderText("Add a fact and press Enter"), "I like short answers.{Enter}");
+    expect(await screen.findByText("I like short answers.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Forget: Old job at Acme" }));
+    await userEvent.click(await screen.findByRole("button", { name: /Forgotten \(1\)/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Restore: Old job at Acme" }));
+    await waitFor(() => expect(fake.memory[0].forgotten).toBeNull());
   });
 
-  it("shows your ClickUp tasks next to the others, with status and list", async () => {
-    await startApp({ ...connected, tasks: [task("Call Sam")], clickup: [clickupItem("86a", "Write notes", { custom_id: "DEV-42" })] });
-    const row = (await screen.findByText("Write notes")).closest("li")!;
-    expect(within(row).getByText("in progress")).toBeInTheDocument();
-    expect(within(row).getByText(/DEV-42 · Sprint 12/)).toBeInTheDocument();
-    expect(screen.getByText("Call Sam")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "ClickUp" }));
-    expect(screen.queryByText("Call Sam")).not.toBeInTheDocument();
-    expect(screen.getByText("Write notes")).toBeInTheDocument();
+  it("a failed save says so and keeps the text", async () => {
+    await startApp({ fail: { add_fact: "database is locked" } });
+    await openMemory();
+    await userEvent.type(screen.getByPlaceholderText("Add a fact and press Enter"), "Note{Enter}");
+    expect(await screen.findByText("Not saved: database is locked")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Add a fact and press Enter")).toHaveValue("Note");
+  });
+});
+
+describe("errors the window must show", () => {
+  it("a task file that cannot load shows the reason, not an empty list", async () => {
+    await startApp({ fail: { tasks: "cannot read the database" } });
+    expect(await screen.findByText("Cannot load your tasks: cannot read the database")).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing to do/)).not.toBeInTheDocument();
   });
 
-  it("the tick closes the task in ClickUp, and Undo puts the old status back", async () => {
-    const fake = await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes", { status: "review" })] });
-    await userEvent.click(await screen.findByRole("checkbox", { name: "Close in ClickUp: Write notes" }));
-    expect(await screen.findByText("Closed in ClickUp: Write notes")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Write notes" })).not.toBeInTheDocument();
-    expect(fake.clickup).toEqual([]);
-
-    await userEvent.click(screen.getByRole("button", { name: "Undo: Write notes" }));
-    expect(await screen.findByRole("link", { name: "Write notes" })).toBeInTheDocument();
-    expect(fake.calls.find((c) => c.cmd === "clickup_undo_done")!.args).toEqual({ id: "86a", status: "review" });
-    expect(screen.queryByText(/Closed in ClickUp/)).not.toBeInTheDocument();
-  });
-
-  it("a second tick keeps the undo of the first task", async () => {
-    const fake = await startApp({
-      ...connected,
-      clickup: [clickupItem("86a", "Write notes", { status: "review" }), clickupItem("86b", "Fix login", { status: "to do" })],
-    });
-    await userEvent.click(await screen.findByRole("checkbox", { name: "Close in ClickUp: Write notes" }));
-    await screen.findByText("Closed in ClickUp: Write notes");
-    await userEvent.click(screen.getByRole("checkbox", { name: "Close in ClickUp: Fix login" }));
-    await screen.findByText("Closed in ClickUp: Fix login");
-    expect(screen.getByText("Closed in ClickUp: Write notes")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "Undo: Write notes" }));
-    expect(await screen.findByRole("link", { name: "Write notes" })).toBeInTheDocument();
-    expect(fake.calls.find((c) => c.cmd === "clickup_undo_done")!.args).toEqual({ id: "86a", status: "review" });
-    expect(screen.queryByText("Closed in ClickUp: Write notes")).not.toBeInTheDocument();
-    expect(screen.getByText("Closed in ClickUp: Fix login")).toBeInTheDocument();
-  });
-
-  it("a failed close keeps the task and says why", async () => {
-    await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes")], fail: { clickup_mark_done: "ClickUp said 403: no access" } });
-    await userEvent.click(await screen.findByRole("checkbox", { name: "Close in ClickUp: Write notes" }));
-    expect(await screen.findByText("ClickUp: ClickUp said 403: no access")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Write notes" })).toBeInTheDocument();
-  });
-
-  it("the reload button and the timer ask ClickUp again", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const fake = await startApp({ ...connected, clickup: [clickupItem("86a")], settings: { refresh_minutes: 5 } });
-      await waitFor(() => expect(fake.clickupFetches).toBe(1));
-      await userEvent.click(screen.getByTitle("Reload the list"));
-      await waitFor(() => expect(fake.clickupFetches).toBe(2));
-      await vi.advanceTimersByTimeAsync(5 * 60_000);
-      await waitFor(() => expect(fake.clickupFetches).toBe(3));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("shows the saved list with a warning, or the error, when ClickUp cannot be reached", async () => {
-    await startApp({ ...connected, clickup: [clickupItem("86a", "Write notes")], clickupWarning: "Cannot reach ClickUp, so this is the saved list." });
-    expect(await screen.findByText("Write notes")).toBeInTheDocument();
-    expect(screen.getByText(/Cannot reach ClickUp/)).toBeInTheDocument();
-  });
-
-  it("connects with a token on the Settings page, then loads the tasks", async () => {
-    const fake = await startApp({ clickup: [clickupItem("86a", "Write notes")] });
-    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    await userEvent.type(screen.getByLabelText("ClickUp"), "bad");
-    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
-    expect(await screen.findByText(/ClickUp refused the token/)).toBeInTheDocument();
-
-    await userEvent.clear(screen.getByLabelText("ClickUp"));
-    await userEvent.type(screen.getByLabelText("ClickUp"), "pk_123");
-    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
-    expect(await screen.findByText("Connected as okky.")).toBeInTheDocument();
-    expect(fake.clickupToken).toBe("pk_123");
-
-    await userEvent.click(screen.getByRole("button", { name: "← Back" }));
-    expect(await screen.findByText("Write notes")).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
-    await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
-    expect(await screen.findByText(/Disconnected/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "← Back" }));
-    await waitFor(() => expect(screen.queryByText("Write notes")).not.toBeInTheDocument());
+  it("a failed start-up load shows the reason", async () => {
+    fakeBackend({ fail: { history: "bad history file" } });
+    render(<App />);
+    expect(await screen.findByText("Cannot load the conversation: bad history file")).toBeInTheDocument();
   });
 });

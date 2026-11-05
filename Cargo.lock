@@ -37,6 +37,7 @@ version = "0.1.0"
 dependencies = [
  "aifred-embed",
  "anyhow",
+ "chrono",
  "reqwest 0.13.5",
  "rusqlite",
  "semver",

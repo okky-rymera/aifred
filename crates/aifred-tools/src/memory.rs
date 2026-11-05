@@ -6,15 +6,12 @@
 //! ($AIFRED_HOME/aifred.db, or ~/.aifred/aifred.db).
 
 use aifred_core::default_data_dir;
-use aifred_core::text::cut;
 use aifred_core::history::{History, HistoryHit, Turn};
 use aifred_core::memory::{Fact, MemoryStore};
+use aifred_core::text::cut;
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router,
-    transport::stdio,
+    ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, model::*, tool,
+    tool_handler, tool_router, transport::stdio,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -58,7 +55,9 @@ fn fail(e: anyhow::Error) -> ErrorData {
 }
 
 fn ok_json(v: &Value) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(v.to_string())]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(
+        v.to_string(),
+    )]))
 }
 
 fn fact(f: &Fact) -> Value {
@@ -70,7 +69,8 @@ fn message(t: &Turn) -> Value {
 }
 
 fn hit(h: &HistoryHit) -> Value {
-    let mut v = json!({ "conversation": h.conversation, "current": h.current, "message": message(&h.hit) });
+    let mut v =
+        json!({ "conversation": h.conversation, "current": h.current, "message": message(&h.hit) });
     if let Some(b) = &h.before {
         v["before"] = message(b);
     }
@@ -82,30 +82,58 @@ fn hit(h: &HistoryHit) -> Value {
 
 #[tool_router]
 impl MemoryTools {
-    #[tool(description = "Search the facts that you know about the user, best match first. A fact matches when it has any of the words, also other forms of a word. Each fact has an id for forget_memory.")]
-    async fn search_memory(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
-        let facts = MemoryStore::new(&self.dir).search(&a.query, a.limit).map_err(fail)?;
+    #[tool(
+        description = "Search the facts that you know about the user, best match first. A fact matches when it has any of the words, also other forms of a word. Each fact has an id for forget_memory."
+    )]
+    async fn search_memory(
+        &self,
+        Parameters(a): Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let facts = MemoryStore::new(&self.dir)
+            .search(&a.query, a.limit)
+            .map_err(fail)?;
         ok_json(&json!(facts.iter().map(fact).collect::<Vec<_>>()))
     }
 
-    #[tool(description = "Save one lasting fact about the user or their work. Use it only when the user tells you such a fact. Search first, so you do not save the same fact two times.")]
-    async fn add_memory(&self, Parameters(a): Parameters<AddArgs>) -> Result<CallToolResult, ErrorData> {
-        let f = MemoryStore::new(&self.dir).add(&a.text, "aifred", a.always.unwrap_or(false)).map_err(fail)?;
+    #[tool(
+        description = "Save one lasting fact about the user or their work. Use it only when the user tells you such a fact. Search first, so you do not save the same fact two times."
+    )]
+    async fn add_memory(
+        &self,
+        Parameters(a): Parameters<AddArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let f = MemoryStore::new(&self.dir)
+            .add(&a.text, "aifred", a.always.unwrap_or(false))
+            .map_err(fail)?;
         ok_json(&fact(&f))
     }
 
-    #[tool(description = "Forget one fact, for example when the user says it is wrong or old. The user can restore it in the AIfred app.")]
-    async fn forget_memory(&self, Parameters(a): Parameters<IdArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Forget one fact, for example when the user says it is wrong or old. The user can restore it in the AIfred app."
+    )]
+    async fn forget_memory(
+        &self,
+        Parameters(a): Parameters<IdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let f = MemoryStore::new(&self.dir).forget(a.id).map_err(fail)?;
         ok_json(&json!({ "forgotten": f.id, "text": f.text }))
     }
 
-    #[tool(description = "Search all conversations with the user, also old ones, best match first. \"summaries\" are short summaries of whole conversations. \"messages\" are single messages, each with the message before and after it. Times are Unix seconds. \"current\" is true for the conversation that is open now.")]
-    async fn search_history(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Search all conversations with the user, also old ones, best match first. \"summaries\" are short summaries of whole conversations. \"messages\" are single messages, each with the message before and after it. Times are Unix seconds. \"current\" is true for the conversation that is open now."
+    )]
+    async fn search_history(
+        &self,
+        Parameters(a): Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let h = History::new(&self.dir);
-        let summaries = h.search_summaries(&a.query, Some(SUMMARY_RESULTS)).map_err(fail)?;
+        let summaries = h
+            .search_summaries(&a.query, Some(SUMMARY_RESULTS))
+            .map_err(fail)?;
         let hits = h.search(&a.query, a.limit).map_err(fail)?;
-        ok_json(&json!({ "summaries": summaries, "messages": hits.iter().map(hit).collect::<Vec<_>>() }))
+        ok_json(
+            &json!({ "summaries": summaries, "messages": hits.iter().map(hit).collect::<Vec<_>>() }),
+        )
     }
 }
 
@@ -130,7 +158,8 @@ mod tests {
     use super::*;
 
     fn tools(name: &str) -> MemoryTools {
-        let dir = std::env::temp_dir().join(format!("aifred-memory-mcp-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aifred-memory-mcp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         MemoryTools { dir }
@@ -143,16 +172,22 @@ mod tests {
     }
 
     fn search(q: &str) -> Parameters<SearchArgs> {
-        Parameters(SearchArgs { query: q.into(), limit: None })
+        Parameters(SearchArgs {
+            query: q.into(),
+            limit: None,
+        })
     }
 
     #[tokio::test]
     async fn add_search_and_forget_a_fact() {
         let t = tools("facts");
         let added = body(
-            t.add_memory(Parameters(AddArgs { text: "Sam sends the hosting invoice".into(), always: None }))
-                .await
-                .unwrap(),
+            t.add_memory(Parameters(AddArgs {
+                text: "Sam sends the hosting invoice".into(),
+                always: None,
+            }))
+            .await
+            .unwrap(),
         );
         assert_eq!(added["added_by"], "aifred");
         assert_eq!(added["always"], false, "not in every message unless asked");
@@ -160,8 +195,17 @@ mod tests {
         assert_eq!(found[0]["text"], "Sam sends the hosting invoice");
         let id = found[0]["id"].as_i64().unwrap();
         t.forget_memory(Parameters(IdArgs { id })).await.unwrap();
-        assert!(body(t.search_memory(search("invoice")).await.unwrap()).as_array().unwrap().is_empty());
-        assert!(t.forget_memory(Parameters(IdArgs { id: 999 })).await.is_err());
+        assert!(
+            body(t.search_memory(search("invoice")).await.unwrap())
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            t.forget_memory(Parameters(IdArgs { id: 999 }))
+                .await
+                .is_err()
+        );
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 
@@ -169,16 +213,39 @@ mod tests {
     async fn search_history_cuts_long_messages() {
         let t = tools("history");
         let h = History::new(&t.dir);
-        h.append("user", "Tell me about the dentist", "claude").unwrap();
-        h.append("assistant", &format!("dentist {}", "x".repeat(MAX_MESSAGE_CHARS)), "claude").unwrap();
+        h.append("user", "Tell me about the dentist", "claude")
+            .unwrap();
+        h.append(
+            "assistant",
+            &format!("dentist {}", "x".repeat(MAX_MESSAGE_CHARS)),
+            "claude",
+        )
+        .unwrap();
         let id = h.current().unwrap().unwrap();
-        h.set_summary(id, "- The user asked about the dentist.", 2).unwrap();
+        h.set_summary(id, "- The user asked about the dentist.", 2)
+            .unwrap();
         let out = body(t.search_history(search("dentist")).await.unwrap());
-        assert_eq!(out["summaries"][0]["summary"], "- The user asked about the dentist.");
-        assert!(out["summaries"][0]["ended"].is_null(), "the current conversation");
+        assert_eq!(
+            out["summaries"][0]["summary"],
+            "- The user asked about the dentist."
+        );
+        assert!(
+            out["summaries"][0]["ended"].is_null(),
+            "the current conversation"
+        );
         let hits = &out["messages"];
-        let long = hits.as_array().unwrap().iter().find(|h| h["message"]["role"] == "assistant").unwrap();
-        assert!(long["message"]["text"].as_str().unwrap().ends_with("[... shortened]"));
+        let long = hits
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["message"]["role"] == "assistant")
+            .unwrap();
+        assert!(
+            long["message"]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("[... shortened]")
+        );
         assert_eq!(long["before"]["text"], "Tell me about the dentist");
         std::fs::remove_dir_all(&t.dir).unwrap();
     }

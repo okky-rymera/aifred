@@ -13,14 +13,11 @@
 use aifred_core::clickup::{self, Client};
 use aifred_core::clickup_list::{ClickupList, ClickupStore};
 use aifred_core::files::now;
-use aifred_core::{default_data_dir, settings};
 use aifred_core::text::cut;
+use aifred_core::{default_data_dir, settings};
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router,
-    transport::stdio,
+    ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, model::*, tool,
+    tool_handler, tool_router, transport::stdio,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -61,7 +58,9 @@ fn fail(e: anyhow::Error) -> ErrorData {
 }
 
 fn ok_json(v: &Value) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(v.to_string())]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(
+        v.to_string(),
+    )]))
 }
 
 impl ClickupTools {
@@ -84,7 +83,9 @@ impl ClickupTools {
         let account = clickup::account_key(&token);
         let store = ClickupStore::new(&self.dir);
         // A broken saved file is not an error here: ask ClickUp.
-        if let Ok(Some(list)) = store.cached(&account, settings::tool_max_age_secs(&self.dir), now()) {
+        if let Ok(Some(list)) =
+            store.cached(&account, settings::tool_max_age_secs(&self.dir), now())
+        {
             return Ok(list);
         }
         let fetched = Client::new(&token).my_tasks().await.map_err(fail)?;
@@ -95,7 +96,11 @@ impl ClickupTools {
                 eprintln!("aifred-clickup-mcp: cannot save the ClickUp list: {e:#}");
                 let mut items = fetched.items;
                 items.sort_by_key(|i| std::cmp::Reverse(i.updated));
-                Ok(ClickupList { items, fetched_at: now(), warning: clickup::cut_warning(&fetched.cut) })
+                Ok(ClickupList {
+                    items,
+                    fetched_at: now(),
+                    warning: clickup::cut_warning(&fetched.cut),
+                })
             }
         }
     }
@@ -103,8 +108,13 @@ impl ClickupTools {
 
 #[tool_router]
 impl ClickupTools {
-    #[tool(description = "List the user's open ClickUp tasks (assigned to them, in all workspaces), newest change first. fetched_at is when the list came from ClickUp (Unix seconds). A note says when the list is not complete.")]
-    async fn my_tasks(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "List the user's open ClickUp tasks (assigned to them, in all workspaces), newest change first. fetched_at is when the list came from ClickUp (Unix seconds). A note says when the list is not complete."
+    )]
+    async fn my_tasks(
+        &self,
+        Parameters(a): Parameters<ListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let list = self.list().await?;
         let mut items = list.items;
         items.truncate(a.limit.unwrap_or(50).clamp(1, 200) as usize);
@@ -115,13 +125,21 @@ impl ClickupTools {
         ok_json(&out)
     }
 
-    #[tool(description = "Search the user's ClickUp tasks by words in the name, the workspace and list, and the description, best match first. It searches the list that AIfred saved, and downloads a new list first when it is too old. Each result says if it is still in the user's open list (in_list) and when AIfred last saw it (last_seen, Unix seconds).")]
-    async fn search_my_tasks(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Search the user's ClickUp tasks by words in the name, the workspace and list, and the description, best match first. It searches the list that AIfred saved, and downloads a new list first when it is too old. Each result says if it is still in the user's open list (in_list) and when AIfred last saw it (last_seen, Unix seconds)."
+    )]
+    async fn search_my_tasks(
+        &self,
+        Parameters(a): Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let account = clickup::account_key(&self.token()?);
         // list() downloads a new list when the saved one is too old.
         let note = match self.list().await {
             Ok(list) => list.warning,
-            Err(e) => Some(format!("Cannot reach ClickUp, so the results come from the saved list. {}", e.message)),
+            Err(e) => Some(format!(
+                "Cannot reach ClickUp, so the results come from the saved list. {}",
+                e.message
+            )),
         };
         let hits = ClickupStore::new(&self.dir)
             .search(&account, &a.query, a.include_old.unwrap_or(false), a.limit)
@@ -134,16 +152,27 @@ impl ClickupTools {
         ok_json(&out)
     }
 
-    #[tool(description = "Get one ClickUp task: name, status, description (shortened), assignees, dates, and the last comments.")]
-    async fn task_details(&self, Parameters(a): Parameters<DetailArgs>) -> Result<CallToolResult, ErrorData> {
-        clickup::check_task_id(&a.id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-        let (task, comments) = self.client()?.task_with_comments(&a.id).await.map_err(fail)?;
+    #[tool(
+        description = "Get one ClickUp task: name, status, description (shortened), assignees, dates, and the last comments."
+    )]
+    async fn task_details(
+        &self,
+        Parameters(a): Parameters<DetailArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        clickup::check_task_id(&a.id)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let (task, comments) = self
+            .client()?
+            .task_with_comments(&a.id)
+            .await
+            .map_err(fail)?;
         let short = shorten(&task, &comments);
         // Save the full description, so search_my_tasks can find words in it.
         // It is the same text as the list download saves (description_text),
         // so the summary of the task does not have to be made again.
         // The id from ClickUp, because `a.id` can be the team's custom id.
-        let text = clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
+        let text =
+            clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
         if let Some(id) = task["id"].as_str()
             && let Err(e) = ClickupStore::new(&self.dir).save_details(id, &text)
         {
@@ -164,9 +193,12 @@ impl ServerHandler for ClickupTools {
 /// description, and the last comments as plain text.
 fn shorten(task: &Value, comments: &Value) -> Value {
     let names = |v: &Value| -> Vec<Value> {
-        v.as_array().map(|a| a.iter().map(|u| u["username"].clone()).collect()).unwrap_or_default()
+        v.as_array()
+            .map(|a| a.iter().map(|u| u["username"].clone()).collect())
+            .unwrap_or_default()
     };
-    let text = clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
+    let text =
+        clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
     let mut last: Vec<Value> = comments["comments"]
         .as_array()
         .map(|a| {
@@ -196,7 +228,11 @@ fn shorten(task: &Value, comments: &Value) -> Value {
 
 /// Serves these tools over stdio until Claude Code closes the connection.
 pub async fn serve() -> anyhow::Result<()> {
-    let server = ClickupTools { dir: default_data_dir()? }.serve(stdio()).await?;
+    let server = ClickupTools {
+        dir: default_data_dir()?,
+    }
+    .serve(stdio())
+    .await?;
     server.waiting().await?;
     Ok(())
 }
@@ -217,9 +253,17 @@ mod tests {
         let s = shorten(&task, &comments);
         assert_eq!(s["status"], "in progress");
         assert_eq!(s["assignees"], json!(["okky"]));
-        assert!(s["description"].as_str().unwrap().ends_with("[... shortened]"));
+        assert!(
+            s["description"]
+                .as_str()
+                .unwrap()
+                .ends_with("[... shortened]")
+        );
         assert_eq!(s["last_comments"].as_array().unwrap().len(), MAX_COMMENTS);
-        assert_eq!(s["last_comments"][0]["text"], "c0", "the newest comment stays");
+        assert_eq!(
+            s["last_comments"][0]["text"], "c0",
+            "the newest comment stays"
+        );
         assert!(s.get("custom_fields").is_none());
     }
 
@@ -230,17 +274,26 @@ mod tests {
         let t = ClickupTools { dir: dir.clone() };
         // Only when the developer has no token in the environment.
         if std::env::var_os("AIFRED_CLICKUP_TOKEN").is_none() {
-            let e = t.my_tasks(Parameters(ListArgs { limit: None })).await.unwrap_err();
+            let e = t
+                .my_tasks(Parameters(ListArgs { limit: None }))
+                .await
+                .unwrap_err();
             assert!(e.message.contains("Settings page"), "{e:?}");
         }
-        let e = t.task_details(Parameters(DetailArgs { id: "../user".into() })).await.unwrap_err();
+        let e = t
+            .task_details(Parameters(DetailArgs {
+                id: "../user".into(),
+            }))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("bad ClickUp task id"), "{e:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
     async fn my_tasks_uses_the_saved_list_while_it_is_new() {
-        let dir = std::env::temp_dir().join(format!("aifred-clickup-mcp-saved-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aifred-clickup-mcp-saved-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         clickup::save_token(&dir, "pk_test").unwrap();
@@ -251,20 +304,41 @@ mod tests {
             "list": "Sprint", "workspace": "Rymera", "updated": 1
         }))
         .unwrap();
-        let fetched = clickup::MyTasks { items: vec![item], cut: vec!["Big".into()] };
-        ClickupStore::new(&dir).save(&account, fetched, now() - 60).unwrap();
+        let fetched = clickup::MyTasks {
+            items: vec![item],
+            cut: vec!["Big".into()],
+        };
+        ClickupStore::new(&dir)
+            .save(&account, fetched, now() - 60)
+            .unwrap();
         // No ClickUp call: the fake token would fail if ClickUp were asked.
         let t = ClickupTools { dir: dir.clone() };
-        let r = t.my_tasks(Parameters(ListArgs { limit: None })).await.unwrap();
-        let text = serde_json::to_value(&r.content[0]).unwrap()["text"].as_str().unwrap().to_string();
+        let r = t
+            .my_tasks(Parameters(ListArgs { limit: None }))
+            .await
+            .unwrap();
+        let text = serde_json::to_value(&r.content[0]).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["tasks"][0]["title"], "Write notes");
-        assert!(v["note"].as_str().unwrap().contains("Big"), "the chat hears that the list is cut: {v}");
+        assert!(
+            v["note"].as_str().unwrap().contains("Big"),
+            "the chat hears that the list is cut: {v}"
+        );
 
         // The search uses the same saved list, also without a ClickUp call.
-        let args = Parameters(SearchArgs { query: "notes sprint".into(), include_old: None, limit: None });
+        let args = Parameters(SearchArgs {
+            query: "notes sprint".into(),
+            include_old: None,
+            limit: None,
+        });
         let r = t.search_my_tasks(args).await.unwrap();
-        let text = serde_json::to_value(&r.content[0]).unwrap()["text"].as_str().unwrap().to_string();
+        let text = serde_json::to_value(&r.content[0]).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["tasks"][0]["title"], "Write notes");
         assert_eq!(v["tasks"][0]["in_list"], true);

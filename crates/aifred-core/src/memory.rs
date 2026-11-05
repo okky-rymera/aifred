@@ -80,7 +80,12 @@ fn clean(text: &str) -> anyhow::Result<String> {
 /// start and the end go away. Empty lines inside the block would split it
 /// into two facts in the memory text, so they go away too.
 fn clean_block(text: &str) -> anyhow::Result<String> {
-    let text = text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n");
+    let text = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     anyhow::ensure!(!text.is_empty(), "the fact is empty");
     Ok(text)
 }
@@ -124,7 +129,11 @@ impl MemoryStore {
             let mut lines = Vec::new();
             for row in rows {
                 let (style, text) = row?;
-                let prefix = if style == Style::Item.as_str() { "- " } else { "" };
+                let prefix = if style == Style::Item.as_str() {
+                    "- "
+                } else {
+                    ""
+                };
                 lines.push(format!("{prefix}{text}"));
             }
             Ok(lines.join("\n"))
@@ -134,14 +143,22 @@ impl MemoryStore {
     /// The number of facts in use that are not core. The AI must search for them.
     pub fn other_count(&self) -> anyhow::Result<u64> {
         db::read(&self.dir, |c| {
-            Ok(c.query_row("SELECT count(*) FROM memory WHERE forgotten IS NULL AND core = 0", [], |r| r.get(0))?)
+            Ok(c.query_row(
+                "SELECT count(*) FROM memory WHERE forgotten IS NULL AND core = 0",
+                [],
+                |r| r.get(0),
+            )?)
         })
     }
 
     /// The length of all facts in use, in characters.
     pub fn size_chars(&self) -> anyhow::Result<u64> {
         db::read(&self.dir, |c| {
-            Ok(c.query_row("SELECT COALESCE(SUM(length(text)), 0) FROM memory WHERE forgotten IS NULL", [], |r| r.get(0))?)
+            Ok(c.query_row(
+                "SELECT COALESCE(SUM(length(text)), 0) FROM memory WHERE forgotten IS NULL",
+                [],
+                |r| r.get(0),
+            )?)
         })
     }
 
@@ -164,10 +181,17 @@ impl MemoryStore {
     pub fn edit(&self, id: i64, text: &str) -> anyhow::Result<Fact> {
         db::write(&self.dir, |tx| {
             use rusqlite::OptionalExtension;
-            let style: Option<String> =
-                tx.query_row("SELECT style FROM memory WHERE id = ?1", [id], |r| r.get(0)).optional()?;
-            let Some(style) = style else { bail!("no fact with id {id}") };
-            let text = if style == Style::Text.as_str() { clean_block(text)? } else { clean(text)? };
+            let style: Option<String> = tx
+                .query_row("SELECT style FROM memory WHERE id = ?1", [id], |r| r.get(0))
+                .optional()?;
+            let Some(style) = style else {
+                bail!("no fact with id {id}")
+            };
+            let text = if style == Style::Text.as_str() {
+                clean_block(text)?
+            } else {
+                clean(text)?
+            };
             tx.execute(
                 "UPDATE memory SET text = ?2, updated = ?3 WHERE id = ?1",
                 rusqlite::params![id, text, now() as i64],
@@ -177,12 +201,20 @@ impl MemoryStore {
     }
 
     pub fn set_core(&self, id: i64, core: bool) -> anyhow::Result<Fact> {
-        self.change(id, "core = ?2", rusqlite::types::Value::Integer(core.into()))
+        self.change(
+            id,
+            "core = ?2",
+            rusqlite::types::Value::Integer(core.into()),
+        )
     }
 
     /// Takes a fact out of use. It stays in the database, and restore() brings it back.
     pub fn forget(&self, id: i64) -> anyhow::Result<Fact> {
-        self.change(id, "forgotten = COALESCE(forgotten, ?2)", rusqlite::types::Value::Integer(now() as i64))
+        self.change(
+            id,
+            "forgotten = COALESCE(forgotten, ?2)",
+            rusqlite::types::Value::Integer(now() as i64),
+        )
     }
 
     pub fn restore(&self, id: i64) -> anyhow::Result<Fact> {
@@ -211,7 +243,12 @@ impl MemoryStore {
         self.search_where(query, limit, true)
     }
 
-    fn search_where(&self, query: &str, limit: Option<u32>, other_only: bool) -> anyhow::Result<Vec<Fact>> {
+    fn search_where(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+        other_only: bool,
+    ) -> anyhow::Result<Vec<Fact>> {
         db::read(&self.dir, |c| {
             let ids = db::hybrid(
                 c,
@@ -261,18 +298,31 @@ fn parse(text: &str) -> Vec<(Style, String)> {
 }
 
 /// Makes the facts the same as `text`. The import of memory.md also uses it.
-pub(crate) fn set_text(tx: &Transaction, text: &str, added_by: &str, now: u64) -> anyhow::Result<()> {
+pub(crate) fn set_text(
+    tx: &Transaction,
+    text: &str,
+    added_by: &str,
+    now: u64,
+) -> anyhow::Result<()> {
     let mut old: Vec<(i64, String, String)> = {
-        let mut q = tx.prepare("SELECT id, style, text FROM memory WHERE forgotten IS NULL ORDER BY pos, id")?;
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?
+        let mut q = tx.prepare(
+            "SELECT id, style, text FROM memory WHERE forgotten IS NULL ORDER BY pos, id",
+        )?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?
     };
     let now = now as i64;
     for (pos, (style, fact)) in parse(text).into_iter().enumerate() {
-        let same = old.iter().position(|(_, s, t)| s == style.as_str() && *t == fact);
+        let same = old
+            .iter()
+            .position(|(_, s, t)| s == style.as_str() && *t == fact);
         match same {
             Some(i) => {
                 let (id, ..) = old.remove(i);
-                tx.execute("UPDATE memory SET pos = ?1 WHERE id = ?2", rusqlite::params![pos as i64, id])?;
+                tx.execute(
+                    "UPDATE memory SET pos = ?1 WHERE id = ?2",
+                    rusqlite::params![pos as i64, id],
+                )?;
             }
             None => {
                 tx.execute(
@@ -283,7 +333,10 @@ pub(crate) fn set_text(tx: &Transaction, text: &str, added_by: &str, now: u64) -
         }
     }
     for (id, ..) in old {
-        tx.execute("UPDATE memory SET forgotten = ?1 WHERE id = ?2", rusqlite::params![now, id])?;
+        tx.execute(
+            "UPDATE memory SET forgotten = ?1 WHERE id = ?2",
+            rusqlite::params![now, id],
+        )?;
     }
     Ok(())
 }
@@ -302,9 +355,20 @@ mod tests {
         let d = temp("memory-round");
         let m = MemoryStore::new(&d);
         assert_eq!(m.core_text().unwrap(), "");
-        m.set_text("# Work\nI work at Rymera.\n\n- I like short answers.\n-  Tea, no sugar. \n").unwrap();
-        assert_eq!(m.core_text().unwrap(), "# Work\nI work at Rymera.\n- I like short answers.\n- Tea, no sugar.");
-        assert_eq!(texts(&m.list().unwrap()), vec!["# Work\nI work at Rymera.", "I like short answers.", "Tea, no sugar."]);
+        m.set_text("# Work\nI work at Rymera.\n\n- I like short answers.\n-  Tea, no sugar. \n")
+            .unwrap();
+        assert_eq!(
+            m.core_text().unwrap(),
+            "# Work\nI work at Rymera.\n- I like short answers.\n- Tea, no sugar."
+        );
+        assert_eq!(
+            texts(&m.list().unwrap()),
+            vec![
+                "# Work\nI work at Rymera.",
+                "I like short answers.",
+                "Tea, no sugar."
+            ]
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -317,7 +381,11 @@ mod tests {
         m.set_text("- c\n- b\n").unwrap();
         assert_eq!(m.core_text().unwrap(), "- c\n- b", "the new order");
         let after = m.list().unwrap();
-        assert_eq!(texts(&after), vec!["c", "b", "a"], "a is forgotten, not deleted");
+        assert_eq!(
+            texts(&after),
+            vec!["c", "b", "a"],
+            "a is forgotten, not deleted"
+        );
         assert_eq!(after[1].id, before[1].id, "b keeps its id");
         assert!(after[2].forgotten.is_some());
         std::fs::remove_dir_all(&d).unwrap();
@@ -328,15 +396,27 @@ mod tests {
         let d = temp("memory-core");
         let m = MemoryStore::new(&d);
         m.add("  likes\n tea ", "you", true).unwrap();
-        let other = m.add("The office wifi is slow on Mondays", "aifred", false).unwrap();
+        let other = m
+            .add("The office wifi is slow on Mondays", "aifred", false)
+            .unwrap();
         assert_eq!(m.core_text().unwrap(), "- likes tea");
         assert_eq!(m.other_count().unwrap(), 1);
         assert_eq!(other.added_by, "aifred");
-        assert_eq!(m.all_text().unwrap(), "- likes tea\n- The office wifi is slow on Mondays");
+        assert_eq!(
+            m.all_text().unwrap(),
+            "- likes tea\n- The office wifi is slow on Mondays"
+        );
         assert_eq!(m.size_chars().unwrap(), 9 + 34);
-        assert_eq!(m.search_other("tea wifi", None).unwrap().len(), 1, "only the fact that is not core");
+        assert_eq!(
+            m.search_other("tea wifi", None).unwrap().len(),
+            1,
+            "only the fact that is not core"
+        );
         m.set_core(other.id, true).unwrap();
-        assert_eq!(m.core_text().unwrap(), "- likes tea\n- The office wifi is slow on Mondays");
+        assert_eq!(
+            m.core_text().unwrap(),
+            "- likes tea\n- The office wifi is slow on Mondays"
+        );
         assert!(m.add("  ", "you", true).is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -345,14 +425,24 @@ mod tests {
     fn an_edit_keeps_the_lines_of_a_text_fact() {
         let d = temp("memory-edit-block");
         let m = MemoryStore::new(&d);
-        m.set_text("# Work\nI work at Rymera.\n\n- likes tea").unwrap();
+        m.set_text("# Work\nI work at Rymera.\n\n- likes tea")
+            .unwrap();
         let facts = m.search("work", None).unwrap();
         let block = facts.iter().find(|f| f.text.starts_with("# Work")).unwrap();
-        let edited = m.edit(block.id, "# Work  \nI work at Rymera Web Co.\n").unwrap();
+        let edited = m
+            .edit(block.id, "# Work  \nI work at Rymera Web Co.\n")
+            .unwrap();
         assert_eq!(edited.text, "# Work\nI work at Rymera Web Co.");
         let item = m.search("tea", None).unwrap().remove(0);
-        assert_eq!(m.edit(item.id, "likes\ngreen tea").unwrap().text, "likes green tea", "a list item stays one line");
-        assert_eq!(m.all_text().unwrap(), "# Work\nI work at Rymera Web Co.\n- likes green tea");
+        assert_eq!(
+            m.edit(item.id, "likes\ngreen tea").unwrap().text,
+            "likes green tea",
+            "a list item stays one line"
+        );
+        assert_eq!(
+            m.all_text().unwrap(),
+            "# Work\nI work at Rymera Web Co.\n- likes green tea"
+        );
         assert!(m.edit(block.id, " \n ").is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -361,19 +451,42 @@ mod tests {
     fn search_finds_word_forms_and_skips_forgotten_facts() {
         let d = temp("memory-search");
         let m = MemoryStore::new(&d);
-        let tea = m.add("I drink green tea in the morning", "you", false).unwrap();
-        let invoice = m.add("Sam sends the invoices on Fridays", "you", false).unwrap();
+        let tea = m
+            .add("I drink green tea in the morning", "you", false)
+            .unwrap();
+        let invoice = m
+            .add("Sam sends the invoices on Fridays", "you", false)
+            .unwrap();
         m.add("My cat is called Miso", "you", false).unwrap();
-        assert_eq!(texts(&m.search("When does the invoice come?", None).unwrap()), vec![invoice.text.as_str()]);
-        assert_eq!(texts(&m.search("Who is Sa", None).unwrap()), vec![invoice.text.as_str()], "start of a word");
-        assert!(m.search("the", None).unwrap().is_empty(), "common words only");
+        assert_eq!(
+            texts(&m.search("When does the invoice come?", None).unwrap()),
+            vec![invoice.text.as_str()]
+        );
+        assert_eq!(
+            texts(&m.search("Who is Sa", None).unwrap()),
+            vec![invoice.text.as_str()],
+            "start of a word"
+        );
+        assert!(
+            m.search("the", None).unwrap().is_empty(),
+            "common words only"
+        );
         m.forget(tea.id).unwrap();
-        assert!(m.search("tea", None).unwrap().is_empty(), "a forgotten fact is not found");
+        assert!(
+            m.search("tea", None).unwrap().is_empty(),
+            "a forgotten fact is not found"
+        );
         m.restore(tea.id).unwrap();
         assert_eq!(m.search("tea", None).unwrap().len(), 1);
         let edited = m.edit(tea.id, "I drink coffee").unwrap();
-        assert!(m.search("tea", None).unwrap().is_empty(), "the search uses the new text");
-        assert_eq!(texts(&m.search("coffee", None).unwrap()), vec![edited.text.as_str()]);
+        assert!(
+            m.search("tea", None).unwrap().is_empty(),
+            "the search uses the new text"
+        );
+        assert_eq!(
+            texts(&m.search("coffee", None).unwrap()),
+            vec![edited.text.as_str()]
+        );
         assert!(m.forget(999).is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }

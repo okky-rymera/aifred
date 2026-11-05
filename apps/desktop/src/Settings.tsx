@@ -175,10 +175,13 @@ export function RestartButton(props: { busy?: boolean; onError: (e: string) => v
   );
 }
 
+const INPUT = "rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm dark:border-stone-700 dark:bg-stone-900";
+
 export function SettingsPage(props: {
   settings: api.Settings;
   onSaved: (s: api.Settings) => void;
-  onBack: () => void;
+  /** Facts about this app: data folder, GitHub owners, meaning search. */
+  info?: api.Info | null;
   clickupToken?: api.ClickupTokenStatus | null;
   onClickupTokenChanged?: () => void;
   update?: api.UpdateStatus | null;
@@ -187,7 +190,11 @@ export function SettingsPage(props: {
 }) {
   const [draft, setDraft] = useState(props.settings);
   const [status, setStatus] = useState("");
-  const changed = draft.refresh_minutes !== props.settings.refresh_minutes;
+  const changed = JSON.stringify(draft) !== JSON.stringify(props.settings);
+  const set = (change: Partial<api.Settings>) => {
+    setDraft({ ...draft, ...change });
+    setStatus("");
+  };
 
   async function save() {
     try {
@@ -201,12 +208,7 @@ export function SettingsPage(props: {
 
   return (
     <div>
-      <div className="mb-6 flex items-center gap-3">
-        <button onClick={props.onBack} className="text-sm text-stone-500 hover:underline">
-          ← Back
-        </button>
-        <h1 className="text-2xl font-semibold">Settings</h1>
-      </div>
+      <h1 className="title mb-6 text-2xl font-semibold">Settings</h1>
 
       <section className="space-y-2">
         <label htmlFor="github-refresh" className="block text-sm font-semibold">
@@ -218,11 +220,8 @@ export function SettingsPage(props: {
         <select
           id="github-refresh"
           value={draft.refresh_minutes}
-          onChange={(e) => {
-            setDraft({ ...draft, refresh_minutes: Number(e.target.value) });
-            setStatus("");
-          }}
-          className="rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm dark:border-stone-700 dark:bg-stone-900"
+          onChange={(e) => set({ refresh_minutes: Number(e.target.value) })}
+          className={INPUT}
         >
           {REFRESH_CHOICES.map((c) => (
             <option key={c.minutes} value={c.minutes}>
@@ -230,6 +229,46 @@ export function SettingsPage(props: {
             </option>
           ))}
         </select>
+      </section>
+
+      <section className="mt-6 space-y-2">
+        <h2 className="text-sm font-semibold">Your work day</h2>
+        <p className="text-sm text-stone-500">The day plan puts your tasks between these times, around lunch.</p>
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <label className="flex items-center gap-2">
+            Starts
+            <input type="time" aria-label="Work day starts" value={draft.work_start} onChange={(e) => set({ work_start: e.target.value })} className={INPUT} />
+          </label>
+          <label className="flex items-center gap-2">
+            Ends
+            <input type="time" aria-label="Work day ends" value={draft.work_end} onChange={(e) => set({ work_end: e.target.value })} className={INPUT} />
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <label className="flex items-center gap-2">
+            Lunch at
+            <input type="time" aria-label="Lunch starts" value={draft.lunch_start} onChange={(e) => set({ lunch_start: e.target.value })} className={INPUT} />
+          </label>
+          <label className="flex items-center gap-2">
+            for
+            <select aria-label="Lunch length" value={draft.lunch_minutes} onChange={(e) => set({ lunch_minutes: Number(e.target.value) })} className={INPUT}>
+              {[0, 15, 30, 45, 60, 90].map((m) => (
+                <option key={m} value={m}>
+                  {m === 0 ? "No lunch break" : `${m} minutes`}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section className="mt-6 space-y-2">
+        <h2 className="text-sm font-semibold">Brief</h2>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={draft.auto_brief} onChange={(e) => set({ auto_brief: e.target.checked })} className="size-4 accent-amber-500" />
+          Write the brief by itself once a day, when AIfred opens
+        </label>
+        <p className="text-sm text-stone-500">The brief is one AI call on your Claude login. You can always write it again from the home screen.</p>
       </section>
 
       <div className="mt-6 flex items-center gap-3">
@@ -248,6 +287,16 @@ export function SettingsPage(props: {
       <ClickupSection status={props.clickupToken ?? null} onChanged={() => props.onClickupTokenChanged?.()} />
 
       <UpdateSection status={props.update ?? null} onChanged={(s) => props.onUpdateChanged?.(s)} busy={props.busy} />
+
+      {props.info && (
+        <section className="mt-8 space-y-1 text-sm text-stone-500">
+          <h2 className="text-sm font-semibold text-stone-900 dark:text-stone-100">About this app</h2>
+          <div>AI: {props.info.backend}</div>
+          <div>GitHub: {props.info.github_owners ? `only ${props.info.github_owners}` : "all owners"}</div>
+          <div title="Finds facts, chats, and tasks by meaning, not only by words.">Meaning search: {props.info.meaning_search}</div>
+          <div className="break-all">Data: {props.info.data_dir}</div>
+        </section>
+      )}
     </div>
   );
 }

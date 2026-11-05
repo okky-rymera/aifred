@@ -37,7 +37,10 @@ pub struct TokenStatus {
 
 /// The token from AIFRED_CLICKUP_TOKEN, or else from the file.
 pub fn token(dir: &Path) -> Option<String> {
-    if let Some(t) = std::env::var("AIFRED_CLICKUP_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
+    if let Some(t) = std::env::var("AIFRED_CLICKUP_TOKEN")
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+    {
         return Some(t.trim().to_string());
     }
     let t = std::fs::read_to_string(token_path(dir)).ok()?;
@@ -57,13 +60,18 @@ pub fn account_key(token: &str) -> String {
 
 pub fn token_status(dir: &Path) -> TokenStatus {
     let from_env = std::env::var("AIFRED_CLICKUP_TOKEN").is_ok_and(|t| !t.trim().is_empty());
-    TokenStatus { set: token(dir).is_some(), from_env }
+    TokenStatus {
+        set: token(dir).is_some(),
+        from_env,
+    }
 }
 
 /// A personal token is one line of letters, digits, and "_".
 fn check_token(t: &str) -> anyhow::Result<()> {
     if t.is_empty() || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        bail!("this does not look like a ClickUp token. Copy it from ClickUp: Settings > Apps > API Token");
+        bail!(
+            "this does not look like a ClickUp token. Copy it from ClickUp: Settings > Apps > API Token"
+        );
     }
     Ok(())
 }
@@ -92,7 +100,9 @@ pub fn save_token(dir: &Path, token: &str) -> anyhow::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&tmp).with_context(|| format!("cannot write {}", tmp.display()))?;
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("cannot write {}", tmp.display()))?;
         f.write_all(token.as_bytes())?;
         f.sync_all()?;
     }
@@ -205,7 +215,8 @@ fn is_open(kind: &str) -> bool {
 
 /// Turns one page of tasks into items. Also returns true if this was the last page.
 fn parse_tasks(json: &[u8], workspace: &str) -> anyhow::Result<(Vec<ClickupItem>, bool)> {
-    let raw: RawTasks = serde_json::from_slice(json).context("ClickUp sent a task list we cannot read")?;
+    let raw: RawTasks =
+        serde_json::from_slice(json).context("ClickUp sent a task list we cannot read")?;
     let last = raw.last_page.unwrap_or(raw.tasks.len() < PAGE_SIZE);
     let items = raw
         .tasks
@@ -223,7 +234,10 @@ fn parse_tasks(json: &[u8], workspace: &str) -> anyhow::Result<(Vec<ClickupItem>
             priority: t.priority.map(|p| p.priority),
             due: millis(t.due_date.as_deref()),
             updated: millis(t.date_updated.as_deref()).unwrap_or_default(),
-            description: Some(description_text(t.text_content.as_deref(), t.description.as_deref())),
+            description: Some(description_text(
+                t.text_content.as_deref(),
+                t.description.as_deref(),
+            )),
         })
         .collect();
     Ok((items, last))
@@ -233,7 +247,12 @@ fn parse_tasks(json: &[u8], workspace: &str) -> anyhow::Result<(Vec<ClickupItem>
 /// description field. The list download and the task_details tool both use
 /// it, so the saved text (and its summary) does not change between them.
 pub fn description_text(text_content: Option<&str>, description: Option<&str>) -> String {
-    text_content.filter(|t| !t.trim().is_empty()).or(description).unwrap_or_default().trim().to_string()
+    text_content
+        .filter(|t| !t.trim().is_empty())
+        .or(description)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[derive(Deserialize)]
@@ -245,7 +264,8 @@ struct RawStatuses {
 /// list. ClickUp's own "mark complete" button does the same. A list without
 /// one falls back to a "done" status.
 fn done_status(list_json: &[u8]) -> anyhow::Result<String> {
-    let raw: RawStatuses = serde_json::from_slice(list_json).context("ClickUp sent a list we cannot read")?;
+    let raw: RawStatuses =
+        serde_json::from_slice(list_json).context("ClickUp sent a list we cannot read")?;
     for kind in ["closed", "done"] {
         if let Some(s) = raw.statuses.iter().find(|s| s.kind == kind) {
             return Ok(s.status.clone());
@@ -257,7 +277,12 @@ fn done_status(list_json: &[u8]) -> anyhow::Result<String> {
 /// A ClickUp task id is letters, digits, "-", and "_". The check keeps an
 /// id from changing the address of the call.
 pub fn check_task_id(id: &str) -> anyhow::Result<()> {
-    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         bail!("bad ClickUp task id: {id:?}");
     }
     Ok(())
@@ -339,18 +364,32 @@ impl Client {
             .user_agent("aifred")
             .build()
             .expect("the HTTP client settings are valid");
-        Self { http, token: token.into(), base: base.trim_end_matches('/').into() }
+        Self {
+            http,
+            token: token.into(),
+            base: base.trim_end_matches('/').into(),
+        }
     }
 
     /// Sends one call. Returns the reply body, or an error with ClickUp's message.
     async fn send(&self, req: reqwest::RequestBuilder) -> anyhow::Result<Vec<u8>> {
-        let res = req.header("Authorization", &self.token).send().await.context("cannot reach ClickUp")?;
+        let res = req
+            .header("Authorization", &self.token)
+            .send()
+            .await
+            .context("cannot reach ClickUp")?;
         let status = res.status();
-        let body = res.bytes().await.context("cannot read the ClickUp reply")?.to_vec();
+        let body = res
+            .bytes()
+            .await
+            .context("cannot read the ClickUp reply")?
+            .to_vec();
         if status.is_success() {
             return Ok(body);
         }
-        let msg = serde_json::from_slice::<RawError>(&body).map(|e| e.err).unwrap_or_default();
+        let msg = serde_json::from_slice::<RawError>(&body)
+            .map(|e| e.err)
+            .unwrap_or_default();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             bail!("ClickUp refused the token. Add a new token on the Settings page. ({msg})");
         }
@@ -361,12 +400,14 @@ impl Client {
     }
 
     async fn get(&self, path: &str, query: &[(&str, String)]) -> anyhow::Result<Vec<u8>> {
-        self.send(self.http.get(format!("{}{path}", self.base)).query(query)).await
+        self.send(self.http.get(format!("{}{path}", self.base)).query(query))
+            .await
     }
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
         let body = self.get(path, &[]).await?;
-        serde_json::from_slice(&body).with_context(|| format!("ClickUp sent a reply we cannot read ({path})"))
+        serde_json::from_slice(&body)
+            .with_context(|| format!("ClickUp sent a reply we cannot read ({path})"))
     }
 
     /// The user's ClickUp id and name. Also a quick check of the token.
@@ -412,7 +453,10 @@ impl Client {
     /// The id can be ClickUp's own id ("86abc123") or the team's custom id
     /// ("DEV-42"). ClickUp finds a custom id only with custom_task_ids=true and
     /// the workspace id, so a custom id is tried in each workspace.
-    pub async fn task_with_comments(&self, id: &str) -> anyhow::Result<(serde_json::Value, serde_json::Value)> {
+    pub async fn task_with_comments(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<(serde_json::Value, serde_json::Value)> {
         check_task_id(id)?;
         if !is_custom_id(id) {
             return self.task_and_comments(id, &[]).await;
@@ -421,7 +465,10 @@ impl Client {
         let mut last_err = None;
         for team in teams.teams {
             check_task_id(&team.id)?;
-            let query = [("custom_task_ids", "true".to_string()), ("team_id", team.id)];
+            let query = [
+                ("custom_task_ids", "true".to_string()),
+                ("team_id", team.id),
+            ];
             match self.task_and_comments(id, &query).await {
                 Ok(found) => return Ok(found),
                 Err(e) => last_err = Some(e),
@@ -449,7 +496,10 @@ impl Client {
         check_task_id(id)?;
         let head: RawTaskHead = self.get_json(&format!("/task/{id}")).await?;
         if !is_open(&head.status.kind) {
-            bail!("this task is already finished in ClickUp (status \"{}\")", head.status.status);
+            bail!(
+                "this task is already finished in ClickUp (status \"{}\")",
+                head.status.status
+            );
         }
         check_task_id(&head.list.id)?;
         let list = self.get(&format!("/list/{}", head.list.id), &[]).await?;
@@ -465,7 +515,12 @@ impl Client {
             bail!("the status is empty");
         }
         let body = serde_json::json!({ "status": status });
-        self.send(self.http.put(format!("{}/task/{id}", self.base)).json(&body)).await?;
+        self.send(
+            self.http
+                .put(format!("{}/task/{id}", self.base))
+                .json(&body),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -498,7 +553,11 @@ pub(crate) mod tests {
     fn parse_tasks_reads_a_page_and_skips_done_and_closed_tasks() {
         let (items, last) = parse_tasks(PAGE.as_bytes(), "Rymera").unwrap();
         assert!(!last, "ClickUp said there are more pages");
-        assert_eq!(items.len(), 1, "the closed task and the done task are left out");
+        assert_eq!(
+            items.len(),
+            1,
+            "the closed task and the done task are left out"
+        );
         let i = &items[0];
         assert_eq!(i.id, "86abc");
         assert_eq!(i.custom_id.as_deref(), Some("DEV-42"));
@@ -552,7 +611,10 @@ pub(crate) mod tests {
             std::fs::write(&tmp, "old").unwrap();
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
             save_token(&d, "pk_1_ABC").unwrap();
-            let mode = std::fs::metadata(d.join("clickup-token")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(d.join("clickup-token"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "only the user can read the token");
             assert!(!tmp.exists());
         }
@@ -574,7 +636,10 @@ pub(crate) mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(d.join("clickup-token")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(d.join("clickup-token"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "only the user can read the token");
         }
         remove_token(&d).unwrap();
@@ -596,7 +661,9 @@ pub(crate) mod tests {
         let reply = std::sync::Arc::new(reply);
         tokio::spawn(async move {
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
                 // Read the head, then the body by its length.
@@ -611,7 +678,11 @@ pub(crate) mod tests {
                         let head = text[..end].to_string();
                         let len = head
                             .lines()
-                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
                             .unwrap_or(0);
                         if buf.len() >= end + 4 + len {
                             break (head, text[end + 4..end + 4 + len].to_string());
@@ -622,8 +693,14 @@ pub(crate) mod tests {
                 let mut parts = first.split(' ');
                 let method = parts.next().unwrap_or_default().to_string();
                 let path = parts.next().unwrap_or_default().to_string();
-                assert!(head.contains("authorization: pk_test") || head.contains("Authorization: pk_test"), "{head}");
-                seen.lock().unwrap().push(format!("{method} {path} {body}").trim().to_string());
+                assert!(
+                    head.contains("authorization: pk_test")
+                        || head.contains("Authorization: pk_test"),
+                    "{head}"
+                );
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{method} {path} {body}").trim().to_string());
                 let (code, json) = reply(&method, &path);
                 let res = format!(
                     "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{json}",
@@ -654,30 +731,52 @@ pub(crate) mod tests {
             }
         })
         .await;
-        let got = Client::with_base("pk_test", &base).my_tasks().await.unwrap();
+        let got = Client::with_base("pk_test", &base)
+            .my_tasks()
+            .await
+            .unwrap();
         assert!(got.cut.is_empty(), "every list is complete");
         let items = got.items;
         assert_eq!(items.len(), 4);
         assert_eq!(items.iter().filter(|i| i.workspace == "A").count(), 3);
         let calls = log.lock().unwrap().clone();
-        let first = calls.iter().find(|c| c.contains("/team/111/task?page=0")).unwrap();
-        assert!(first.contains("assignees%5B%5D=7"), "only tasks assigned to the user: {first}");
+        let first = calls
+            .iter()
+            .find(|c| c.contains("/team/111/task?page=0"))
+            .unwrap();
+        assert!(
+            first.contains("assignees%5B%5D=7"),
+            "only tasks assigned to the user: {first}"
+        );
         assert!(first.contains("include_closed=false"), "{first}");
-        assert!(calls.iter().all(|c| c.starts_with("GET ")), "reading changes nothing: {calls:?}");
+        assert!(
+            calls.iter().all(|c| c.starts_with("GET ")),
+            "reading changes nothing: {calls:?}"
+        );
     }
 
     #[tokio::test]
     async fn my_tasks_says_which_workspace_has_more_tasks_than_it_reads() {
         let (base, _) = fake_clickup(|_, path| match path {
             "/api/v2/user" => (200, r#"{"user":{"id":7}}"#.into()),
-            "/api/v2/team" => (200, r#"{"teams":[{"id":"111","name":"Big"},{"id":"222","name":"Small"}]}"#.into()),
+            "/api/v2/team" => (
+                200,
+                r#"{"teams":[{"id":"111","name":"Big"},{"id":"222","name":"Small"}]}"#.into(),
+            ),
             // Workspace 111 always says there are more pages.
-            p if p.starts_with("/api/v2/team/111/task") => (200, r#"{"tasks":[],"last_page":false}"#.into()),
-            p if p.starts_with("/api/v2/team/222/task") => (200, r#"{"tasks":[],"last_page":true}"#.into()),
+            p if p.starts_with("/api/v2/team/111/task") => {
+                (200, r#"{"tasks":[],"last_page":false}"#.into())
+            }
+            p if p.starts_with("/api/v2/team/222/task") => {
+                (200, r#"{"tasks":[],"last_page":true}"#.into())
+            }
             _ => (404, r#"{"err":"no"}"#.into()),
         })
         .await;
-        let got = Client::with_base("pk_test", &base).my_tasks().await.unwrap();
+        let got = Client::with_base("pk_test", &base)
+            .my_tasks()
+            .await
+            .unwrap();
         assert_eq!(got.cut, vec!["Big"]);
         let w = cut_warning(&got.cut).unwrap();
         assert!(w.contains("more than 1000") && w.contains("Big"), "{w}");
@@ -687,9 +786,16 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_custom_id_is_found_in_the_workspace_that_has_it() {
         let (base, log) = fake_clickup(|_, path| match path {
-            "/api/v2/team" => (200, r#"{"teams":[{"id":"111","name":"A"},{"id":"222","name":"B"}]}"#.into()),
-            p if p.starts_with("/api/v2/task/DEV-42?") && p.contains("team_id=222") => (200, r#"{"id":"86abc","name":"T"}"#.into()),
-            p if p.starts_with("/api/v2/task/DEV-42/comment?") && p.contains("team_id=222") => (200, r#"{"comments":[]}"#.into()),
+            "/api/v2/team" => (
+                200,
+                r#"{"teams":[{"id":"111","name":"A"},{"id":"222","name":"B"}]}"#.into(),
+            ),
+            p if p.starts_with("/api/v2/task/DEV-42?") && p.contains("team_id=222") => {
+                (200, r#"{"id":"86abc","name":"T"}"#.into())
+            }
+            p if p.starts_with("/api/v2/task/DEV-42/comment?") && p.contains("team_id=222") => {
+                (200, r#"{"comments":[]}"#.into())
+            }
             "/api/v2/task/86abc" => (200, r#"{"id":"86abc","name":"T"}"#.into()),
             "/api/v2/task/86abc/comment" => (200, r#"{"comments":[]}"#.into()),
             _ => (404, r#"{"err":"Task not found"}"#.into()),
@@ -699,10 +805,17 @@ pub(crate) mod tests {
         let (task, _) = c.task_with_comments("DEV-42").await.unwrap();
         assert_eq!(task["id"], "86abc");
         let calls = log.lock().unwrap().clone();
-        assert!(calls.iter().any(|c| c.contains("custom_task_ids=true")), "{calls:?}");
+        assert!(
+            calls.iter().any(|c| c.contains("custom_task_ids=true")),
+            "{calls:?}"
+        );
         let (task, _) = c.task_with_comments("86abc").await.unwrap();
         assert_eq!(task["id"], "86abc");
-        let e = c.task_with_comments("NOPE-1").await.unwrap_err().to_string();
+        let e = c
+            .task_with_comments("NOPE-1")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("Task not found"), "{e}");
     }
 
@@ -722,14 +835,29 @@ pub(crate) mod tests {
         let c = Client::with_base("pk_test", &base);
         assert_eq!(c.mark_done("86abc").await.unwrap(), "in progress");
         let calls = log.lock().unwrap().clone();
-        assert_eq!(calls.last().unwrap(), r#"PUT /api/v2/task/86abc {"status":"complete"}"#);
-        assert!(c.mark_done("../user").await.is_err(), "a bad id never reaches ClickUp");
+        assert_eq!(
+            calls.last().unwrap(),
+            r#"PUT /api/v2/task/86abc {"status":"complete"}"#
+        );
+        assert!(
+            c.mark_done("../user").await.is_err(),
+            "a bad id never reaches ClickUp"
+        );
     }
 
     #[tokio::test]
     async fn a_refused_token_says_what_to_do() {
-        let (base, _) = fake_clickup(|_, _| (401, r#"{"err":"Token invalid","ECODE":"OAUTH_025"}"#.into())).await;
-        let e = Client::with_base("pk_test", &base).my_tasks().await.unwrap_err().to_string();
-        assert!(e.contains("Settings page") && e.contains("Token invalid"), "{e}");
+        let (base, _) =
+            fake_clickup(|_, _| (401, r#"{"err":"Token invalid","ECODE":"OAUTH_025"}"#.into()))
+                .await;
+        let e = Client::with_base("pk_test", &base)
+            .my_tasks()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("Settings page") && e.contains("Token invalid"),
+            "{e}"
+        );
     }
 }

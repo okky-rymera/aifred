@@ -59,13 +59,15 @@ pub struct Embedder(Mutex<TextEmbedding>);
 
 impl Embedder {
     pub fn load(models_dir: &Path) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(models_dir).with_context(|| format!("cannot make {}", models_dir.display()))?;
+        std::fs::create_dir_all(models_dir)
+            .with_context(|| format!("cannot make {}", models_dir.display()))?;
         let options = TextInitOptions::new(EmbeddingModel::AllMiniLML6V2)
             .with_cache_dir(models_dir.into())
             .with_show_download_progress(false)
             // Two threads: a fill in the background must not slow the computer.
             .with_intra_threads(2);
-        let model = TextEmbedding::try_new(options).context("cannot load the meaning search model")?;
+        let model =
+            TextEmbedding::try_new(options).context("cannot load the meaning search model")?;
         Ok(Self(Mutex::new(model)))
     }
 
@@ -73,9 +75,14 @@ impl Embedder {
     /// the fastest and used the least memory (64 long texts: 4.3 s and
     /// 175 MB, against 6.0 s and 602 MB in groups of 32).
     pub fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-        let cut: Vec<String> = texts.iter().map(|t| t.chars().take(MAX_CHARS).collect()).collect();
+        let cut: Vec<String> = texts
+            .iter()
+            .map(|t| t.chars().take(MAX_CHARS).collect())
+            .collect();
         let mut model = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        model.embed(cut, Some(1)).context("the meaning search model failed")
+        model
+            .embed(cut, Some(1))
+            .context("the meaning search model failed")
     }
 }
 
@@ -90,7 +97,8 @@ pub fn serve(dir: &Path, socket: &Path, models_dir: &Path, idle: Duration) -> an
     // The lock is ours, so an old socket file is from a helper that stopped.
     let _ = std::fs::remove_file(&socket);
     // Bind before the model loads: a client can connect at once and wait.
-    let listener = UnixListener::bind(&socket).with_context(|| format!("cannot open {}", socket.display()))?;
+    let listener =
+        UnixListener::bind(&socket).with_context(|| format!("cannot open {}", socket.display()))?;
     let _ = std::fs::remove_dir_all(models_dir.join(OLD_MODEL_DIR));
 
     let model = match Embedder::load(models_dir) {
@@ -108,7 +116,10 @@ pub fn serve(dir: &Path, socket: &Path, models_dir: &Path, idle: Duration) -> an
         }
     };
 
-    let state = Arc::new(State { busy: AtomicUsize::new(0), last: Mutex::new(Instant::now()) });
+    let state = Arc::new(State {
+        busy: AtomicUsize::new(0),
+        last: Mutex::new(Instant::now()),
+    });
     // Non-blocking accept with a short wait: the loop can check for idle.
     // While idle, this wakes 20 times a second and does almost nothing.
     listener.set_nonblocking(true)?;
@@ -162,7 +173,10 @@ impl State {
     }
 
     fn idle_for(&self) -> Duration {
-        self.last.lock().unwrap_or_else(|e| e.into_inner()).elapsed()
+        self.last
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .elapsed()
     }
 }
 
@@ -174,10 +188,20 @@ fn handle(stream: UnixStream, model: &Embedder, state: &State) {
         state.busy.fetch_add(1, Ordering::SeqCst);
         let res = match serde_json::from_str::<Request>(&line) {
             Ok(req) => match model.embed(&req.texts) {
-                Ok(v) => Response { model: Some(MODEL.into()), vectors: Some(v), error: None },
-                Err(e) => Response { error: Some(format!("{e:#}")), ..Default::default() },
+                Ok(v) => Response {
+                    model: Some(MODEL.into()),
+                    vectors: Some(v),
+                    error: None,
+                },
+                Err(e) => Response {
+                    error: Some(format!("{e:#}")),
+                    ..Default::default()
+                },
             },
-            Err(e) => Response { error: Some(format!("a bad request: {e}")), ..Default::default() },
+            Err(e) => Response {
+                error: Some(format!("a bad request: {e}")),
+                ..Default::default()
+            },
         };
         let sent = send(&mut out, &res);
         state.touch();
@@ -190,7 +214,13 @@ fn handle(stream: UnixStream, model: &Embedder, state: &State) {
 
 fn answer_error(stream: UnixStream, message: &str) {
     let mut out = stream;
-    let _ = send(&mut out, &Response { error: Some(message.into()), ..Default::default() });
+    let _ = send(
+        &mut out,
+        &Response {
+            error: Some(message.into()),
+            ..Default::default()
+        },
+    );
 }
 
 fn send(out: &mut UnixStream, res: &Response) -> std::io::Result<()> {
@@ -217,7 +247,10 @@ mod tests {
 
     /// The model folder that the aifred-core tests also use.
     fn models() -> PathBuf {
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-models"))
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/test-models"
+        ))
     }
 
     fn ask(dir: &Path, texts: &[&str]) -> Response {
@@ -228,8 +261,11 @@ mod tests {
             }
         };
         let mut out = stream.try_clone().unwrap();
-        let req = Request { texts: texts.iter().map(|t| t.to_string()).collect() };
-        out.write_all(format!("{}\n", serde_json::to_string(&req).unwrap()).as_bytes()).unwrap();
+        let req = Request {
+            texts: texts.iter().map(|t| t.to_string()).collect(),
+        };
+        out.write_all(format!("{}\n", serde_json::to_string(&req).unwrap()).as_bytes())
+            .unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
@@ -239,15 +275,23 @@ mod tests {
     fn the_helper_answers_more_than_32_texts_and_stops_when_idle() {
         let d = temp("idle");
         let (dd, m) = (d.clone(), models());
-        let helper = std::thread::spawn(move || serve(&dd, &dd.join(SOCKET), &m, Duration::from_secs(1)));
+        let helper =
+            std::thread::spawn(move || serve(&dd, &dd.join(SOCKET), &m, Duration::from_secs(1)));
         let texts: Vec<String> = (0..40).map(|i| format!("text {i}")).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let res = ask(&d, &refs);
         assert_eq!(res.error, None);
         assert_eq!(res.model.as_deref(), Some(MODEL));
-        assert_eq!(res.vectors.unwrap().len(), 40, "the old model failed with more than 32 texts");
+        assert_eq!(
+            res.vectors.unwrap().len(),
+            40,
+            "the old model failed with more than 32 texts"
+        );
         helper.join().unwrap().unwrap();
-        assert!(!d.join(SOCKET).exists(), "an idle helper removes its socket and stops");
+        assert!(
+            !d.join(SOCKET).exists(),
+            "an idle helper removes its socket and stops"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -255,12 +299,19 @@ mod tests {
     fn a_second_helper_for_the_same_folder_stops_at_once() {
         let d = temp("one");
         let (dd, m) = (d.clone(), models());
-        let first = std::thread::spawn(move || serve(&dd, &dd.join(SOCKET), &m, Duration::from_secs(5)));
+        let first =
+            std::thread::spawn(move || serve(&dd, &dd.join(SOCKET), &m, Duration::from_secs(5)));
         assert!(ask(&d, &["hello"]).vectors.is_some());
         let start = Instant::now();
         serve(&d, &d.join(SOCKET), &models(), Duration::from_secs(5)).unwrap();
-        assert!(start.elapsed() < Duration::from_secs(4), "the second helper did not wait for idle");
-        assert!(ask(&d, &["still here"]).vectors.is_some(), "the first helper still answers");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "the second helper did not wait for idle"
+        );
+        assert!(
+            ask(&d, &["still here"]).vectors.is_some(),
+            "the first helper still answers"
+        );
         first.join().unwrap().unwrap();
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -270,9 +321,13 @@ mod tests {
         // Vectors from a fill and from a question must match.
         let d = temp("same");
         let (dd, m) = (d.clone(), models());
-        let helper = std::thread::spawn(move || serve(&dd, &dd.join(SOCKET), &m, Duration::from_secs(1)));
+        let helper =
+            std::thread::spawn(move || serve(&dd, &dd.join(SOCKET), &m, Duration::from_secs(1)));
         let alone = ask(&d, &["send the invoice"]).vectors.unwrap().remove(0);
-        let with = ask(&d, &["walk in the park", "send the invoice"]).vectors.unwrap().remove(1);
+        let with = ask(&d, &["walk in the park", "send the invoice"])
+            .vectors
+            .unwrap()
+            .remove(1);
         let diff: f32 = alone.iter().zip(&with).map(|(a, b)| (a - b).abs()).sum();
         assert!(diff < 1e-3, "diff {diff}");
         helper.join().unwrap().unwrap();

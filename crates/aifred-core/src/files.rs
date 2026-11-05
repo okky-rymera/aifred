@@ -10,7 +10,9 @@ use serde::{Serialize, de::DeserializeOwned};
 /// A broken file is an error, so nobody overwrites data we cannot read.
 pub fn load<T: DeserializeOwned + Default>(path: &Path) -> anyhow::Result<T> {
     match std::fs::read(path) {
-        Ok(b) => serde_json::from_slice(&b).with_context(|| format!("cannot read {}", path.display())),
+        Ok(b) => {
+            serde_json::from_slice(&b).with_context(|| format!("cannot read {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
@@ -33,7 +35,9 @@ pub fn save<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()>
     let bytes = serde_json::to_vec_pretty(value)?;
     let result = write_synced(&tmp, &bytes)
         .with_context(|| format!("cannot write {}", tmp.display()))
-        .and_then(|()| std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display())));
+        .and_then(|()| {
+            std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
+        });
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
         return result;
@@ -61,7 +65,8 @@ fn lock(path: &Path) -> anyhow::Result<std::fs::File> {
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("cannot open {}", lock_path.display()))?;
-    lock.lock().with_context(|| format!("cannot lock {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("cannot lock {}", lock_path.display()))?;
     Ok(lock)
 }
 
@@ -108,8 +113,14 @@ mod tests {
         assert!(load::<Vec<u32>>(&p).is_err());
         replace(&p, &vec![1u32, 2]).unwrap();
         assert_eq!(load::<Vec<u32>>(&p).unwrap(), vec![1, 2]);
-        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert!(!names.iter().any(|n| n.to_string_lossy().ends_with(".tmp")), "{names:?}");
+        let names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.to_string_lossy().ends_with(".tmp")),
+            "{names:?}"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

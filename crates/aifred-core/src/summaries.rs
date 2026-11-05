@@ -63,8 +63,16 @@ impl Pending {
 pub fn pending(dir: &Path, limit: usize, skip: &HashSet<Key>) -> anyhow::Result<Vec<Pending>> {
     // Row numbers are whole numbers, so they are safe to put into the SQL text.
     let not_in = |table: &str| {
-        let ids: Vec<String> = skip.iter().filter(|k| k.0 == table).map(|k| k.1.to_string()).collect();
-        if ids.is_empty() { String::new() } else { format!(" AND rowid NOT IN ({})", ids.join(",")) }
+        let ids: Vec<String> = skip
+            .iter()
+            .filter(|k| k.0 == table)
+            .map(|k| k.1.to_string())
+            .collect();
+        if ids.is_empty() {
+            String::new()
+        } else {
+            format!(" AND rowid NOT IN ({})", ids.join(","))
+        }
     };
     let sql = format!(
         "SELECT 'work_item', rowid, title, details FROM work_item
@@ -119,7 +127,12 @@ pub fn prompt(items: &[Pending]) -> String {
     let mut p = String::from("Write a summary of each item.\n");
     for (i, item) in items.iter().enumerate() {
         let text: String = item.text.chars().take(INPUT_CHARS).collect();
-        p.push_str(&format!("\n### Item {}\nTitle: {}\n{}\n", i + 1, item.title, text.trim()));
+        p.push_str(&format!(
+            "\n### Item {}\nTitle: {}\n{}\n",
+            i + 1,
+            item.title,
+            text.trim()
+        ));
     }
     p
 }
@@ -128,13 +141,22 @@ pub fn prompt(items: &[Pending]) -> String {
 /// with no usable summary gets None. Fails only when there is no JSON object.
 pub fn parse(answer: &str, count: usize) -> anyhow::Result<Vec<Option<String>>> {
     // The model can put the object in a code block or add text around it.
-    let start = answer.find('{').context("the summary answer has no JSON object")?;
-    let end = answer.rfind('}').filter(|&e| e > start).context("the summary answer has no JSON object")?;
+    let start = answer
+        .find('{')
+        .context("the summary answer has no JSON object")?;
+    let end = answer
+        .rfind('}')
+        .filter(|&e| e > start)
+        .context("the summary answer has no JSON object")?;
     let v: Value = serde_json::from_str(answer.get(start..=end).unwrap_or_default())
         .context("the summary answer is not a JSON object")?;
     Ok((1..=count)
         .map(|n| {
-            let s = v[n.to_string()].as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
+            let s = v[n.to_string()]
+                .as_str()?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             (!s.is_empty()).then(|| s.chars().take(SHORT_CHARS * 2).collect())
         })
         .collect())
@@ -147,7 +169,11 @@ pub fn save(dir: &Path, items: &[Pending], summaries: &[Option<String>]) -> anyh
         let mut saved = 0;
         for (item, summary) in items.iter().zip(summaries) {
             let Some(summary) = summary else { continue };
-            let text_column = if item.table == "task" { "notes" } else { "details" };
+            let text_column = if item.table == "task" {
+                "notes"
+            } else {
+                "details"
+            };
             saved += tx.execute(
                 &format!(
                     "UPDATE {} SET summary = ?1 WHERE rowid = ?2 AND title = ?3 AND {text_column} = ?4",
@@ -183,11 +209,15 @@ mod tests {
     use crate::tasks::{TaskFields, TaskStore};
 
     fn notes(text: &str) -> TaskFields {
-        TaskFields { notes: Some(text.into()), ..Default::default() }
+        TaskFields {
+            notes: Some(text.into()),
+            ..Default::default()
+        }
     }
 
     fn temp(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("aifred-summaries-{name}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("aifred-summaries-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -198,22 +228,36 @@ mod tests {
         let d = temp("pending");
         let s = TaskStore::new(&d);
         s.add("Short", "Call Sam before 5pm.", "you").unwrap();
-        let long = s.add("Long", &"Plan the release. ".repeat(30), "you").unwrap();
+        let long = s
+            .add("Long", &"Plan the release. ".repeat(30), "you")
+            .unwrap();
         let done = s.add("Done", &"Old work. ".repeat(50), "you").unwrap();
         s.set_done(&done.id, true).unwrap();
         let p = pending(&d, 10, &HashSet::new()).unwrap();
         assert_eq!(p.len(), 1, "short and done tasks cost no AI call");
         assert_eq!(p[0].title, "Long");
 
-        assert_eq!(save(&d, &p, &[Some("Plan the release.".into())]).unwrap(), 1);
+        assert_eq!(
+            save(&d, &p, &[Some("Plan the release.".into())]).unwrap(),
+            1
+        );
         assert!(pending(&d, 10, &HashSet::new()).unwrap().is_empty());
 
         // A new due date or tag keeps the summary: it is only of the description.
-        s.update(&long.id, TaskFields { due: Some("2026-12-01".into()), tags: Some(vec!["work".into()]), ..Default::default() }).unwrap();
+        s.update(
+            &long.id,
+            TaskFields {
+                due: Some("2026-12-01".into()),
+                tags: Some(vec!["work".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(pending(&d, 10, &HashSet::new()).unwrap().is_empty());
 
         // A new description makes the summary old: the item needs a new one.
-        s.update(&long.id, notes(&"Plan the next release. ".repeat(30))).unwrap();
+        s.update(&long.id, notes(&"Plan the next release. ".repeat(30)))
+            .unwrap();
         assert_eq!(pending(&d, 10, &HashSet::new()).unwrap().len(), 1);
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -222,19 +266,32 @@ mod tests {
     fn a_summary_of_a_description_that_changed_meanwhile_is_not_saved() {
         let d = temp("changed");
         let s = TaskStore::new(&d);
-        let t = s.add("Long", &"Plan the release. ".repeat(30), "you").unwrap();
+        let t = s
+            .add("Long", &"Plan the release. ".repeat(30), "you")
+            .unwrap();
         let p = pending(&d, 10, &HashSet::new()).unwrap();
-        s.update(&t.id, notes(&"Something else. ".repeat(30))).unwrap();
-        assert_eq!(save(&d, &p, &[Some("Plan the release.".into())]).unwrap(), 0);
+        s.update(&t.id, notes(&"Something else. ".repeat(30)))
+            .unwrap();
+        assert_eq!(
+            save(&d, &p, &[Some("Plan the release.".into())]).unwrap(),
+            0
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn the_answer_can_have_a_code_block_and_missing_items() {
-        let got = parse("Here:\n```json\n{\"1\": \"  Fix the   cart. \", \"3\": \"\"}\n```", 3).unwrap();
+        let got = parse(
+            "Here:\n```json\n{\"1\": \"  Fix the   cart. \", \"3\": \"\"}\n```",
+            3,
+        )
+        .unwrap();
         assert_eq!(got, vec![Some("Fix the cart.".into()), None, None]);
         assert!(parse("no json here", 1).is_err());
-        assert!(parse("} then {", 1).is_err(), "a closing brace before the opening brace is not an object");
+        assert!(
+            parse("} then {", 1).is_err(),
+            "a closing brace before the opening brace is not an object"
+        );
     }
 
     #[test]
@@ -251,8 +308,10 @@ mod tests {
     fn skipped_items_do_not_block_the_other_items() {
         let d = temp("skip");
         let s = TaskStore::new(&d);
-        s.add("First", &"Plan the release. ".repeat(30), "you").unwrap();
-        s.add("Second", &"Fix the cart. ".repeat(30), "you").unwrap();
+        s.add("First", &"Plan the release. ".repeat(30), "you")
+            .unwrap();
+        s.add("Second", &"Fix the cart. ".repeat(30), "you")
+            .unwrap();
         let first = pending(&d, 1, &HashSet::new()).unwrap();
         assert_eq!(first[0].title, "First", "the order is fixed");
         let skip: HashSet<Key> = first.iter().map(|i| i.key()).collect();
@@ -264,8 +323,18 @@ mod tests {
     #[test]
     fn the_prompt_numbers_the_items_and_cuts_long_text() {
         let items = vec![
-            Pending { table: "task", rowid: 1, title: "A".into(), text: "x".repeat(10_000) },
-            Pending { table: "work_item", rowid: 2, title: "B".into(), text: "short".into() },
+            Pending {
+                table: "task",
+                rowid: 1,
+                title: "A".into(),
+                text: "x".repeat(10_000),
+            },
+            Pending {
+                table: "work_item",
+                rowid: 2,
+                title: "B".into(),
+                text: "short".into(),
+            },
         ];
         let p = prompt(&items);
         assert!(p.contains("### Item 1\nTitle: A") && p.contains("### Item 2\nTitle: B"));

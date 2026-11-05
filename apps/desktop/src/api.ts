@@ -1,7 +1,13 @@
 // Typed wrappers around the desktop app's Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-export type Turn = { ts: number; role: "user" | "assistant"; text: string; backend: string };
+/** A file that the user sent or keeps on a task (uploads.rs). */
+export type FileRef = { id: string; name: string; size: number };
+
+export type Turn = { ts: number; role: "user" | "assistant"; text: string; backend: string; files?: FileRef[] };
+
+/** One message of a side chat: the plan chat or the chat of one item (side.rs). */
+export type SideTurn = { id: number; ts: number; role: "user" | "assistant"; text: string; files: FileRef[]; info?: string };
 
 export type ProgressEvent =
   | { kind: "tool_call"; server: string; tool: string; input: Record<string, unknown> }
@@ -16,6 +22,8 @@ export type Answer = {
   memory: string[];
   /** The model you picked for this message. null: the default model. */
   model: string | null;
+  /** The short line under the answer: time, model, lookups, and cost. */
+  info: string;
 };
 
 /** The models that the chat box offers. null is the default model. */
@@ -68,6 +76,7 @@ export type Task = {
   priority: Priority | null;
   tags: string[];
   checklist: ChecklistItem[];
+  files: FileRef[];
 };
 
 /** The fields to set. A field that is left out stays as it is. For due,
@@ -80,6 +89,8 @@ export type TaskChanges = {
   priority?: Priority | "";
   tags?: string[];
   checklist?: ChecklistItem[];
+  /** The ids of the files of the task. The full new list. */
+  files?: string[];
 };
 
 export type GithubItem = {
@@ -154,13 +165,76 @@ export type ClickupTokenStatus = {
 export type Settings = {
   /** How often the GitHub and ClickUp lists reload. 0 means only when you click reload. */
   refresh_minutes: number;
+  /** The work day, "HH:MM". */
+  work_start: string;
+  work_end: string;
+  /** When lunch starts, "HH:MM", and how long it is. 0: no lunch. */
+  lunch_start: string;
+  lunch_minutes: number;
+  /** AIfred writes the brief by itself once a day. */
+  auto_brief: boolean;
 };
 
-export function ask(prompt: string, onEvent: (e: ProgressEvent) => void): Promise<Answer> {
+export const DEFAULT_SETTINGS: Settings = {
+  refresh_minutes: 15,
+  work_start: "09:00",
+  work_end: "17:30",
+  lunch_start: "12:30",
+  lunch_minutes: 45,
+  auto_brief: true,
+};
+
+/** One item of a day plan. `key` names the item (items.rs). */
+export type PlanItem = { key: string; why?: string };
+export type DayPlan = { day: string; mode: "ai" | "self"; items: PlanItem[]; updated: number };
+export type Estimate = { minutes: number; by: "you" | "aifred" };
+export type Brief = { day: string; written: number; text: string; why: Record<string, string> };
+export type ItemMeta = { key: string; first_seen: number; new: boolean; summary?: string };
+export type ItemDetails = { key: string; details: string; summary?: string };
+
+/** The model of one message: a model id, "default", or undefined for the last pick. */
+export type ModelPick = string | undefined;
+
+/** A question in the main conversation. `files`: ids from uploadFile. */
+export function ask(prompt: string, onEvent: (e: ProgressEvent) => void, opts: { model?: ModelPick; files?: string[] } = {}): Promise<Answer> {
   const channel = new Channel<ProgressEvent>();
   channel.onmessage = onEvent;
-  return invoke<Answer>("ask", { prompt, onEvent: channel });
+  return invoke<Answer>("ask", { prompt, onEvent: channel, model: opts.model, files: opts.files ?? [] });
 }
+
+/** A question in a side chat: "plan:YYYY-MM-DD" or "item:<key>". */
+export function askSide(
+  thread: string,
+  prompt: string,
+  onEvent: (e: ProgressEvent) => void,
+  opts: { model?: ModelPick; files?: string[] } = {},
+): Promise<Answer> {
+  const channel = new Channel<ProgressEvent>();
+  channel.onmessage = onEvent;
+  return invoke<Answer>("ask_side", { thread, prompt, onEvent: channel, model: opts.model, files: opts.files ?? [] });
+}
+
+export const sideHistory = (thread: string) => invoke<SideTurn[]>("side_history", { thread });
+export const clearSide = (thread: string) => invoke<void>("clear_side", { thread });
+
+/** Saves one file. The bytes go as the body, so a large file needs no JSON. */
+export async function uploadFile(file: File): Promise<FileRef> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return invoke<FileRef>("upload_file", bytes, { headers: { "x-file-name": encodeURIComponent(file.name) } });
+}
+export const openFile = (id: string) => invoke<void>("open_file", { id });
+
+export const dayPlan = (day: string) => invoke<DayPlan | null>("day_plan", { day });
+export const setDayPlan = (day: string, mode: DayPlan["mode"], items: PlanItem[]) => invoke<DayPlan>("set_day_plan", { day, mode, items });
+export const clearDayPlan = (day: string) => invoke<void>("clear_day_plan", { day });
+export const estimates = () => invoke<Record<string, Estimate>>("estimates");
+/** Your own time guess. null removes it. */
+export const setEstimate = (key: string, minutes: number | null) => invoke<void>("set_estimate", { key, minutes });
+export const brief = (day: string) => invoke<Brief | null>("brief", { day });
+/** One AI call. */
+export const writeBrief = (day: string) => invoke<Brief>("write_brief", { day });
+export const itemMeta = () => invoke<ItemMeta[]>("item_meta");
+export const itemDetails = (key: string) => invoke<ItemDetails>("item_details", { key });
 
 export const history = () => invoke<Turn[]>("history");
 /** All facts: the ones in use, then the forgotten ones. */
@@ -174,6 +248,8 @@ export const newConversation = () => invoke<void>("new_conversation");
 export const tasks = () => invoke<Task[]>("tasks");
 /** notes: the optional description. */
 export const addTask = (title: string, notes = "") => invoke<Task>("add_task", { task: { title, notes } });
+/** Adds a task with all the fields in `fields`. The title is necessary. */
+export const createTask = (fields: TaskChanges & { title: string }) => invoke<Task>("add_task", { task: fields });
 export const setTaskDone = (id: string, done: boolean) => invoke<Task>("set_task_done", { id, done });
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
 /** force: ask GitHub now, and do not use the saved list. */
@@ -240,6 +316,12 @@ export function describe(e: ProgressEvent): string {
       return "Changing a task";
     case "complete_task":
       return "Marking a task done";
+    case "overview":
+      return "Reading all your open work";
+    case "day_plan":
+      return "Reading your day plan";
+    case "set_day_plan":
+      return "Saving your day plan";
     case "my_tasks":
       return "Checking your ClickUp tasks";
     case "task_details":

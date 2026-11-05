@@ -17,7 +17,7 @@ describe("command wrappers", () => {
     await api.restoreFact(f.id);
     await api.githubItems(true);
     await api.getSettings();
-    await api.setSettings({ refresh_minutes: 30 });
+    await api.setSettings({ ...api.DEFAULT_SETTINGS, refresh_minutes: 30 });
     expect(fake.calls).toEqual([
       { cmd: "add_task", args: { task: { title: "Call Sam", notes: "" } } },
       { cmd: "set_task_done", args: { id: t.id, done: true } },
@@ -29,7 +29,7 @@ describe("command wrappers", () => {
       { cmd: "restore_fact", args: { id: f.id } },
       { cmd: "github_items", args: { force: true } },
       { cmd: "get_settings", args: {} },
-      { cmd: "set_settings", args: { settings: { refresh_minutes: 30 } } },
+      { cmd: "set_settings", args: { settings: { ...api.DEFAULT_SETTINGS, refresh_minutes: 30 } } },
     ]);
   });
 

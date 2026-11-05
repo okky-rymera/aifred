@@ -17,6 +17,9 @@ pub struct Turn {
     pub role: String,
     pub text: String,
     pub backend: String,
+    /// The files that the user sent with the message (uploads.rs).
+    #[serde(default)]
+    pub files: Vec<crate::uploads::FileRef>,
 }
 
 pub struct History {
@@ -32,22 +35,74 @@ impl History {
     pub fn load(&self) -> anyhow::Result<Vec<Turn>> {
         db::read(&self.dir, |c| {
             let mut q = c.prepare(
-                "SELECT t.ts, t.role, t.text, t.backend FROM turn t
+                "SELECT t.ts, t.role, t.text, t.backend, t.files FROM turn t
                  JOIN conversation c ON c.id = t.conversation_id
                  WHERE c.ended IS NULL ORDER BY t.id",
             )?;
             let rows = q.query_map([], |r| {
-                Ok(Turn { ts: r.get(0)?, role: r.get(1)?, text: r.get(2)?, backend: r.get(3)? })
+                let files: String = r.get(4)?;
+                Ok(Turn {
+                    ts: r.get(0)?,
+                    role: r.get(1)?,
+                    text: r.get(2)?,
+                    backend: r.get(3)?,
+                    files: serde_json::from_str(&files).unwrap_or_default(),
+                })
             })?;
             Ok(rows.collect::<Result<_, _>>()?)
         })
     }
 
+    /// The files of the messages of the current conversation, oldest first.
+    /// It reads only the messages that have files.
+    pub fn current_files(&self) -> anyhow::Result<Vec<crate::uploads::FileRef>> {
+        db::read(&self.dir, |c| {
+            let mut q = c.prepare(
+                "SELECT t.files FROM turn t
+                 JOIN conversation c ON c.id = t.conversation_id
+                 WHERE c.ended IS NULL AND t.files != '[]' ORDER BY t.id",
+            )?;
+            let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+            let mut files = vec![];
+            for r in rows {
+                files.extend(
+                    serde_json::from_str::<Vec<crate::uploads::FileRef>>(&r?).unwrap_or_default(),
+                );
+            }
+            Ok(files)
+        })
+    }
+
     pub fn append(&self, role: &str, text: &str, backend: &str) -> anyhow::Result<()> {
+        self.append_with_files(role, text, backend, &[])
+    }
+
+    /// Like append, with the files that the user sent with the message.
+    pub fn append_with_files(
+        &self,
+        role: &str,
+        text: &str,
+        backend: &str,
+        files: &[crate::uploads::FileRef],
+    ) -> anyhow::Result<()> {
         db::write(&self.dir, |tx| {
-            let turn = Turn { ts: now(), role: role.into(), text: text.into(), backend: backend.into() };
+            let turn = Turn {
+                ts: now(),
+                role: role.into(),
+                text: text.into(),
+                backend: backend.into(),
+                files: files.to_vec(),
+            };
             let id = current_conversation(tx, turn.ts)?;
-            insert_turn(tx, id, &turn)
+            insert_turn(tx, id, &turn)?;
+            // Not in insert_turn: the import of old files runs before the files column exists.
+            if !files.is_empty() {
+                tx.execute(
+                    "UPDATE turn SET files = ?1 WHERE id = ?2",
+                    rusqlite::params![serde_json::to_string(files)?, tx.last_insert_rowid()],
+                )?;
+            }
+            Ok(())
         })
     }
 
@@ -55,9 +110,15 @@ impl History {
     /// conversation that ended, or None when there was none.
     pub fn archive(&self) -> anyhow::Result<Option<i64>> {
         db::write(&self.dir, |tx| {
-            let id: Option<i64> =
-                tx.query_row("SELECT id FROM conversation WHERE ended IS NULL", [], |r| r.get(0)).optional()?;
-            tx.execute("UPDATE conversation SET ended = ?1 WHERE ended IS NULL", [now() as i64])?;
+            let id: Option<i64> = tx
+                .query_row("SELECT id FROM conversation WHERE ended IS NULL", [], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            tx.execute(
+                "UPDATE conversation SET ended = ?1 WHERE ended IS NULL",
+                [now() as i64],
+            )?;
             Ok(id)
         })
     }
@@ -65,17 +126,25 @@ impl History {
     /// The id of the current conversation, or None before the first message.
     pub fn current(&self) -> anyhow::Result<Option<i64>> {
         db::read(&self.dir, |c| {
-            Ok(c.query_row("SELECT id FROM conversation WHERE ended IS NULL", [], |r| r.get(0)).optional()?)
+            Ok(
+                c.query_row("SELECT id FROM conversation WHERE ended IS NULL", [], |r| {
+                    r.get(0)
+                })
+                .optional()?,
+            )
         })
     }
 
     /// The summary of the current conversation, if it has one.
     pub fn current_summary(&self) -> anyhow::Result<Option<String>> {
         db::read(&self.dir, |c| {
-            Ok(c
-                .query_row("SELECT summary FROM conversation WHERE ended IS NULL", [], |r| r.get(0))
-                .optional()?
-                .flatten())
+            Ok(c.query_row(
+                "SELECT summary FROM conversation WHERE ended IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
         })
     }
 
@@ -89,14 +158,29 @@ impl History {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let mut q = c.prepare(
-                "SELECT id, ts, role, text, backend FROM turn WHERE conversation_id = ?1 AND id > ?2 ORDER BY id",
+                "SELECT id, ts, role, text, backend, files FROM turn WHERE conversation_id = ?1 AND id > ?2 ORDER BY id",
             )?;
             let rows = q.query_map([conversation, upto.unwrap_or(0)], |r| {
-                Ok((r.get::<_, i64>(0)?, Turn { ts: r.get(1)?, role: r.get(2)?, text: r.get(3)?, backend: r.get(4)? }))
+                let files: String = r.get(5)?;
+                let files = serde_json::from_str(&files).unwrap_or_default();
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    Turn {
+                        ts: r.get(1)?,
+                        role: r.get(2)?,
+                        text: r.get(3)?,
+                        backend: r.get(4)?,
+                        files,
+                    },
+                ))
             })?;
             let rows: Vec<(i64, Turn)> = rows.collect::<Result<_, _>>()?;
             let (ids, turns) = rows.into_iter().unzip();
-            Ok(Unsummarized { summary, turns, ids })
+            Ok(Unsummarized {
+                summary,
+                turns,
+                ids,
+            })
         })
     }
 
@@ -105,7 +189,11 @@ impl History {
     /// bytes of messages, the same rule as Assistant::summarize_ended.
     /// Examples: conversations from the old history files, and a summary
     /// that stopped when the app closed.
-    pub fn ended_without_full_summary(&self, min_chars: usize, limit: usize) -> anyhow::Result<Vec<i64>> {
+    pub fn ended_without_full_summary(
+        &self,
+        min_chars: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<i64>> {
         db::read(&self.dir, |c| {
             let mut q = c.prepare(
                 "SELECT c.id FROM conversation c
@@ -116,7 +204,9 @@ impl History {
                  ORDER BY c.id DESC
                  LIMIT ?2",
             )?;
-            let ids = q.query_map(rusqlite::params![min_chars as i64, limit as i64], |r| r.get(0))?;
+            let ids = q.query_map(rusqlite::params![min_chars as i64, limit as i64], |r| {
+                r.get(0)
+            })?;
             Ok(ids.collect::<Result<_, _>>()?)
         })
     }
@@ -133,7 +223,11 @@ impl History {
     }
 
     /// Conversation summaries that match `query` by words or by meaning, best first.
-    pub fn search_summaries(&self, query: &str, limit: Option<u32>) -> anyhow::Result<Vec<SummaryHit>> {
+    pub fn search_summaries(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<SummaryHit>> {
         db::read(&self.dir, |c| {
             let ids = db::hybrid(
                 c,
@@ -145,12 +239,18 @@ impl History {
                 &[],
                 limit,
             )?;
-            let mut get = c.prepare("SELECT id, started, ended, summary FROM conversation WHERE id = ?1")?;
+            let mut get =
+                c.prepare("SELECT id, started, ended, summary FROM conversation WHERE id = ?1")?;
             Ok(ids
                 .iter()
                 .map(|id| {
                     get.query_row([id], |r| {
-                        Ok(SummaryHit { conversation: r.get(0)?, started: r.get(1)?, ended: r.get(2)?, summary: r.get(3)? })
+                        Ok(SummaryHit {
+                            conversation: r.get(0)?,
+                            started: r.get(1)?,
+                            ended: r.get(2)?,
+                            summary: r.get(3)?,
+                        })
                     })
                 })
                 .collect::<Result<_, _>>()?)
@@ -213,14 +313,31 @@ impl History {
                 .iter()
                 .map(|id| {
                     get.query_row([id], |r| {
-                        let turn = Turn { ts: r.get(3)?, role: r.get(4)?, text: r.get(5)?, backend: r.get(6)? };
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?, turn))
+                        let turn = Turn {
+                            ts: r.get(3)?,
+                            role: r.get(4)?,
+                            text: r.get(5)?,
+                            backend: r.get(6)?,
+                            files: vec![],
+                        };
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, bool>(2)?,
+                            turn,
+                        ))
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let near = |conversation: i64, id: i64, sql: &str| -> rusqlite::Result<Option<Turn>> {
                 c.query_row(sql, [conversation, id], |r| {
-                    Ok(Turn { ts: r.get(0)?, role: r.get(1)?, text: r.get(2)?, backend: r.get(3)? })
+                    Ok(Turn {
+                        ts: r.get(0)?,
+                        role: r.get(1)?,
+                        text: r.get(2)?,
+                        backend: r.get(3)?,
+                        files: vec![],
+                    })
                 })
                 .optional()
             };
@@ -242,11 +359,18 @@ impl History {
 
 /// The id of the current conversation. Makes one if there is none.
 fn current_conversation(tx: &Transaction, now: u64) -> anyhow::Result<i64> {
-    let id = tx.query_row("SELECT id FROM conversation WHERE ended IS NULL", [], |r| r.get(0)).optional()?;
+    let id = tx
+        .query_row("SELECT id FROM conversation WHERE ended IS NULL", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
     match id {
         Some(id) => Ok(id),
         None => {
-            tx.execute("INSERT INTO conversation (started) VALUES (?1)", [now as i64])?;
+            tx.execute(
+                "INSERT INTO conversation (started) VALUES (?1)",
+                [now as i64],
+            )?;
             Ok(tx.last_insert_rowid())
         }
     }
@@ -254,7 +378,12 @@ fn current_conversation(tx: &Transaction, now: u64) -> anyhow::Result<i64> {
 
 /// Adds a conversation with these messages. `ended` None makes it the
 /// current conversation. The import of the old files uses it.
-pub(crate) fn insert_conversation(tx: &Transaction, turns: &[Turn], ended: Option<u64>, now: u64) -> anyhow::Result<()> {
+pub(crate) fn insert_conversation(
+    tx: &Transaction,
+    turns: &[Turn],
+    ended: Option<u64>,
+    now: u64,
+) -> anyhow::Result<()> {
     let started = turns.first().map_or(ended.unwrap_or(now), |t| t.ts);
     tx.execute(
         "INSERT INTO conversation (started, ended) VALUES (?1, ?2)",
@@ -286,10 +415,16 @@ mod tests {
         h.append("user", "hi", "claude").unwrap();
         h.append("assistant", "hello", "claude").unwrap();
         let t = h.load().unwrap();
-        assert_eq!(t.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), vec!["hi", "hello"]);
+        assert_eq!(
+            t.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            vec!["hi", "hello"]
+        );
         assert_eq!(t[1].role, "assistant");
         h.archive().unwrap();
-        assert!(h.load().unwrap().is_empty(), "a new conversation starts empty");
+        assert!(
+            h.load().unwrap().is_empty(),
+            "a new conversation starts empty"
+        );
         h.append("user", "again", "claude").unwrap();
         assert_eq!(h.load().unwrap().len(), 1);
         let (ended, turns): (i64, i64) = db::read(&d, |c| {
@@ -314,11 +449,22 @@ mod tests {
         let id = h.current().unwrap().unwrap();
         let u = h.unsummarized(id).unwrap();
         assert_eq!((u.summary, u.turns.len()), (None, 2));
-        h.set_summary(id, "- The user plans a holiday in Bali.", *u.ids.last().unwrap()).unwrap();
-        assert_eq!(h.current_summary().unwrap().as_deref(), Some("- The user plans a holiday in Bali."));
+        h.set_summary(
+            id,
+            "- The user plans a holiday in Bali.",
+            *u.ids.last().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            h.current_summary().unwrap().as_deref(),
+            Some("- The user plans a holiday in Bali.")
+        );
         h.append("user", "Book a hotel too", "claude").unwrap();
         let u = h.unsummarized(id).unwrap();
-        assert_eq!(u.turns.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), vec!["Book a hotel too"]);
+        assert_eq!(
+            u.turns.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            vec!["Book a hotel too"]
+        );
         assert!(u.summary.is_some());
         assert_eq!(h.archive().unwrap(), Some(id));
         assert_eq!(h.current_summary().unwrap(), None);
@@ -331,18 +477,27 @@ mod tests {
     fn search_finds_messages_in_old_conversations_with_their_neighbours() {
         let d = temp("history-search");
         let h = History::new(&d);
-        h.append("user", "Remind me about the dentist", "claude").unwrap();
-        h.append("assistant", "Noted: dentist on Tuesday.", "claude").unwrap();
+        h.append("user", "Remind me about the dentist", "claude")
+            .unwrap();
+        h.append("assistant", "Noted: dentist on Tuesday.", "claude")
+            .unwrap();
         h.append("user", "Thanks", "claude").unwrap();
         h.archive().unwrap();
-        h.append("user", "What did we say about the dentists?", "claude").unwrap();
+        h.append("user", "What did we say about the dentists?", "claude")
+            .unwrap();
         let hits = h.search("dentist appointment", None).unwrap();
         assert_eq!(hits.len(), 3);
         let old = hits.iter().find(|x| x.hit.role == "assistant").unwrap();
         assert!(!old.current);
-        assert_eq!(old.before.as_ref().unwrap().text, "Remind me about the dentist");
+        assert_eq!(
+            old.before.as_ref().unwrap().text,
+            "Remind me about the dentist"
+        );
         assert_eq!(old.after.as_ref().unwrap().text, "Thanks");
-        assert!(hits.iter().any(|x| x.current), "the current conversation is found too");
+        assert!(
+            hits.iter().any(|x| x.current),
+            "the current conversation is found too"
+        );
         assert!(h.search("?", None).unwrap().is_empty());
         std::fs::remove_dir_all(&d).unwrap();
     }

@@ -2,7 +2,7 @@
 //! saved GitHub list, and the saved ClickUp list, each item with a short
 //! summary (summaries.rs). The overview tool of the tasks tool server sends
 //! it. One tool call replaces five list calls, and the AI reads summaries
-//! and not full descriptions.
+//! and not full descriptions. Each item has its item key (items.rs).
 
 use std::path::Path;
 
@@ -24,7 +24,8 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
         let tasks: Vec<Value> = q
             .query_map([], |r| {
                 let notes: String = r.get(2)?;
-                let mut t = json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "created": r.get::<_, i64>(4)? });
+                let id: String = r.get(0)?;
+                let mut t = json!({ "key": format!("task:{id}"), "id": id, "title": r.get::<_, String>(1)?, "created": r.get::<_, i64>(4)? });
                 if let Some(s) = for_item(r.get(3)?, &notes) {
                     t["summary"] = s.into();
                 }
@@ -52,7 +53,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             .map(|(data, summary)| {
                 let i: GithubItem = serde_json::from_str(&data)?;
                 let mut v = json!({
-                    "id": i.id, "title": i.title, "url": i.url, "reason": i.reason, "updated": i.updated,
+                    "key": format!("github:{}", i.id), "id": i.id, "title": i.title, "url": i.url, "reason": i.reason, "updated": i.updated,
                 });
                 if !i.links.is_empty() {
                     v["linked"] = i.links.iter().map(|l| l.id.clone()).collect::<Vec<_>>().into();
@@ -79,7 +80,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 .into_iter()
                 .map(|(i, summary)| {
                     let mut v = json!({
-                        "id": i.id, "title": i.title, "url": i.url, "status": i.status,
+                        "key": format!("clickup:{}", i.id), "id": i.id, "title": i.title, "url": i.url, "status": i.status,
                         "list": format!("{} / {}", i.workspace, i.list),
                     });
                     for (key, value) in [("custom_id", i.custom_id.map(Value::from)), ("priority", i.priority.map(Value::from)), ("due", i.due.map(Value::from)), ("summary", summary.map(Value::from))] {
@@ -90,14 +91,19 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                     v
                 })
                 .collect();
-            out["clickup"] = json!({ "fetched_at": fetched_at(c, "clickup", Some(account))?, "tasks": tasks });
+            out["clickup"] =
+                json!({ "fetched_at": fetched_at(c, "clickup", Some(account))?, "tasks": tasks });
         }
         Ok(out)
     })
 }
 
 /// The data and the summary to show of each item in the saved list of `source`.
-fn rows(c: &rusqlite::Connection, source: &str, account: Option<&str>) -> anyhow::Result<Vec<(String, Option<String>)>> {
+fn rows(
+    c: &rusqlite::Connection,
+    source: &str,
+    account: Option<&str>,
+) -> anyhow::Result<Vec<(String, Option<String>)>> {
     let mut q = c.prepare(
         "SELECT data, summary, details FROM work_item
          WHERE source = ?1 AND in_list = 1 AND (?2 IS NULL OR account = ?2) ORDER BY pos",
@@ -113,16 +119,19 @@ fn rows(c: &rusqlite::Connection, source: &str, account: Option<&str>) -> anyhow
 /// seconds), or 0 when there is none. When `account` is Some, a list of
 /// another account counts as none: after the user connects a new ClickUp
 /// account, the old download time must not show next to an empty list.
-fn fetched_at(c: &rusqlite::Connection, source: &str, account: Option<&str>) -> anyhow::Result<i64> {
+fn fetched_at(
+    c: &rusqlite::Connection,
+    source: &str,
+    account: Option<&str>,
+) -> anyhow::Result<i64> {
     use rusqlite::OptionalExtension;
-    Ok(c
-        .query_row(
-            "SELECT fetched_at FROM work_fetch WHERE source = ?1 AND (?2 IS NULL OR account = ?2)",
-            rusqlite::params![source, account],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(0))
+    Ok(c.query_row(
+        "SELECT fetched_at FROM work_fetch WHERE source = ?1 AND (?2 IS NULL OR account = ?2)",
+        rusqlite::params![source, account],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -139,9 +148,15 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let tasks = TaskStore::new(&d);
         tasks.add("Call Sam", "", "you").unwrap();
-        db::write(&d, |tx| Ok(tx.execute("UPDATE task SET tags = 'not json'", [])?)).unwrap();
+        db::write(&d, |tx| {
+            Ok(tx.execute("UPDATE task SET tags = 'not json'", [])?)
+        })
+        .unwrap();
         assert!(tasks.load().is_err());
-        assert!(build(&d, None).is_err(), "the overview does not hide the bad value");
+        assert!(
+            build(&d, None).is_err(),
+            "the overview does not hide the bad value"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -153,13 +168,27 @@ mod tests {
         let tasks = TaskStore::new(&d);
         let sam = tasks.add("Call Sam", "Before 5pm.", "you").unwrap();
         tasks
-            .update(&sam.id, crate::tasks::TaskFields {
-                due: Some("2026-12-01".into()),
-                priority: Some("urgent".into()),
-                tags: Some(vec!["work".into()]),
-                checklist: Some(vec![ChecklistItem { text: "Find number".into(), done: true }.into(), ChecklistItem { text: "Call".into(), done: false }.into()]),
-                ..Default::default()
-            })
+            .update(
+                &sam.id,
+                crate::tasks::TaskFields {
+                    due: Some("2026-12-01".into()),
+                    priority: Some("urgent".into()),
+                    tags: Some(vec!["work".into()]),
+                    checklist: Some(vec![
+                        ChecklistItem {
+                            text: "Find number".into(),
+                            done: true,
+                        }
+                        .into(),
+                        ChecklistItem {
+                            text: "Call".into(),
+                            done: false,
+                        }
+                        .into(),
+                    ]),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let done = tasks.add("Old", "", "you").unwrap();
         tasks.set_done(&done.id, true).unwrap();
@@ -170,28 +199,69 @@ mod tests {
         }))
         .unwrap();
         gh.body = Some("The cart loses items on reload.".into());
-        GithubStore::new(&d).save_fetch(vec![gh], &[], 1000).unwrap();
+        GithubStore::new(&d)
+            .save_fetch(vec![gh], &[], 1000)
+            .unwrap();
 
         let mut cu = crate::clickup_list::tests::item("86a", 5);
         cu.priority = Some("high".into());
         cu.description = Some("Write the notes for the release.".into());
-        ClickupStore::new(&d).save("acct", crate::clickup::MyTasks { items: vec![cu], cut: vec![] }, 2000).unwrap();
+        ClickupStore::new(&d)
+            .save(
+                "acct",
+                crate::clickup::MyTasks {
+                    items: vec![cu],
+                    cut: vec![],
+                },
+                2000,
+            )
+            .unwrap();
 
         let o = build(&d, Some("acct")).unwrap();
-        assert_eq!(o["local_tasks"].as_array().unwrap().len(), 1, "done tasks are left out");
+        assert_eq!(
+            o["local_tasks"].as_array().unwrap().len(),
+            1,
+            "done tasks are left out"
+        );
         assert_eq!(o["local_tasks"][0]["summary"], "Before 5pm.");
+        assert_eq!(o["local_tasks"][0]["key"], format!("task:{}", sam.id));
+        assert_eq!(o["github"]["items"][0]["key"], "github:acme/shop#7");
+        assert_eq!(o["clickup"]["tasks"][0]["key"], "clickup:86a");
         let t = &o["local_tasks"][0];
-        assert_eq!((&t["due"], &t["priority"], &t["tags"], &t["checklist"]), (&json!("2026-12-01"), &json!("urgent"), &json!(["work"]), &json!("1 of 2 done")));
-        assert!(t.get("start").is_none(), "a field that is not set is left out");
+        assert_eq!(
+            (&t["due"], &t["priority"], &t["tags"], &t["checklist"]),
+            (
+                &json!("2026-12-01"),
+                &json!("urgent"),
+                &json!(["work"]),
+                &json!("1 of 2 done")
+            )
+        );
+        assert!(
+            t.get("start").is_none(),
+            "a field that is not set is left out"
+        );
         assert_eq!(o["github"]["fetched_at"], 1000);
-        assert_eq!(o["github"]["items"][0]["summary"], "The cart loses items on reload.", "the download saved the body");
+        assert_eq!(
+            o["github"]["items"][0]["summary"], "The cart loses items on reload.",
+            "the download saved the body"
+        );
         assert_eq!(o["clickup"]["tasks"][0]["priority"], "high");
-        assert_eq!(o["clickup"]["tasks"][0]["summary"], "Write the notes for the release.");
+        assert_eq!(
+            o["clickup"]["tasks"][0]["summary"],
+            "Write the notes for the release."
+        );
         assert_eq!(o["clickup"]["fetched_at"], 2000);
-        assert!(build(&d, None).unwrap().get("clickup").is_none(), "no ClickUp part when it is not connected");
+        assert!(
+            build(&d, None).unwrap().get("clickup").is_none(),
+            "no ClickUp part when it is not connected"
+        );
         // A new ClickUp account with no download yet: no time, no tasks.
         let other = build(&d, Some("new-acct")).unwrap();
-        assert_eq!(other["clickup"]["fetched_at"], 0, "the old account's time is not shown");
+        assert_eq!(
+            other["clickup"]["fetched_at"], 0,
+            "the old account's time is not shown"
+        );
         assert_eq!(other["clickup"]["tasks"].as_array().unwrap().len(), 0);
         std::fs::remove_dir_all(&d).unwrap();
     }

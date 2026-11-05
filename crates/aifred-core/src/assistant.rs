@@ -10,6 +10,25 @@ use crate::backend::{AskRequest, AskStats, Backend, Event, OnEvent, ToolServer};
 use crate::history::{History, Turn};
 use crate::memory::MemoryStore;
 use crate::tasks::TaskStore;
+use crate::uploads::{self, FileRef};
+
+/// The day of a plan chat, for the tasks tool server. The plan tools use it
+/// when the AI gives no day (aifred-tools, tasks.rs).
+pub const PLAN_DAY_ENV: &str = "AIFRED_PLAN_DAY";
+
+/// What the user picked for one message.
+#[derive(Debug, Clone, Default)]
+pub struct AskOptions {
+    /// Some: the model for this message (None in it: the default model).
+    /// None: the model that the user picked last in the chat box.
+    pub model: Option<Option<String>>,
+    /// The ids of the files that the user sent with the message (uploads.rs).
+    pub files: Vec<String>,
+}
+
+/// At most this many characters of an item's description go into each
+/// message of the item's chat.
+const ITEM_CONTEXT_CHARS: usize = 6000;
 
 const BASE_RULES: &str = "\
 You are aifred, the user's personal assistant.
@@ -26,7 +45,9 @@ You are aifred, the user's personal assistant.
 - Add a fact to memory only when the user tells you something lasting about themselves or their work. Do not add a fact that is already in memory.
 - Search old chats when the user refers to an earlier conversation.
 - When the user asks what to do, what is open, or for a plan, call overview first. It has all open items with a short summary each. Open the details of an item only when its summary is not enough.
-- When the user asks about a topic, use search_tasks, search_my_items, or search_my_tasks.";
+- When the user asks about a topic, use search_tasks, search_my_items, or search_my_tasks.
+- When you name an item from the overview, link it to its key, for example [the PayPal bug](item:github:acme/shop#7). The app opens the item from this link. Give the web link too when the user may want it.
+- The day plan is the user's order of work for one day. Read it with day_plan. Change it with set_day_plan only when the user asks you to plan the day or to change the plan.";
 
 /// Memory up to this size goes into the AI instructions in full. Above it,
 /// only the core facts go there, and each message gets the facts that match it.
@@ -69,6 +90,17 @@ pub struct Answer {
     pub memory: Vec<String>,
     /// The model that the user picked for this message. None: the default.
     pub model: Option<String>,
+    /// The short line under the answer (answer_info). The window shows it
+    /// as it is, so a new answer and a saved one look the same.
+    pub info: String,
+}
+
+impl Answer {
+    /// Fills `info` from the other fields.
+    fn with_info(mut self) -> Self {
+        self.info = answer_info(&self);
+        self
+    }
 }
 
 /// Saved per backend: the session id and the running totals the backend
@@ -100,8 +132,14 @@ fn system_prompt(dir: &Path, small: bool) -> anyhow::Result<String> {
     // A large memory: only the core facts, so a new fact that is not
     // core does not change this text.
     let memory = MemoryStore::new(dir);
-    let facts = if small { memory.all_text()? } else { memory.core_text()? };
-    Ok(format!("{BASE_RULES}\n\n# What you know about the user\nSearch memory for facts that are not here.\n{facts}"))
+    let facts = if small {
+        memory.all_text()?
+    } else {
+        memory.core_text()?
+    };
+    Ok(format!(
+        "{BASE_RULES}\n\n# What you know about the user\nSearch memory for facts that are not here.\n{facts}"
+    ))
 }
 
 /// True when all facts fit in the AI instructions (4 characters count as 1 token).
@@ -124,7 +162,8 @@ impl<B: Backend> Assistant<B> {
         // Make the path full. The tool servers run in another folder
         // (the Claude work folder), so a relative path would point
         // them to a different database.
-        let dir = std::path::absolute(&dir).with_context(|| format!("bad data folder {}", dir.display()))?;
+        let dir = std::path::absolute(&dir)
+            .with_context(|| format!("bad data folder {}", dir.display()))?;
         Ok(Self {
             dir,
             backend,
@@ -151,7 +190,8 @@ impl<B: Backend> Assistant<B> {
     }
 
     fn session_path(&self) -> PathBuf {
-        self.dir.join(format!("session-{}.json", self.backend.name()))
+        self.dir
+            .join(format!("session-{}.json", self.backend.name()))
     }
 
     /// What AIfred knows about the user.
@@ -186,7 +226,9 @@ impl<B: Backend> Assistant<B> {
     /// conversations get none. Returns true when it made a summary.
     pub async fn summarize_ended(&self, conversation: i64) -> anyhow::Result<bool> {
         let _one = self.summary.lock().await;
-        let u = self.off_thread(move |d| History::new(d).unsummarized(conversation)).await?;
+        let u = self
+            .off_thread(move |d| History::new(d).unsummarized(conversation))
+            .await?;
         let chars: usize = u.turns.iter().map(|t| t.text.len()).sum();
         if u.turns.is_empty() || (u.summary.is_none() && chars < SUMMARY_MIN_CHARS) {
             return Ok(false);
@@ -200,7 +242,9 @@ impl<B: Backend> Assistant<B> {
     /// first error, so a broken login does not spend more calls.
     pub async fn summarize_old(&self) -> anyhow::Result<usize> {
         let ids = self
-            .off_thread(|d| History::new(d).ended_without_full_summary(SUMMARY_MIN_CHARS, OLD_SUMMARIES_PER_RUN))
+            .off_thread(|d| {
+                History::new(d).ended_without_full_summary(SUMMARY_MIN_CHARS, OLD_SUMMARIES_PER_RUN)
+            })
             .await?;
         let mut made = 0;
         for id in ids {
@@ -216,11 +260,15 @@ impl<B: Backend> Assistant<B> {
     /// Returns true when it made a summary. It skips the work when another
     /// summary is running.
     pub async fn summarize_if_long(&self) -> anyhow::Result<bool> {
-        let Ok(_one) = self.summary.try_lock() else { return Ok(false) };
+        let Ok(_one) = self.summary.try_lock() else {
+            return Ok(false);
+        };
         let Some(u) = self
             .off_thread(|d| {
                 let h = History::new(d);
-                h.current()?.map(|id| Ok((id, h.unsummarized(id)?))).transpose()
+                h.current()?
+                    .map(|id| Ok((id, h.unsummarized(id)?)))
+                    .transpose()
             })
             .await?
         else {
@@ -239,7 +287,9 @@ impl<B: Backend> Assistant<B> {
     /// SUMMARY_BATCH_CHARS, become the new summary. Returns true when more
     /// messages are left after this call.
     async fn summarize(&self, conversation: i64) -> anyhow::Result<bool> {
-        let u = self.off_thread(move |d| History::new(d).unsummarized(conversation)).await?;
+        let u = self
+            .off_thread(move |d| History::new(d).unsummarized(conversation))
+            .await?;
         let mut prompt = String::new();
         if let Some(s) = &u.summary {
             prompt.push_str(&format!("Earlier summary:\n{s}\n\n"));
@@ -257,11 +307,14 @@ impl<B: Backend> Assistant<B> {
             taken += 1;
             prompt.push_str(&format!("\n[{}]\n{text}\n", t.role));
         }
-        let Some(last) = taken.checked_sub(1).and_then(|i| u.ids.get(i)).copied() else { return Ok(false) };
+        let Some(last) = taken.checked_sub(1).and_then(|i| u.ids.get(i)).copied() else {
+            return Ok(false);
+        };
         let summary = self.backend.complete(SUMMARY_RULES, &prompt, None).await?;
         anyhow::ensure!(!summary.is_empty(), "the summary is empty");
         let more = taken < u.turns.len();
-        self.off_thread(move |d| History::new(d).set_summary(conversation, &summary, last)).await?;
+        self.off_thread(move |d| History::new(d).set_summary(conversation, &summary, last))
+            .await?;
         Ok(more)
     }
 
@@ -271,17 +324,28 @@ impl<B: Backend> Assistant<B> {
     /// another run is busy.
     pub async fn summarize_items(&self) -> anyhow::Result<usize> {
         use crate::summaries;
-        let Ok(mut skip) = self.item_summaries.try_lock() else { return Ok(0) };
+        let Ok(mut skip) = self.item_summaries.try_lock() else {
+            return Ok(0);
+        };
         let mut saved = 0;
         for _ in 0..summaries::MAX_CALLS {
             let skip_now = skip.clone();
-            let items = self.off_thread(move |d| summaries::pending(d, summaries::BATCH, &skip_now)).await?;
+            let items = self
+                .off_thread(move |d| summaries::pending(d, summaries::BATCH, &skip_now))
+                .await?;
             if items.is_empty() {
                 break;
             }
             // A failed call (no network, not logged in) can work next time:
             // the items are not skipped.
-            let answer = self.backend.complete(summaries::RULES, &summaries::prompt(&items), Some(summaries::MODEL)).await?;
+            let answer = self
+                .backend
+                .complete(
+                    summaries::RULES,
+                    &summaries::prompt(&items),
+                    Some(summaries::MODEL),
+                )
+                .await?;
             // The AI gave no usable summary: skip these items until the app
             // starts again, so the next runs go on to the other items.
             let parsed = match summaries::parse(&answer, items.len()) {
@@ -291,8 +355,16 @@ impl<B: Backend> Assistant<B> {
                     return Err(e);
                 }
             };
-            skip.extend(items.iter().zip(&parsed).filter(|(_, s)| s.is_none()).map(|(i, _)| i.key()));
-            saved += self.off_thread(move |d| summaries::save(d, &items, &parsed)).await?;
+            skip.extend(
+                items
+                    .iter()
+                    .zip(&parsed)
+                    .filter(|(_, s)| s.is_none())
+                    .map(|(i, _)| i.key()),
+            );
+            saved += self
+                .off_thread(move |d| summaries::save(d, &items, &parsed))
+                .await?;
         }
         Ok(saved)
     }
@@ -305,7 +377,9 @@ impl<B: Backend> Assistant<B> {
         }
         // The search can load the model, so it runs off the async thread.
         let (memory, prompt) = (self.memory(), prompt.to_string());
-        let facts = tokio::task::spawn_blocking(move || memory.search_other(&prompt, Some(ADDED_FACTS))).await??;
+        let facts =
+            tokio::task::spawn_blocking(move || memory.search_other(&prompt, Some(ADDED_FACTS)))
+                .await??;
         Ok(facts.into_iter().map(|f| f.text).collect())
     }
 
@@ -342,7 +416,10 @@ impl<B: Backend> Assistant<B> {
     /// A missing program must not stop the whole chat.
     fn tool_servers(&self) -> (Vec<ToolServer>, Vec<String>) {
         if !self.program.is_file() {
-            let notice = format!("The AI tools are off: the AIfred program {} is missing.", self.program.display());
+            let notice = format!(
+                "The AI tools are off: the AIfred program {} is missing.",
+                self.program.display()
+            );
             return (vec![], vec![notice]);
         }
         let server = |name: &str, env: Vec<(String, String)>, allowed_tools: &[&str]| ToolServer {
@@ -370,33 +447,128 @@ impl<B: Backend> Assistant<B> {
             server(
                 "tasks",
                 home_with_owners(),
-                &["overview", "list_tasks", "search_tasks", "add_task", "update_task", "complete_task"],
+                &[
+                    "overview",
+                    "list_tasks",
+                    "search_tasks",
+                    "add_task",
+                    "update_task",
+                    "complete_task",
+                    "day_plan",
+                    "set_day_plan",
+                ],
             ),
-            server("memory", home(), &["search_memory", "add_memory", "forget_memory", "search_history"]),
+            server(
+                "memory",
+                home(),
+                &[
+                    "search_memory",
+                    "add_memory",
+                    "forget_memory",
+                    "search_history",
+                ],
+            ),
             // The server searches the saved GitHub list in the data folder.
             server(
                 "github",
                 home_with_owners(),
-                &["my_issues", "review_requests", "my_pull_requests", "search_my_items", "item_details"],
+                &[
+                    "my_issues",
+                    "review_requests",
+                    "my_pull_requests",
+                    "search_my_items",
+                    "item_details",
+                ],
             ),
         ];
         // ClickUp tools only when the user connected ClickUp. The server reads
         // the token from the data folder itself, so the token never goes into
         // the tool settings file.
         if crate::clickup::token(&self.dir).is_some() {
-            servers.push(server("clickup", home(), &["my_tasks", "search_my_tasks", "task_details"]));
+            servers.push(server(
+                "clickup",
+                home(),
+                &["my_tasks", "search_my_tasks", "task_details"],
+            ));
         }
         (servers, vec![])
     }
 
     pub async fn ask(&self, prompt: &str, on_event: OnEvent<'_>) -> anyhow::Result<Answer> {
+        self.ask_with(prompt, AskOptions::default(), on_event).await
+    }
+
+    /// The saved files and their folders, for the ids in `ids`.
+    fn files(dir: &Path, ids: &[String]) -> anyhow::Result<Vec<(FileRef, PathBuf)>> {
+        ids.iter()
+            .map(|id| Ok((uploads::get(dir, id)?, uploads::path(dir, id)?)))
+            .collect()
+    }
+
+    /// The files of earlier messages that are still saved. A file that the
+    /// user removed is left out.
+    fn earlier_files(dir: &Path, turns: &[Turn]) -> Vec<(FileRef, PathBuf)> {
+        Self::saved(dir, turns.iter().flat_map(|t| t.files.iter().cloned()))
+    }
+
+    /// The files in `files` that are still saved, with their paths.
+    fn saved(dir: &Path, files: impl IntoIterator<Item = FileRef>) -> Vec<(FileRef, PathBuf)> {
+        files
+            .into_iter()
+            .filter_map(|f| {
+                let p = uploads::path(dir, &f.id).ok()?;
+                Some((f, p))
+            })
+            .collect()
+    }
+
+    /// Adds the file note to each earlier message with files, so a replay
+    /// still tells the AI where the files are.
+    fn with_file_notes(dir: &Path, turns: Vec<Turn>) -> Vec<Turn> {
+        turns
+            .into_iter()
+            .map(|mut t| {
+                let note = uploads::note(&Self::earlier_files(dir, std::slice::from_ref(&t)));
+                if !note.is_empty() {
+                    t.text = format!("{note}{}", t.text);
+                }
+                t
+            })
+            .collect()
+    }
+
+    /// The folders that the AI may read in: the folders of the files of this
+    /// message and of the earlier messages of the chat, each one time.
+    fn read_folders(now: &[(FileRef, PathBuf)], earlier: &[(FileRef, PathBuf)]) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for (_, p) in now.iter().chain(earlier) {
+            if let Some(d) = p.parent()
+                && !out.iter().any(|x| x == d)
+            {
+                out.push(d.to_path_buf());
+            }
+        }
+        out
+    }
+
+    /// A question in the main conversation.
+    pub async fn ask_with(
+        &self,
+        prompt: &str,
+        opts: AskOptions,
+        on_event: OnEvent<'_>,
+    ) -> anyhow::Result<Answer> {
         let session_path = self.session_path();
-        let (model, saved, small, summary, unsummarized, system) = self
+        let ids = opts.files.clone();
+        let (model, saved, small, summary, unsummarized, system, files, earlier_files) = self
             .off_thread({
                 let session_path = session_path.clone();
                 move |dir| {
                     // The model that the user picked last in the chat box.
-                    let model = crate::settings::chat_model(dir)?;
+                    let model = match opts.model {
+                        Some(m) => m,
+                        None => crate::settings::chat_model(dir)?,
+                    };
                     let saved: SessionState = std::fs::read(&session_path)
                         .ok()
                         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -407,11 +579,23 @@ impl<B: Backend> Assistant<B> {
                     let (summary, unsummarized) = match history.current()? {
                         Some(id) => {
                             let u = history.unsummarized(id)?;
-                            (u.summary, u.turns)
+                            (u.summary, Self::with_file_notes(dir, u.turns))
                         }
                         None => (None, vec![]),
                     };
-                    Ok((model, saved, small, summary, unsummarized, system_prompt(dir, small)?))
+                    let files = Self::files(dir, &ids)?;
+                    // A follow-up question can ask about a file of an earlier message.
+                    let earlier_files = Self::saved(dir, history.current_files()?);
+                    Ok((
+                        model,
+                        saved,
+                        small,
+                        summary,
+                        unsummarized,
+                        system_prompt(dir, small)?,
+                        files,
+                        earlier_files,
+                    ))
                 }
             })
             .await?;
@@ -424,25 +608,34 @@ impl<B: Backend> Assistant<B> {
             Ok(f) => f,
             Err(e) => {
                 // The AI can still search memory itself.
-                on_event(Event::Notice { message: format!("Cannot add facts from memory: {e:#}") });
+                on_event(Event::Notice {
+                    message: format!("Cannot add facts from memory: {e:#}"),
+                });
                 vec![]
             }
         };
+        let text = format!("{}{prompt}", uploads::note(&files));
         let req = AskRequest {
             system,
             history: unsummarized,
             summary,
-            prompt: Self::message(&Self::now(), &facts, prompt),
+            prompt: Self::message(&Self::now(), &facts, &text),
             tools,
             session: saved.id.clone(),
             model: model.clone(),
+            files: Self::read_folders(&files, &earlier_files),
+            side: false,
         };
         let res = self.backend.ask(&req, on_event).await?;
 
         // Claude reports totals for the whole conversation. A new session
         // (different id) starts its totals from zero.
         let same = res.session.is_some() && res.session == saved.id;
-        let (base_ms, base_cost) = if same { (saved.model_ms, saved.cost_usd) } else { (0, 0.0) };
+        let (base_ms, base_cost) = if same {
+            (saved.model_ms, saved.cost_usd)
+        } else {
+            (0, 0.0)
+        };
         let model_ms = res.stats.model_ms.map(|v| v.saturating_sub(base_ms));
         let cost_usd = res.stats.cost_usd.map(|v| (v - base_cost).max(0.0));
         let state = SessionState {
@@ -451,17 +644,183 @@ impl<B: Backend> Assistant<B> {
             cost_usd: res.stats.cost_usd.unwrap_or(base_cost),
         };
         let (name, prompt, text) = (self.backend.name(), prompt.to_string(), res.text.clone());
+        let refs: Vec<FileRef> = files.into_iter().map(|(f, _)| f).collect();
         self.off_thread(move |dir| {
             let history = History::new(dir);
-            history.append("user", &prompt, name)?;
+            history.append_with_files("user", &prompt, name, &refs)?;
             history.append("assistant", &text, name)?;
             std::fs::write(&session_path, serde_json::to_vec(&state)?)?;
             Ok(())
         })
         .await?;
 
-        Ok(Answer { text: res.text, stats: res.stats, model_ms, cost_usd, memory: facts, model })
+        Ok(Answer {
+            text: res.text,
+            stats: res.stats,
+            model_ms,
+            cost_usd,
+            memory: facts,
+            model,
+            info: String::new(),
+        }
+        .with_info())
     }
+
+    /// A question in a side chat (side.rs): the plan chat of a day, or the
+    /// chat of one item. `info` makes the short line under the answer.
+    pub async fn ask_side(
+        &self,
+        thread: &str,
+        prompt: &str,
+        model: Option<String>,
+        file_ids: Vec<String>,
+        on_event: OnEvent<'_>,
+    ) -> anyhow::Result<Answer> {
+        crate::side::check(thread)?;
+        let th = thread.to_string();
+        let (small, system, earlier, context, files, earlier_files) = self
+            .off_thread(move |dir| {
+                let small = memory_is_small(dir)?;
+                let earlier: Vec<Turn> = crate::side::load(dir, &th)?
+                    .into_iter()
+                    .map(|t| Turn { ts: t.ts, role: t.role, text: t.text, backend: String::new(), files: t.files })
+                    .collect();
+                // A side chat sends its messages again each time, so each
+                // earlier message with files gets its file note again.
+                let mut earlier_files = Self::earlier_files(dir, &earlier);
+                let earlier = Self::with_file_notes(dir, earlier);
+                let context = match th.split_once(':') {
+                    Some(("plan", day)) => format!(
+                        "[This is the Day plan chat for {day}. The user plans this day here. Read the plan with day_plan and the open items with overview. Change the plan with set_day_plan when the user asks you to plan or to change it. Then say in 2 or 3 short sentences what you put where, and why. Work day: {}.]\n",
+                        crate::settings::day_text(&crate::settings::load_or_default(dir))
+                    ),
+                    Some(("item", key)) => {
+                        // The files of a task: the AI may read them in its chat.
+                        let task_files = Self::saved(dir, crate::items::task_files(dir, key)?);
+                        let note = uploads::note(&task_files).replace(
+                            "The user attached these files.",
+                            "The item has these files.",
+                        );
+                        earlier_files.extend(task_files);
+                        format!(
+                            "[This chat is about one item. Answer about it, and look up more with the tools when you need to. The item is {}]\n{note}",
+                            crate::items::context(dir, key, ITEM_CONTEXT_CHARS)?
+                        )
+                    }
+                    _ => String::new(),
+                };
+                Ok((small, system_prompt(dir, small)?, earlier, context, Self::files(dir, &file_ids)?, earlier_files))
+            })
+            .await?;
+        let (mut tools, missing) = self.tool_servers();
+        for message in missing {
+            on_event(Event::Notice { message });
+        }
+        // In the plan chat of a day, the plan tools use that day when the AI
+        // gives no day. An answer that ends after midnight still changes the right plan.
+        if let Some(("plan", day)) = thread.split_once(':') {
+            for t in tools.iter_mut().filter(|t| t.name == "tasks") {
+                t.env.push((PLAN_DAY_ENV.to_string(), day.to_string()));
+            }
+        }
+        let facts = self.matching_facts(prompt, small).await.unwrap_or_default();
+        let text = format!("{context}{}{prompt}", uploads::note(&files));
+        let req = AskRequest {
+            system,
+            history: earlier,
+            summary: None,
+            prompt: Self::message(&Self::now(), &facts, &text),
+            tools,
+            session: None,
+            model: model.clone(),
+            files: Self::read_folders(&files, &earlier_files),
+            side: true,
+        };
+        let res = self.backend.ask(&req, on_event).await?;
+        let answer = Answer {
+            text: res.text,
+            model_ms: res.stats.model_ms,
+            cost_usd: res.stats.cost_usd,
+            stats: res.stats,
+            memory: facts,
+            model,
+            info: String::new(),
+        }
+        .with_info();
+        let (th, q, a, info) = (
+            thread.to_string(),
+            prompt.to_string(),
+            answer.text.clone(),
+            answer.info.clone(),
+        );
+        let refs: Vec<FileRef> = files.into_iter().map(|(f, _)| f).collect();
+        self.off_thread(move |dir| crate::side::append_pair(dir, &th, &q, &refs, &a, &info))
+            .await?;
+        Ok(answer)
+    }
+
+    /// Writes the brief of `day` (brief.rs) in one AI call, and saves it with
+    /// the time guesses for the open items that have none.
+    pub async fn write_brief(&self, day: &str) -> anyhow::Result<crate::brief::Brief> {
+        let d = day.to_string();
+        let (prompt, known) = self
+            .off_thread(move |dir| {
+                let account = crate::clickup::token(dir).map(|t| crate::clickup::account_key(&t));
+                let overview = crate::overview::build(dir, account.as_deref())?;
+                let known = crate::brief::keys(&overview);
+                let guesses = crate::plan::estimates(dir)?;
+                let needs: Vec<String> = known
+                    .iter()
+                    .filter(|k| !guesses.contains_key(*k))
+                    .cloned()
+                    .collect();
+                let plan = crate::plan::get(dir, &d)?
+                    .map(|p| serde_json::to_value(p.items))
+                    .transpose()?
+                    .unwrap_or_default();
+                let day_text = crate::settings::day_text(&crate::settings::load_or_default(dir));
+                let prompt =
+                    crate::brief::prompt(&overview, &Self::now(), &day_text, &plan, &needs);
+                Ok((prompt, known))
+            })
+            .await?;
+        let answer = self
+            .backend
+            .complete(crate::brief::RULES, &prompt, Some(crate::brief::MODEL))
+            .await?;
+        let (text, why, minutes) = crate::brief::parse(&answer, &known)?;
+        let brief = crate::brief::Brief {
+            day: day.into(),
+            written: crate::files::now(),
+            text,
+            why,
+        };
+        let b = brief.clone();
+        self.off_thread(move |dir| crate::brief::save(dir, &b, &minutes))
+            .await?;
+        Ok(brief)
+    }
+}
+
+/// The short line under an answer: the time, the model, the lookups, and the cost.
+pub fn answer_info(a: &Answer) -> String {
+    let mut parts = vec![format!("{:.1}s", a.stats.total_ms as f64 / 1000.0)];
+    if let Some(m) = &a.model {
+        let mut c = m.chars();
+        parts.push(
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default(),
+        );
+    }
+    let n = a.stats.tool_calls.len();
+    if n > 0 {
+        parts.push(format!("{n} lookup{}", if n == 1 { "" } else { "s" }));
+    }
+    if let Some(c) = a.cost_usd {
+        parts.push(format!("~${c:.3} usage"));
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]
@@ -470,12 +829,16 @@ mod tests {
     use crate::backend::claude::ClaudeBackend;
 
     fn assistant(dir: PathBuf, program: PathBuf) -> Assistant<ClaudeBackend> {
-        let backend = ClaudeBackend { work_dir: dir.join("claude"), model: None };
+        let backend = ClaudeBackend {
+            work_dir: dir.join("claude"),
+            model: None,
+        };
         Assistant::new(dir, backend, program).unwrap()
     }
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("aifred-assistant-{name}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("aifred-assistant-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -489,6 +852,12 @@ mod tests {
         histories: std::sync::Mutex<Vec<Vec<Turn>>>,
         models: std::sync::Mutex<Vec<Option<String>>>,
         item_calls: std::sync::Mutex<Vec<String>>,
+        /// The prompt, the file folders, and the side flag of each ask.
+        asks: std::sync::Mutex<Vec<(String, Vec<PathBuf>, bool)>>,
+        /// The answer of the brief call. Empty: a good default answer.
+        brief: std::sync::Mutex<String>,
+        /// The tool servers of each ask.
+        tools: std::sync::Mutex<Vec<Vec<ToolServer>>>,
     }
 
     impl Backend for FakeBackend {
@@ -496,20 +865,49 @@ mod tests {
             "fake"
         }
 
-        async fn ask(&self, req: &AskRequest, _on_event: OnEvent<'_>) -> anyhow::Result<crate::backend::AskResponse> {
+        async fn ask(
+            &self,
+            req: &AskRequest,
+            _on_event: OnEvent<'_>,
+        ) -> anyhow::Result<crate::backend::AskResponse> {
             self.summaries.lock().unwrap().push(req.summary.clone());
             self.histories.lock().unwrap().push(req.history.clone());
+            self.tools.lock().unwrap().push(req.tools.clone());
             self.models.lock().unwrap().push(req.model.clone());
-            Ok(crate::backend::AskResponse { text: "ok".into(), session: None, stats: AskStats::default() })
+            self.asks
+                .lock()
+                .unwrap()
+                .push((req.prompt.clone(), req.files.clone(), req.side));
+            Ok(crate::backend::AskResponse {
+                text: "ok".into(),
+                session: None,
+                stats: AskStats::default(),
+            })
         }
 
-        async fn complete(&self, system: &str, prompt: &str, model: Option<&str>) -> anyhow::Result<String> {
+        async fn complete(
+            &self,
+            system: &str,
+            prompt: &str,
+            model: Option<&str>,
+        ) -> anyhow::Result<String> {
+            if system == crate::brief::RULES {
+                assert_eq!(model, Some(crate::brief::MODEL));
+                self.item_calls.lock().unwrap().push(prompt.to_string());
+                let b = self.brief.lock().unwrap().clone();
+                return Ok(b);
+            }
             if system == crate::summaries::RULES {
-                assert_eq!(model, Some(crate::summaries::MODEL), "item summaries use the fast model");
+                assert_eq!(
+                    model,
+                    Some(crate::summaries::MODEL),
+                    "item summaries use the fast model"
+                );
                 self.item_calls.lock().unwrap().push(prompt.to_string());
                 let n = prompt.matches("### Item ").count();
-                let all: serde_json::Map<String, serde_json::Value> =
-                    (1..=n).map(|i| (i.to_string(), format!("summary {i}").into())).collect();
+                let all: serde_json::Map<String, serde_json::Value> = (1..=n)
+                    .map(|i| (i.to_string(), format!("summary {i}").into()))
+                    .collect();
                 return Ok(serde_json::Value::Object(all).to_string());
             }
             assert!(system.contains("summary"));
@@ -521,7 +919,10 @@ mod tests {
 
     fn fake(name: &str) -> (Assistant<FakeBackend>, PathBuf) {
         let dir = temp(name);
-        (Assistant::new(dir.clone(), FakeBackend::default(), dir.join("no-tools")).unwrap(), dir)
+        (
+            Assistant::new(dir.clone(), FakeBackend::default(), dir.join("no-tools")).unwrap(),
+            dir,
+        )
     }
 
     #[tokio::test]
@@ -531,7 +932,10 @@ mod tests {
         a.ask("hi", &mut quiet).await.unwrap();
         crate::settings::set_chat_model(&dir, Some("haiku")).unwrap();
         let ans = a.ask("hi again", &mut quiet).await.unwrap();
-        assert_eq!(*a.backend.models.lock().unwrap(), vec![None, Some("haiku".to_string())]);
+        assert_eq!(
+            *a.backend.models.lock().unwrap(),
+            vec![None, Some("haiku".to_string())]
+        );
         assert_eq!(ans.model.as_deref(), Some("haiku"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -540,16 +944,42 @@ mod tests {
     async fn long_task_descriptions_get_summaries_in_groups() {
         let (a, dir) = fake("item-summaries");
         for i in 0..20 {
-            a.tasks().add(&format!("Task {i}"), &"Plan the release with the team. ".repeat(20), "you").unwrap();
+            a.tasks()
+                .add(
+                    &format!("Task {i}"),
+                    &"Plan the release with the team. ".repeat(20),
+                    "you",
+                )
+                .unwrap();
         }
         a.tasks().add("Short", "Call Sam.", "you").unwrap();
         assert_eq!(a.summarize_items().await.unwrap(), 20);
-        assert_eq!(a.backend.item_calls.lock().unwrap().len(), 2, "15 items in one call, then 5");
+        assert_eq!(
+            a.backend.item_calls.lock().unwrap().len(),
+            2,
+            "15 items in one call, then 5"
+        );
         assert_eq!(a.summarize_items().await.unwrap(), 0, "nothing left to do");
-        assert_eq!(a.backend.item_calls.lock().unwrap().len(), 2, "no AI call when nothing is missing");
+        assert_eq!(
+            a.backend.item_calls.lock().unwrap().len(),
+            2,
+            "no AI call when nothing is missing"
+        );
         let o = crate::overview::build(&dir, None).unwrap();
-        let summaries: Vec<&str> = o["local_tasks"].as_array().unwrap().iter().map(|t| t["summary"].as_str().unwrap()).collect();
-        assert!(summaries.contains(&"Call Sam.") && summaries.iter().filter(|s| s.starts_with("summary ")).count() == 20);
+        let summaries: Vec<&str> = o["local_tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["summary"].as_str().unwrap())
+            .collect();
+        assert!(
+            summaries.contains(&"Call Sam.")
+                && summaries
+                    .iter()
+                    .filter(|s| s.starts_with("summary "))
+                    .count()
+                    == 20
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -558,11 +988,19 @@ mod tests {
         let (a, dir) = fake("summary-old");
         a.history().append("user", "Hi", "fake").unwrap();
         a.new_conversation().unwrap();
-        a.history().append("user", &"Plan the Bali trip. ".repeat(150), "fake").unwrap();
+        a.history()
+            .append("user", &"Plan the Bali trip. ".repeat(150), "fake")
+            .unwrap();
         let long = a.new_conversation().unwrap().unwrap();
         // The current conversation never gets a summary here.
-        a.history().append("user", &"Book the flights. ".repeat(150), "fake").unwrap();
-        assert_eq!(a.summarize_old().await.unwrap(), 1, "only the long ended conversation");
+        a.history()
+            .append("user", &"Book the flights. ".repeat(150), "fake")
+            .unwrap();
+        assert_eq!(
+            a.summarize_old().await.unwrap(),
+            1,
+            "only the long ended conversation"
+        );
         assert!(a.history().unsummarized(long).unwrap().turns.is_empty());
         assert_eq!(a.summarize_old().await.unwrap(), 0, "nothing left to do");
         assert_eq!(a.backend.prompts.lock().unwrap().len(), 1);
@@ -574,13 +1012,24 @@ mod tests {
         let (a, dir) = fake("summary-ended");
         a.history().append("user", "Hi", "fake").unwrap();
         let short = a.new_conversation().unwrap().unwrap();
-        assert!(!a.summarize_ended(short).await.unwrap(), "a short chat costs no AI call");
-        a.history().append("user", &"Plan the Bali trip. ".repeat(150), "fake").unwrap();
+        assert!(
+            !a.summarize_ended(short).await.unwrap(),
+            "a short chat costs no AI call"
+        );
+        a.history()
+            .append("user", &"Plan the Bali trip. ".repeat(150), "fake")
+            .unwrap();
         let long = a.new_conversation().unwrap().unwrap();
         assert!(a.summarize_ended(long).await.unwrap());
-        assert!(!a.summarize_ended(long).await.unwrap(), "no new messages, no new summary");
+        assert!(
+            !a.summarize_ended(long).await.unwrap(),
+            "no new messages, no new summary"
+        );
         assert_eq!(a.backend.prompts.lock().unwrap().len(), 1);
-        assert_eq!(a.history().search_summaries("summary", None).unwrap()[0].conversation, long);
+        assert_eq!(
+            a.history().search_summaries("summary", None).unwrap()[0].conversation,
+            long
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -591,24 +1040,50 @@ mod tests {
         for _ in 0..8 {
             a.history().append("user", &msg, "fake").unwrap();
         }
-        assert!(!a.summarize_if_long().await.unwrap(), "20,000 tokens is not more than the limit");
-        a.history().append("assistant", "One more answer.", "fake").unwrap();
+        assert!(
+            !a.summarize_if_long().await.unwrap(),
+            "20,000 tokens is not more than the limit"
+        );
+        a.history()
+            .append("assistant", "One more answer.", "fake")
+            .unwrap();
         assert!(a.summarize_if_long().await.unwrap());
-        assert_eq!(a.history().current_summary().unwrap().as_deref(), Some("- summary 1"));
+        assert_eq!(
+            a.history().current_summary().unwrap().as_deref(),
+            Some("- summary 1")
+        );
         a.history().append("user", "Short", "fake").unwrap();
-        assert!(!a.summarize_if_long().await.unwrap(), "only a few new tokens");
+        assert!(
+            !a.summarize_if_long().await.unwrap(),
+            "only a few new tokens"
+        );
         for _ in 0..9 {
             a.history().append("user", &msg, "fake").unwrap();
         }
         assert!(a.summarize_if_long().await.unwrap());
         let prompts = a.backend.prompts.lock().unwrap().clone();
-        assert!(prompts[1].starts_with("Earlier summary:\n- summary 1"), "the new summary builds on the old one");
-        assert!(!prompts[1].contains("One more answer."), "old messages are not sent again");
+        assert!(
+            prompts[1].starts_with("Earlier summary:\n- summary 1"),
+            "the new summary builds on the old one"
+        );
+        assert!(
+            !prompts[1].contains("One more answer."),
+            "old messages are not sent again"
+        );
         assert!(prompts[1].contains("[user]\nShort"));
 
         // The next question carries the summary, for a lost session.
         a.ask("Next", &mut |_| {}).await.unwrap();
-        assert_eq!(a.backend.summaries.lock().unwrap().last().unwrap().as_deref(), Some("- summary 2"));
+        assert_eq!(
+            a.backend
+                .summaries
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .as_deref(),
+            Some("- summary 2")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -624,10 +1099,17 @@ mod tests {
         assert!(a.summarize_if_long().await.unwrap());
         let prompts = a.backend.prompts.lock().unwrap().clone();
         assert_eq!(prompts.len(), 3, "100,000 characters for each call");
-        assert!(prompts.iter().all(|p| p.len() < SUMMARY_BATCH_CHARS + 20_000));
+        assert!(
+            prompts
+                .iter()
+                .all(|p| p.len() < SUMMARY_BATCH_CHARS + 20_000)
+        );
         assert!(prompts[1].starts_with("Earlier summary:\n- summary 1"));
         let id = a.history().current().unwrap().unwrap();
-        assert!(a.history().unsummarized(id).unwrap().turns.is_empty(), "all messages are in the summary");
+        assert!(
+            a.history().unsummarized(id).unwrap().turns.is_empty(),
+            "all messages are in the summary"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -640,11 +1122,17 @@ mod tests {
         }
         assert!(a.summarize_if_long().await.unwrap());
         for i in 0..15 {
-            a.history().append("user", &format!("after {i}"), "fake").unwrap();
+            a.history()
+                .append("user", &format!("after {i}"), "fake")
+                .unwrap();
         }
         a.ask("Next", &mut |_| {}).await.unwrap();
         let sent = a.backend.histories.lock().unwrap().last().unwrap().clone();
-        assert_eq!(sent.len(), 15, "every turn after the summary, not only the last 10");
+        assert_eq!(
+            sent.len(),
+            15,
+            "every turn after the summary, not only the last 10"
+        );
         assert_eq!(sent[0].text, "after 0");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -654,10 +1142,15 @@ mod tests {
         let dir = temp("small-memory");
         let a = assistant(dir.clone(), dir.clone());
         a.memory().add("I like tea", "you", true).unwrap();
-        a.memory().add("The office wifi is slow on Mondays", "aifred", false).unwrap();
+        a.memory()
+            .add("The office wifi is slow on Mondays", "aifred", false)
+            .unwrap();
         assert!(memory_is_small(&a.dir).unwrap());
         let p = system_prompt(&a.dir, true).unwrap();
-        assert!(p.contains("- I like tea") && p.contains("- The office wifi"), "{p}");
+        assert!(
+            p.contains("- I like tea") && p.contains("- The office wifi"),
+            "{p}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -666,7 +1159,9 @@ mod tests {
         let dir = temp("large-memory");
         let a = assistant(dir.clone(), dir.clone());
         a.memory().add("I like tea", "you", true).unwrap();
-        a.memory().add("Sam sends the hosting invoice each month", "aifred", false).unwrap();
+        a.memory()
+            .add("Sam sends the hosting invoice each month", "aifred", false)
+            .unwrap();
         // More than 2,000 tokens of other facts.
         for i in 0..150 {
             a.memory().add(&format!("Fact number {i} about the garden and the old shed in the yard behind the house"), "aifred", false).unwrap();
@@ -674,22 +1169,40 @@ mod tests {
         assert!(!memory_is_small(&a.dir).unwrap());
         let before = system_prompt(&a.dir, false).unwrap();
         assert!(before.contains("- I like tea"), "core facts stay");
-        assert!(!before.contains("invoice"), "other facts are not in the instructions");
+        assert!(
+            !before.contains("invoice"),
+            "other facts are not in the instructions"
+        );
 
-        let facts = a.matching_facts("When does the hosting invoice come?", false).await.unwrap();
+        let facts = a
+            .matching_facts("When does the hosting invoice come?", false)
+            .await
+            .unwrap();
         assert_eq!(facts[0], "Sam sends the hosting invoice each month");
         assert!(facts.len() <= ADDED_FACTS as usize);
-        assert!(!facts.contains(&"I like tea".to_string()), "core facts are already in the instructions");
+        assert!(
+            !facts.contains(&"I like tea".to_string()),
+            "core facts are already in the instructions"
+        );
 
-        a.memory().add("A new fact that is not core", "aifred", false).unwrap();
-        assert_eq!(system_prompt(&a.dir, false).unwrap(), before, "the instructions stay the same");
+        a.memory()
+            .add("A new fact that is not core", "aifred", false)
+            .unwrap();
+        assert_eq!(
+            system_prompt(&a.dir, false).unwrap(),
+            before,
+            "the instructions stay the same"
+        );
 
         let m = Assistant::<ClaudeBackend>::message("Monday", &facts[..1], "When?");
         assert_eq!(
             m,
             "[Now: Monday]\n[Facts from memory that can help with this message:\n- Sam sends the hosting invoice each month\n]\nWhen?"
         );
-        assert_eq!(Assistant::<ClaudeBackend>::message("Monday", &[], "When?"), "[Now: Monday]\nWhen?");
+        assert_eq!(
+            Assistant::<ClaudeBackend>::message("Monday", &[], "When?"),
+            "[Now: Monday]\nWhen?"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -722,13 +1235,23 @@ mod tests {
         let a = assistant(dir.clone(), dir.join("aifred"));
         let (servers, missing) = a.tool_servers();
         assert!(missing.is_empty(), "got {missing:?}");
-        let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).filter(|n| *n != "clickup").collect();
+        let names: Vec<_> = servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .filter(|n| *n != "clickup")
+            .collect();
         assert_eq!(names, ["tasks", "memory", "github"]);
         let tasks = &servers[0];
         assert_eq!(tasks.command, dir.join("aifred"));
         assert_eq!(tasks.args, ["tool", "tasks"]);
-        assert_eq!(tasks.env[0], ("AIFRED_HOME".to_string(), a.dir.display().to_string()));
-        assert_eq!(servers[1].env, vec![("AIFRED_HOME".to_string(), a.dir.display().to_string())]);
+        assert_eq!(
+            tasks.env[0],
+            ("AIFRED_HOME".to_string(), a.dir.display().to_string())
+        );
+        assert_eq!(
+            servers[1].env,
+            vec![("AIFRED_HOME".to_string(), a.dir.display().to_string())]
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -737,16 +1260,273 @@ mod tests {
         let dir = temp("clickup-tool");
         std::fs::write(dir.join("aifred"), "").unwrap();
         let a = assistant(dir.clone(), dir.join("aifred"));
-        let names = |a: &Assistant<ClaudeBackend>| a.tool_servers().0.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        let names = |a: &Assistant<ClaudeBackend>| {
+            a.tool_servers()
+                .0
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
+        };
         if std::env::var_os("AIFRED_CLICKUP_TOKEN").is_none() {
-            assert!(!names(&a).contains(&"clickup".to_string()), "no token, no ClickUp tools");
+            assert!(
+                !names(&a).contains(&"clickup".to_string()),
+                "no token, no ClickUp tools"
+            );
         }
         crate::clickup::save_token(&a.dir, "pk_1_SECRET").unwrap();
         let (servers, _) = a.tool_servers();
-        let s = servers.iter().find(|s| s.name == "clickup").expect("ClickUp tools start");
-        assert_eq!(s.allowed_tools, vec!["my_tasks", "search_my_tasks", "task_details"], "read-only tools only");
+        let s = servers
+            .iter()
+            .find(|s| s.name == "clickup")
+            .expect("ClickUp tools start");
+        assert_eq!(
+            s.allowed_tools,
+            vec!["my_tasks", "search_my_tasks", "task_details"],
+            "read-only tools only"
+        );
         assert_eq!(s.args, ["tool", "clickup"]);
-        assert!(!format!("{:?}", s.env).contains("SECRET"), "the token stays out of the tool settings");
+        assert!(
+            !format!("{:?}", s.env).contains("SECRET"),
+            "the token stays out of the tool settings"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_side_chat_keeps_its_own_messages_and_knows_its_item() {
+        let d = temp("side");
+        let a = Assistant::new(d.clone(), FakeBackend::default(), d.join("none")).unwrap();
+        let t = a.tasks().add("Pay rent", "Before Friday.", "you").unwrap();
+        let thread = format!("item:task:{}", t.id);
+        a.ask_side(
+            &thread,
+            "When is it due?",
+            Some("haiku".into()),
+            vec![],
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        a.ask_side(&thread, "And now?", None, vec![], &mut |_| {})
+            .await
+            .unwrap();
+        a.ask_side("plan:2026-11-04", "Plan my day", None, vec![], &mut |_| {})
+            .await
+            .unwrap();
+        let asks = a.backend.asks.lock().unwrap().clone();
+        assert!(
+            asks.iter().all(|(_, _, side)| *side),
+            "side chats run apart from the main chat"
+        );
+        assert!(
+            asks[0].0.contains("Pay rent") && asks[0].0.contains("When is it due?"),
+            "{}",
+            asks[0].0
+        );
+        assert!(
+            asks[2].0.contains("Day plan chat for 2026-11-04"),
+            "{}",
+            asks[2].0
+        );
+        let h = a.backend.histories.lock().unwrap().clone();
+        assert_eq!(
+            h[1].iter().map(|t| t.text.as_str()).collect::<Vec<_>>(),
+            ["When is it due?", "ok"],
+            "the second message gets the first again"
+        );
+        assert!(h[2].is_empty(), "the plan chat does not get the item chat");
+        assert_eq!(
+            a.backend.models.lock().unwrap()[0].as_deref(),
+            Some("haiku")
+        );
+        assert!(
+            a.turns().unwrap().is_empty(),
+            "the main conversation stays empty"
+        );
+        let saved = crate::side::load(&d, &thread).unwrap();
+        assert_eq!(saved.len(), 4);
+        assert!(saved[1].info.as_deref().unwrap().contains("Haiku"));
+        assert!(
+            a.ask_side("main", "Hi", None, vec![], &mut |_| {})
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn files_go_with_the_message_and_only_their_folders_can_be_read() {
+        let d = temp("files");
+        let a = Assistant::new(d.clone(), FakeBackend::default(), d.join("none")).unwrap();
+        let f = crate::uploads::save(&d, "notes.txt", b"hello").unwrap();
+        let opts = AskOptions {
+            model: Some(Some("sonnet".into())),
+            files: vec![f.id.clone()],
+        };
+        a.ask_with("Read this", opts, &mut |_| {}).await.unwrap();
+        let (prompt, folders, side) = a.backend.asks.lock().unwrap()[0].clone();
+        assert!(!side);
+        assert_eq!(folders, vec![crate::uploads::folder(&d, &f.id).unwrap()]);
+        assert!(
+            prompt.contains("notes.txt") && prompt.contains("Read this"),
+            "{prompt}"
+        );
+        assert_eq!(
+            a.backend.models.lock().unwrap()[0].as_deref(),
+            Some("sonnet"),
+            "the pick for this message wins"
+        );
+        let turns = a.turns().unwrap();
+        assert_eq!(turns[0].files, vec![f]);
+        assert_eq!(
+            turns[0].text, "Read this",
+            "the history keeps the user's own words"
+        );
+        let bad = AskOptions {
+            files: vec!["../x".into()],
+            ..Default::default()
+        };
+        assert!(a.ask_with("Hi", bad, &mut |_| {}).await.is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_chat_of_a_task_can_read_the_files_of_the_task() {
+        let d = temp("task-files");
+        let a = Assistant::new(d.clone(), FakeBackend::default(), d.join("none")).unwrap();
+        let f = crate::uploads::save(&d, "invoice.pdf", b"%PDF").unwrap();
+        let t = a.tasks().add("Pay invoice", "", "you").unwrap();
+        a.tasks()
+            .update(
+                &t.id,
+                crate::tasks::TaskFields {
+                    files: Some(vec![f.id.clone()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        a.ask_side(
+            &format!("item:task:{}", t.id),
+            "What does the file say?",
+            None,
+            vec![],
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let (prompt, folders, _) = a.backend.asks.lock().unwrap()[0].clone();
+        assert_eq!(folders, vec![crate::uploads::folder(&d, &f.id).unwrap()]);
+        assert!(
+            prompt.contains("The item has these files") && prompt.contains("invoice.pdf"),
+            "{prompt}"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_plan_tools_of_a_plan_chat_get_the_day_of_the_chat() {
+        let d = temp("plan-day");
+        std::fs::write(d.join("aifred"), "").unwrap();
+        let a = Assistant::new(d.clone(), FakeBackend::default(), d.join("aifred")).unwrap();
+        a.ask_side("plan:2026-11-04", "Plan my day.", None, vec![], &mut |_| {})
+            .await
+            .unwrap();
+        let t = a.tasks().add("Call Sam", "", "you").unwrap();
+        a.ask_side(
+            &format!("item:task:{}", t.id),
+            "Hi",
+            None,
+            vec![],
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let tools = a.backend.tools.lock().unwrap().clone();
+        let day = |servers: &[ToolServer]| {
+            servers
+                .iter()
+                .find(|s| s.name == "tasks")
+                .unwrap()
+                .env
+                .iter()
+                .find(|(k, _)| k == PLAN_DAY_ENV)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(day(&tools[0]).as_deref(), Some("2026-11-04"));
+        assert_eq!(tools.len(), 2);
+        assert_eq!(day(&tools[1]), None, "only the plan chat gets a day");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_question_can_read_the_files_of_earlier_messages() {
+        let d = temp("follow");
+        let a = Assistant::new(d.clone(), FakeBackend::default(), d.join("none")).unwrap();
+        let f = crate::uploads::save(&d, "notes.txt", b"hello").unwrap();
+        let folder = crate::uploads::folder(&d, &f.id).unwrap();
+        a.ask_with(
+            "Read this",
+            AskOptions {
+                files: vec![f.id.clone()],
+                ..Default::default()
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        a.ask_with("What does it say?", AskOptions::default(), &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            a.backend.asks.lock().unwrap()[1].1,
+            vec![folder.clone()],
+            "the main chat"
+        );
+        a.ask_side(
+            "plan:2026-11-04",
+            "Read this",
+            None,
+            vec![f.id.clone()],
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        a.ask_side("plan:2026-11-04", "And page 3?", None, vec![], &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            a.backend.asks.lock().unwrap()[3].1,
+            vec![folder],
+            "the side chat"
+        );
+        let h = a.backend.histories.lock().unwrap().clone();
+        assert!(
+            h[3][0].text.contains("notes.txt") && h[3][0].text.contains("Read this"),
+            "the replay keeps the file note: {}",
+            h[3][0].text
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_brief_is_saved_with_reasons_and_time_guesses() {
+        let d = temp("brief");
+        let a = Assistant::new(d.clone(), FakeBackend::default(), d.join("none")).unwrap();
+        let t = a.tasks().add("Pay rent", "", "you").unwrap();
+        let key = format!("task:{}", t.id);
+        *a.backend.brief.lock().unwrap() =
+            serde_json::json!({ "text": format!("One thing: [rent](item:{key})."), "why": { &key: "Due today." }, "minutes": { &key: 15 } }).to_string();
+        let b = a.write_brief("2026-11-04").await.unwrap();
+        assert_eq!(b.why[&key], "Due today.");
+        assert_eq!(crate::brief::get(&d, "2026-11-04").unwrap(), Some(b));
+        assert_eq!(crate::plan::estimates(&d).unwrap()[&key].minutes, 15);
+        let prompt = a.backend.item_calls.lock().unwrap()[0].clone();
+        assert!(
+            prompt.contains(&key) && prompt.contains("needs_guess"),
+            "{prompt}"
+        );
+        *a.backend.brief.lock().unwrap() = "not json".into();
+        assert!(a.write_brief("2026-11-05").await.is_err());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -2,9 +2,27 @@
 // the Rust app (src-tauri/src/main.rs), but keeps everything in memory.
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Answer, ClickupItem, Fact, GithubItem, ProgressEvent, Settings, Task, TaskChanges, Turn, UpdateStatus } from "../api";
+import { DEFAULT_SETTINGS } from "../api";
+import type {
+  Answer,
+  Brief,
+  ClickupItem,
+  DayPlan,
+  Estimate,
+  Fact,
+  FileRef,
+  GithubItem,
+  ItemDetails,
+  ProgressEvent,
+  Settings,
+  SideTurn,
+  Task,
+  TaskChanges,
+  Turn,
+  UpdateStatus,
+} from "../api";
 
-type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void) => Promise<Answer> | Answer;
+type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void, args: Record<string, any>) => Promise<Answer> | Answer;
 
 export type Fake = {
   tasks: Task[];
@@ -16,6 +34,8 @@ export type Fake = {
   /** Runs after the list is made and before it is returned. Return a
    * promise to hold the answer, like a slow GitHub. */
   onGithubItems?: (force: boolean) => Promise<void> | void;
+  /** Runs before day_plan answers. A test can hold the plan load with it. */
+  onDayPlan?: (day: string) => Promise<void> | void;
   /** How many times the window asked GitHub (not the saved list). */
   githubFetches: number;
   /** The ClickUp token, or "" when ClickUp is not connected. */
@@ -45,6 +65,22 @@ export type Fake = {
   /** Every command the window called, in order. */
   calls: { cmd: string; args: Record<string, unknown> }[];
   onAsk: AskHandler;
+  /** Answers in the side chats. The thread is in args.thread. */
+  onAskSide: AskHandler;
+  /** Day plans, by day. */
+  plans: Record<string, DayPlan>;
+  estimates: Record<string, Estimate>;
+  briefs: Record<string, Brief>;
+  /** What write_brief makes. Throw to fail it. */
+  onWriteBrief: (day: string) => Promise<Brief> | Brief;
+  side: Record<string, SideTurn[]>;
+  /** Keys of GitHub and ClickUp items that came in the last day. */
+  newKeys: string[];
+  summaries: Record<string, string>;
+  details: Record<string, string>;
+  uploads: FileRef[];
+  /** The name of the next file that the window sends. The fake cannot see the header. */
+  uploadName: string;
 };
 
 let nextId = 1;
@@ -67,6 +103,7 @@ export function task(title: string, extra: Partial<Task> = {}): Task {
     priority: null,
     tags: [],
     checklist: [],
+    files: [],
     ...extra,
   };
 }
@@ -150,7 +187,17 @@ export function clickupItem(id: string, title = `Task ${id}`, extra: Partial<Cli
 }
 
 export function answer(text: string, extra: Partial<Answer> = {}): Answer {
-  return { text, stats: { startup_ms: 10, total_ms: 1500, tool_calls: [] }, model_ms: 1000, cost_usd: 0.005, memory: [], model: null, ...extra };
+  return withInfo({ text, stats: { startup_ms: 10, total_ms: 1500, tool_calls: [] }, model_ms: 1000, cost_usd: 0.005, memory: [], model: null, info: "", ...extra });
+}
+
+/** Fills the line under the answer as the backend does (answer_info in assistant.rs). */
+function withInfo(a: Answer): Answer {
+  const parts = [`${(a.stats.total_ms / 1000).toFixed(1)}s`];
+  if (a.model) parts.push(a.model.charAt(0).toUpperCase() + a.model.slice(1));
+  const n = a.stats.tool_calls.length;
+  if (n) parts.push(`${n} lookup${n === 1 ? "" : "s"}`);
+  if (a.cost_usd != null) parts.push(`~$${a.cost_usd.toFixed(3)} usage`);
+  return { ...a, info: parts.join(" · ") };
 }
 
 export function fakeBackend(init: Partial<Fake> = {}): Fake {
@@ -162,7 +209,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     clickup: [],
     clickupClosed: {},
     clickupFetches: 0,
-    settings: { refresh_minutes: 15 },
+    settings: { ...DEFAULT_SETTINGS },
     update: { current: "0.1.1", state: "idle", latest: null, page: null, message: null, checked_at: null },
     updateTo: null,
     restarts: 0,
@@ -172,6 +219,17 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     fail: {},
     calls: [],
     onAsk: (p) => answer(`You said: ${p}`),
+    onAskSide: (p) => answer(`Side: ${p}`),
+    plans: {},
+    estimates: {},
+    briefs: {},
+    onWriteBrief: (day) => ({ day, written: nowSecs(), text: "Nothing urgent today.", why: {} }),
+    side: {},
+    newKeys: [],
+    summaries: {},
+    details: {},
+    uploads: [],
+    uploadName: "file.txt",
     ...init,
   };
 
@@ -188,6 +246,20 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       const t = String(text).split(/\s+/).filter(Boolean).join(" ");
       if (!t) throw "the fact is empty";
       return t;
+    };
+    const findUpload = (id: string) => {
+      const f = fake.uploads.find((u) => u.id === id);
+      if (!f) throw `no file with id ${id}`;
+      return f;
+    };
+    /** Open items, like items::is_open in Rust. */
+    const isOpen = (key: string) =>
+      (key.startsWith("task:") && fake.tasks.some((t) => `task:${t.id}` === key && !t.done)) ||
+      fake.github.some((g) => `github:${g.id}` === key) ||
+      fake.clickup.some((c) => `clickup:${c.id}` === key);
+    const progressOf = (a: Record<string, any>) => {
+      let index = 0;
+      return (e: ProgressEvent) => (window as any).__TAURI_INTERNALS__.runCallback(a.onEvent.id, { index: index++, message: e });
     };
     const find = (id: string) => {
       const t = fake.tasks.find((t) => t.id === id);
@@ -240,6 +312,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         if (!String(f.title ?? "").trim()) throw "the task title is empty";
         const t = task(String(f.title).trim());
         applyChanges(t, f);
+        if (f.files) t.files = f.files.map((id) => findUpload(id));
         fake.tasks.push(t);
         return t;
       }
@@ -322,15 +395,80 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       case "get_settings":
         return structuredClone(fake.settings);
       case "set_settings":
+        if (args.settings.work_start >= args.settings.work_end) throw "the work day must end after it starts";
         fake.settings = structuredClone(args.settings);
         return null;
       case "ask": {
         // Send progress the way Rust does: through the channel's callback.
-        let index = 0;
-        const progress = (e: ProgressEvent) =>
-          (window as any).__TAURI_INTERNALS__.runCallback(args.onEvent.id, { index: index++, message: e });
-        const a = await fake.onAsk(args.prompt, progress);
-        return { ...a, model: fake.chatModel };
+        const a = await fake.onAsk(args.prompt, progressOf(args), args);
+        const files = (args.files ?? []).map((id: string) => findUpload(id));
+        fake.history.push({ ts: nowSecs(), role: "user", text: args.prompt, backend: "fake", files });
+        fake.history.push({ ts: nowSecs(), role: "assistant", text: a.text, backend: "fake" });
+        // "default": the default model. No model: the pick that is saved.
+        const model = args.model === undefined ? fake.chatModel : args.model === "default" ? null : args.model;
+        return withInfo({ ...a, model });
+      }
+      case "ask_side": {
+        if (!/^(plan:\d{4}-\d{2}-\d{2}|item:(task|github|clickup):.+)$/.test(args.thread)) throw `"${args.thread}" is not a chat name`;
+        const a = await fake.onAskSide(args.prompt, progressOf(args), args);
+        const files = (args.files ?? []).map((id: string) => findUpload(id));
+        const list = (fake.side[args.thread] ??= []);
+        list.push({ id: list.length + 1, ts: nowSecs(), role: "user", text: args.prompt, files });
+        list.push({ id: list.length + 1, ts: nowSecs(), role: "assistant", text: a.text, files: [], info: "1.0s" });
+        return withInfo({ ...a, model: args.model === "default" ? null : (args.model ?? null) });
+      }
+      case "side_history":
+        return structuredClone(fake.side[args.thread] ?? []);
+      case "clear_side":
+        delete fake.side[args.thread];
+        return null;
+      case "upload_file": {
+        const bytes = payload as unknown as Uint8Array;
+        const f = { id: `f${nextId++}`, name: fake.uploadName, size: bytes.length };
+        fake.uploads.push(f);
+        return f;
+      }
+      case "open_file":
+        findUpload(args.id);
+        return null;
+      case "day_plan":
+        await fake.onDayPlan?.(args.day);
+        return structuredClone(fake.plans[args.day] ?? null);
+      case "set_day_plan": {
+        if (!["ai", "self"].includes(args.mode)) throw `the plan mode must be "ai" or "self"`;
+        // Like plan.rs: a key that was in the plan before stays, also when its item is not open.
+        const old = new Set((fake.plans[args.day]?.items ?? []).map((i) => i.key));
+        const seen = new Set<string>();
+        const items = (args.items as DayPlan["items"]).filter((i) => !seen.has(i.key) && (seen.add(i.key), old.has(i.key) || isOpen(i.key)));
+        fake.plans[args.day] = { day: args.day, mode: args.mode, items, updated: nowSecs() };
+        return structuredClone(fake.plans[args.day]);
+      }
+      case "clear_day_plan":
+        delete fake.plans[args.day];
+        return null;
+      case "estimates":
+        return structuredClone(fake.estimates);
+      case "set_estimate":
+        if (args.minutes == null) delete fake.estimates[args.key];
+        else fake.estimates[args.key] = { minutes: Math.min(600, Math.max(5, args.minutes)), by: "you" };
+        return null;
+      case "brief":
+        return structuredClone(fake.briefs[args.day] ?? null);
+      case "write_brief": {
+        const b = await fake.onWriteBrief(args.day);
+        fake.briefs[args.day] = b;
+        return structuredClone(b);
+      }
+      case "item_meta":
+        return [
+          ...fake.tasks.filter((t) => !t.done).map((t) => ({ key: `task:${t.id}`, first_seen: t.created, new: false })),
+          ...fake.github.map((g) => ({ key: `github:${g.id}`, first_seen: nowSecs(), new: fake.newKeys.includes(`github:${g.id}`) })),
+          ...fake.clickup.map((c) => ({ key: `clickup:${c.id}`, first_seen: nowSecs(), new: fake.newKeys.includes(`clickup:${c.id}`) })),
+        ].map((m) => (fake.summaries[m.key] ? { ...m, summary: fake.summaries[m.key] } : m));
+      case "item_details": {
+        const d: ItemDetails = { key: args.key, details: fake.details[args.key] ?? "" };
+        if (fake.summaries[args.key]) d.summary = fake.summaries[args.key];
+        return d;
       }
       case "update_status":
         return fake.update;

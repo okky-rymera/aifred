@@ -144,8 +144,16 @@ fn search_args(kind: &str, filter: &str, owners: &[String]) -> Vec<String> {
 /// One search result: GitHub's node ID and the item.
 type Found = (String, GithubItem);
 
-async fn search(kind: &str, filter: &str, reason: &str, owners: &[String]) -> anyhow::Result<Vec<Found>> {
-    let out = Command::new("gh").args(search_args(kind, filter, owners)).output().await?;
+async fn search(
+    kind: &str,
+    filter: &str,
+    reason: &str,
+    owners: &[String],
+) -> anyhow::Result<Vec<Found>> {
+    let out = Command::new("gh")
+        .args(search_args(kind, filter, owners))
+        .output()
+        .await?;
     if !out.status.success() {
         bail!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -229,13 +237,20 @@ struct RawLink {
 /// A missing item (for example, deleted since the search) gets no links.
 fn parse_links(json: &[u8]) -> anyhow::Result<Vec<ItemLinks>> {
     let reply: LinkReply = serde_json::from_slice(json)?;
-    let Some(data) = reply.data else { bail!("GitHub sent no link data") };
+    let Some(data) = reply.data else {
+        bail!("GitHub sent no link data")
+    };
     Ok(data
         .nodes
         .into_iter()
         .map(|n| {
-            let Some(n) = n else { return ItemLinks::default() };
-            let Some(list) = n.closing_issues_references.or(n.closed_by_pull_requests_references) else {
+            let Some(n) = n else {
+                return ItemLinks::default();
+            };
+            let Some(list) = n
+                .closing_issues_references
+                .or(n.closed_by_pull_requests_references)
+            else {
                 return ItemLinks::default();
             };
             let more = list.total_count > list.nodes.len();
@@ -271,13 +286,21 @@ async fn links_batch(ids: &[String]) -> anyhow::Result<Vec<ItemLinks>> {
     let out = child.wait_with_output().await?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if let Err(e) = written {
-        bail!("cannot send the link query to gh: {e}; gh said: {}", stderr.trim());
+        bail!(
+            "cannot send the link query to gh: {e}; gh said: {}",
+            stderr.trim()
+        );
     }
     // gh fails when one item is missing, but the reply still has the others.
     // So read the reply first, and use the exit status only when it has no data.
     match parse_links(&out.stdout) {
         Ok(l) if l.len() == ids.len() => Ok(l),
-        Ok(l) => bail!("gh link query sent {} entries for {} items: {}", l.len(), ids.len(), stderr.trim()),
+        Ok(l) => bail!(
+            "gh link query sent {} entries for {} items: {}",
+            l.len(),
+            ids.len(),
+            stderr.trim()
+        ),
         Err(e) => bail!("gh link query failed: {e}; gh said: {}", stderr.trim()),
     }
 }
@@ -350,7 +373,9 @@ async fn search_with_links(
     let mut found = search(kind, filter, reason, owners).await?;
     let which: Vec<usize> = {
         let mut c = claimed.lock().expect("no panic holds this lock");
-        (0..found.len()).filter(|&i| c.insert(found[i].1.id.clone())).collect()
+        (0..found.len())
+            .filter(|&i| c.insert(found[i].1.id.clone()))
+            .collect()
     };
     let looked_up = which.iter().map(|&i| found[i].1.id.clone()).collect();
     // The links only join an issue and its pull requests in one row.
@@ -359,7 +384,11 @@ async fn search_with_links(
     for (_, item) in &mut found {
         drop_other_owners(&mut item.links, owners);
     }
-    Ok(Searched { found, looked_up, failed })
+    Ok(Searched {
+        found,
+        looked_up,
+        failed,
+    })
 }
 
 /// Removes the links to repositories outside AIFRED_GITHUB_OWNERS. The search
@@ -370,7 +399,11 @@ fn drop_other_owners(links: &mut Vec<Link>, owners: &[String]) {
     }
     // GitHub owner names do not depend on case.
     let owner = |repo: &str| repo.split('/').next().unwrap_or_default().to_string();
-    links.retain(|l| owners.iter().any(|o| o.eq_ignore_ascii_case(&owner(&l.repo))));
+    links.retain(|l| {
+        owners
+            .iter()
+            .any(|o| o.eq_ignore_ascii_case(&owner(&l.repo)))
+    });
 }
 
 /// Issues assigned to the user, reviews asked of the user, and the user's
@@ -378,7 +411,13 @@ fn drop_other_owners(links: &mut Vec<Link>, owners: &[String]) {
 pub async fn my_items(owners: &[String]) -> anyhow::Result<Fetch> {
     let claimed = Mutex::new(HashSet::new());
     let (a, b, c) = tokio::try_join!(
-        search_with_links("prs", "--review-requested=@me", "review_requested", owners, &claimed),
+        search_with_links(
+            "prs",
+            "--review-requested=@me",
+            "review_requested",
+            owners,
+            &claimed
+        ),
         search_with_links("issues", "--assignee=@me", "assigned", owners, &claimed),
         search_with_links("prs", "--author=@me", "your_pr", owners, &claimed),
     )?;
@@ -424,7 +463,11 @@ impl GithubItem {
 /// An item can match more than one search. Keep the first (most urgent) one.
 fn merge(lists: [Vec<Found>; 3]) -> Vec<Found> {
     let mut seen = HashSet::new();
-    lists.into_iter().flatten().filter(|(_, i)| seen.insert(i.id.clone())).collect()
+    lists
+        .into_iter()
+        .flatten()
+        .filter(|(_, i)| seen.insert(i.id.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -484,9 +527,15 @@ mod tests {
         let r = parse_links(reply.as_bytes()).unwrap();
         assert_eq!(r.len(), 4, "one entry for each ID, also for a missing item");
         let l: Vec<&Vec<Link>> = r.iter().map(|x| &x.links).collect();
-        assert_eq!(l[0].iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["acme/shop#142"]);
+        assert_eq!(
+            l[0].iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            vec!["acme/shop#142"]
+        );
         assert!(l[1].is_empty());
-        assert_eq!(l[2].iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec!["acme/shop#143", "acme/docs#9"]);
+        assert_eq!(
+            l[2].iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            vec!["acme/shop#143", "acme/docs#9"]
+        );
         assert_eq!(l[2][1].repo, "acme/docs");
         assert!(l[3].is_empty());
         assert!(parse_links(br#"{"errors":[]}"#).is_err());
@@ -498,10 +547,20 @@ mod tests {
 
     #[test]
     fn links_to_other_owners_are_removed() {
-        let link = |repo: &str| Link::new(repo.into(), 1, "T".into(), format!("https://github.com/{repo}/pull/1"));
+        let link = |repo: &str| {
+            Link::new(
+                repo.into(),
+                1,
+                "T".into(),
+                format!("https://github.com/{repo}/pull/1"),
+            )
+        };
         let mut l = vec![link("acme/shop"), link("personal/fork"), link("ACME/docs")];
         drop_other_owners(&mut l, &["acme".into()]);
-        assert_eq!(l.iter().map(|x| x.repo.as_str()).collect::<Vec<_>>(), vec!["acme/shop", "ACME/docs"]);
+        assert_eq!(
+            l.iter().map(|x| x.repo.as_str()).collect::<Vec<_>>(),
+            vec!["acme/shop", "ACME/docs"]
+        );
         let mut l = vec![link("personal/fork")];
         drop_other_owners(&mut l, &[]);
         assert_eq!(l.len(), 1, "no owners means all owners");
@@ -515,16 +574,35 @@ mod tests {
             looked_up: set(looked),
             failed: set(failed),
         };
-        let empty = || Searched { found: Vec::new(), looked_up: HashSet::new(), failed: HashSet::new() };
+        let empty = || Searched {
+            found: Vec::new(),
+            looked_up: HashSet::new(),
+            failed: HashSet::new(),
+        };
         // The "your PR" search ended first and looked up #7. The review copy is kept.
         let mut mine = searched("your_pr", &["acme/shop#7"], &[]);
         mine.found[0].1.links = vec![Link::new("acme/shop".into(), 6, "Bug".into(), "u".into())];
-        let f = combine([searched("review_requested", &["acme/docs#12"], &[]), empty(), mine]);
-        assert_eq!(f.items[0].reason, "review_requested", "merge keeps the first copy");
-        assert_eq!(f.items[0].links.len(), 1, "with the links from the other search");
+        let f = combine([
+            searched("review_requested", &["acme/docs#12"], &[]),
+            empty(),
+            mine,
+        ]);
+        assert_eq!(
+            f.items[0].reason, "review_requested",
+            "merge keeps the first copy"
+        );
+        assert_eq!(
+            f.items[0].links.len(),
+            1,
+            "with the links from the other search"
+        );
         assert!(f.no_links.is_empty());
         // The lookup of #7 failed: its links are unknown.
-        let f = combine([searched("review_requested", &[], &[]), empty(), searched("your_pr", &["acme/shop#7"], &["acme/shop#7"])]);
+        let f = combine([
+            searched("review_requested", &[], &[]),
+            empty(),
+            searched("your_pr", &["acme/shop#7"], &["acme/shop#7"]),
+        ]);
         assert_eq!(f.no_links, vec!["acme/shop#7"]);
     }
 
@@ -540,7 +618,10 @@ mod tests {
     #[test]
     fn searches_skip_archived_repos_and_keep_the_owner_limit() {
         let args = search_args("issues", "--assignee=@me", &["acme".into(), "me".into()]);
-        assert!(args.contains(&"--archived=false".to_string()), "got {args:?}");
+        assert!(
+            args.contains(&"--archived=false".to_string()),
+            "got {args:?}"
+        );
         assert!(args.contains(&"--state=open".to_string()));
         assert!(args.ends_with(&["--owner=acme".to_string(), "--owner=me".to_string()]));
     }

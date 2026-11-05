@@ -37,7 +37,9 @@ impl Backend for ClaudeBackend {
             // aifred owns the history, so start again and replay it.
             Err(e) if req.session.is_some() => {
                 on_event(Event::Notice {
-                    message: format!("Cannot resume the Claude session ({e:#}). Starting a new one."),
+                    message: format!(
+                        "Cannot resume the Claude session ({e:#}). Starting a new one."
+                    ),
                 });
                 self.run(req, None, on_event).await
             }
@@ -45,7 +47,12 @@ impl Backend for ClaudeBackend {
         }
     }
 
-    async fn complete(&self, system: &str, prompt: &str, model: Option<&str>) -> anyhow::Result<String> {
+    async fn complete(
+        &self,
+        system: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> anyhow::Result<String> {
         // Its own folder: an `ask` at the same time writes files into work_dir.
         let dir = self.work_dir.join("once");
         std::fs::create_dir_all(&dir)?;
@@ -71,20 +78,54 @@ impl Backend for ClaudeBackend {
         if let Some(m) = model.or(self.model.as_deref()) {
             cmd.args(["--model", m]);
         }
-        let mut child = cmd.spawn().context("cannot start `claude`. Is Claude Code installed?")?;
+        let mut child = cmd
+            .spawn()
+            .context("cannot start `claude`. Is Claude Code installed?")?;
         let writer = send_prompt(&mut child, prompt)?;
         let out = child.wait_with_output().await?;
         // Check the write last: when claude stops early, the write fails with
         // "Broken pipe", and the real reason is in claude's own output.
         let written = writer.await?;
         let res: Value = serde_json::from_slice(&out.stdout).with_context(|| {
-            format!("claude ended without an answer (exit {}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim())
+            format!(
+                "claude ended without an answer (exit {}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
         })?;
         if res["is_error"].as_bool().unwrap_or(false) {
-            bail!("claude reported an error: {}", res["result"].as_str().unwrap_or(&res.to_string()));
+            bail!(
+                "claude reported an error: {}",
+                res["result"].as_str().unwrap_or(&res.to_string())
+            );
         }
         written.context("cannot send the prompt to claude")?;
-        Ok(res["result"].as_str().unwrap_or_default().trim().to_string())
+        Ok(res["result"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_string())
+    }
+}
+
+/// A new folder for one side chat question, removed when it is dropped.
+struct SideDir(std::path::PathBuf);
+
+impl SideDir {
+    fn new(work_dir: &std::path::Path) -> anyhow::Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = work_dir
+            .join("side")
+            .join(format!("{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for SideDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -95,18 +136,42 @@ impl ClaudeBackend {
         resume: Option<&str>,
         on_event: OnEvent<'_>,
     ) -> anyhow::Result<AskResponse> {
-        std::fs::create_dir_all(&self.work_dir)?;
+        // Each side chat question has its own new folder: a main question or
+        // another side chat question at the same time writes mcp.json and
+        // system.md into its own folder. The guard removes the folder after.
+        let side_dir = if req.side {
+            Some(SideDir::new(&self.work_dir)?)
+        } else {
+            None
+        };
+        let work_dir = match &side_dir {
+            Some(d) => d.0.clone(),
+            None => self.work_dir.clone(),
+        };
+        std::fs::create_dir_all(&work_dir)?;
 
-        let mcp_path = self.work_dir.join("mcp.json");
+        let mcp_path = work_dir.join("mcp.json");
         std::fs::write(&mcp_path, serde_json::to_vec_pretty(&mcp_config(req))?)?;
-        let system_path = self.work_dir.join("system.md");
+        let system_path = work_dir.join("system.md");
         std::fs::write(&system_path, &req.system)?;
 
-        let allowed: Vec<String> = req
+        let mut allowed: Vec<String> = req
             .tools
             .iter()
-            .flat_map(|s| s.allowed_tools.iter().map(move |t| format!("mcp__{}__{}", s.name, t)))
+            .flat_map(|s| {
+                s.allowed_tools
+                    .iter()
+                    .map(move |t| format!("mcp__{}__{}", s.name, t))
+            })
             .collect();
+        // Read only in the folders of the files of this message. A path rule
+        // with "//" at the start is a full path. In dontAsk mode Claude
+        // refuses every other read outside its work folder.
+        allowed.extend(
+            req.files
+                .iter()
+                .map(|f| format!("Read(/{}/**)", f.display())),
+        );
 
         let prompt = match resume {
             Some(_) => req.prompt.clone(),
@@ -116,11 +181,12 @@ impl ClaudeBackend {
         let mut cmd = Command::new("claude");
         // The prompt goes in through stdin: a replay can be larger than the
         // 128 KiB that one command-line argument can hold on Linux.
-        cmd.current_dir(&self.work_dir)
+        cmd.current_dir(&work_dir)
             .arg("-p")
             .args(["--output-format", "stream-json", "--verbose"])
-            // No built-in tools: no shell, no file access, no web.
-            .args(["--tools", ""])
+            // No built-in tools: no shell, no file access, no web. Only Read
+            // when the user sent files, for the folders in `allowed`.
+            .args(["--tools", if req.files.is_empty() { "" } else { "Read" }])
             // Only the MCP servers aifred gives, and only the named tools.
             .arg("--mcp-config")
             .arg(&mcp_path)
@@ -137,8 +203,15 @@ impl ClaudeBackend {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        for f in &req.files {
+            cmd.arg("--add-dir").arg(f);
+        }
         if let Some(id) = resume {
             cmd.args(["--resume", id]);
+        }
+        if req.side {
+            // A side chat sends its messages again each time (side.rs).
+            cmd.arg("--no-session-persistence");
         }
         // The model that the user picked in the chat box, or AIFRED_MODEL.
         if let Some(m) = req.model.as_deref().or(self.model.as_deref()) {
@@ -146,7 +219,9 @@ impl ClaudeBackend {
         }
 
         let start = Instant::now();
-        let mut child = cmd.spawn().context("cannot start `claude`. Is Claude Code installed?")?;
+        let mut child = cmd
+            .spawn()
+            .context("cannot start `claude`. Is Claude Code installed?")?;
         let writer = send_prompt(&mut child, &prompt)?;
         let stdout = child.stdout.take().context("no stdout")?;
         let mut lines = BufReader::new(stdout).lines();
@@ -157,7 +232,9 @@ impl ClaudeBackend {
             if stats.startup_ms == 0 {
                 stats.startup_ms = start.elapsed().as_millis();
             }
-            let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
+            let Ok(ev) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
             match ev["type"].as_str() {
                 Some("assistant") => {
                     for block in ev["message"]["content"].as_array().into_iter().flatten() {
@@ -169,7 +246,11 @@ impl ClaudeBackend {
                                 (Some(s), Some(t)) => (s.to_string(), t.to_string()),
                                 _ => (String::new(), name.clone()),
                             };
-                            on_event(Event::ToolCall { server, tool, input: block["input"].clone() });
+                            on_event(Event::ToolCall {
+                                server,
+                                tool,
+                                input: block["input"].clone(),
+                            });
                             stats.tool_calls.push(name);
                         }
                     }
@@ -185,10 +266,17 @@ impl ClaudeBackend {
         stats.total_ms = start.elapsed().as_millis();
         let Some(res) = result else {
             let err = String::from_utf8_lossy(&output.stderr);
-            bail!("claude ended without an answer (exit {}): {}", output.status, err.trim());
+            bail!(
+                "claude ended without an answer (exit {}): {}",
+                output.status,
+                err.trim()
+            );
         };
         if res["is_error"].as_bool().unwrap_or(false) {
-            bail!("claude reported an error: {}", res["result"].as_str().unwrap_or(&res.to_string()));
+            bail!(
+                "claude reported an error: {}",
+                res["result"].as_str().unwrap_or(&res.to_string())
+            );
         }
         written.context("cannot send the prompt to claude")?;
 
@@ -222,9 +310,15 @@ fn mcp_config(req: &AskRequest) -> Value {
         .tools
         .iter()
         .map(|s| {
-            let env: serde_json::Map<String, Value> =
-                s.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
-            (s.name.clone(), json!({ "command": s.command, "args": s.args, "env": env }))
+            let env: serde_json::Map<String, Value> = s
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            (
+                s.name.clone(),
+                json!({ "command": s.command, "args": s.args, "env": env }),
+            )
         })
         .collect();
     json!({ "mcpServers": servers })
@@ -253,7 +347,9 @@ fn with_replayed_history(history: &[Turn], summary: Option<&str>, prompt: &str) 
         s.push_str(&format!("Summary of this conversation so far:\n{sum}\n\n"));
     }
     if from > 0 {
-        s.push_str(&format!("({from} older messages are not shown. Use search_history to find them.)\n\n"));
+        s.push_str(&format!(
+            "({from} older messages are not shown. Use search_history to find them.)\n\n"
+        ));
     }
     s.push_str("Earlier conversation (for context):\n");
     for t in recent {
@@ -269,15 +365,29 @@ mod tests {
     use super::*;
 
     fn turn(role: &str, text: &str) -> Turn {
-        Turn { ts: 1, role: role.into(), text: text.into(), backend: "claude".into() }
+        Turn {
+            ts: 1,
+            role: role.into(),
+            text: text.into(),
+            backend: "claude".into(),
+            files: vec![],
+        }
     }
 
     #[test]
     fn a_lost_session_gets_the_summary_and_all_turns_after_it() {
-        let history: Vec<Turn> = (0..60).map(|i| turn("user", &format!("message {i}"))).collect();
+        let history: Vec<Turn> = (0..60)
+            .map(|i| turn("user", &format!("message {i}")))
+            .collect();
         let p = with_replayed_history(&history, Some("- The user plans a trip."), "Next?");
-        assert!(p.starts_with("Summary of this conversation so far:\n- The user plans a trip."), "{p}");
-        assert!(p.contains("message 0\n") && p.contains("message 59\n"), "no turn after the summary is lost");
+        assert!(
+            p.starts_with("Summary of this conversation so far:\n- The user plans a trip."),
+            "{p}"
+        );
+        assert!(
+            p.contains("message 0\n") && p.contains("message 59\n"),
+            "no turn after the summary is lost"
+        );
         assert!(!p.contains("older messages"));
         assert!(p.ends_with("New message:\nNext?"));
         assert_eq!(with_replayed_history(&[], None, "Hi"), "Hi");
@@ -290,7 +400,11 @@ mod tests {
         let mut history: Vec<Turn> = (0..3).map(|_| turn("user", &big)).collect();
         history.push(turn("assistant", "the newest answer"));
         let p = with_replayed_history(&history, None, "Next?");
-        assert!(p.contains("(1 older messages are not shown."), "{}", &p[..200]);
+        assert!(
+            p.contains("(1 older messages are not shown."),
+            "{}",
+            &p[..200]
+        );
         assert!(p.contains("the newest answer"));
         assert!(p.len() < REPLAY_MAX_CHARS + 1000);
     }

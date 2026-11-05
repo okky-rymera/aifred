@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db;
 use crate::files::now;
+use crate::uploads::{self, FileRef};
 
 /// The priorities, most important first. The same names as in ClickUp.
 pub const PRIORITIES: [&str; 4] = ["urgent", "high", "normal", "low"];
@@ -47,6 +48,9 @@ pub struct Task {
     pub tags: Vec<String>,
     #[serde(default)]
     pub checklist: Vec<ChecklistItem>,
+    /// Files that the user keeps on the task (uploads.rs).
+    #[serde(default)]
+    pub files: Vec<FileRef>,
 }
 
 /// The fields to set on a task. None keeps the field as it is (on an add:
@@ -60,6 +64,8 @@ pub struct TaskFields {
     pub priority: Option<String>,
     pub tags: Option<Vec<String>>,
     pub checklist: Option<Vec<StepFields>>,
+    /// The ids of the files of the task (uploads.rs). The full new list.
+    pub files: Option<Vec<String>>,
 }
 
 /// One step in a new checklist. When `done` is None, the step keeps the
@@ -74,7 +80,10 @@ pub struct StepFields {
 
 impl From<ChecklistItem> for StepFields {
     fn from(c: ChecklistItem) -> Self {
-        Self { text: c.text, done: Some(c.done) }
+        Self {
+            text: c.text,
+            done: Some(c.done),
+        }
     }
 }
 
@@ -85,16 +94,24 @@ pub struct TaskStore {
 /// A task id that is never given out again, also not after a delete.
 /// It uses the time in nanoseconds. The caller still checks for a clash.
 fn new_id() -> String {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
     format!("t{nanos}")
 }
 
-const COLUMNS: &str = "id, title, notes, done, added_by, created, done_at, due, start, priority, tags, checklist";
+const COLUMNS: &str = "id, title, notes, done, added_by, created, done_at, due, start, priority, tags, checklist, files";
 
 /// A JSON column as a value. A bad value is a read error, not an empty list.
-pub(crate) fn json_column<T: serde::de::DeserializeOwned>(r: &Row, i: usize) -> rusqlite::Result<T> {
+pub(crate) fn json_column<T: serde::de::DeserializeOwned>(
+    r: &Row,
+    i: usize,
+) -> rusqlite::Result<T> {
     let text: String = r.get(i)?;
-    serde_json::from_str(&text).map_err(|e| rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into()))
+    serde_json::from_str(&text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, e.into())
+    })
 }
 
 fn from_row(r: &Row) -> rusqlite::Result<Task> {
@@ -111,6 +128,7 @@ fn from_row(r: &Row) -> rusqlite::Result<Task> {
         priority: r.get(9)?,
         tags: json_column(r, 10)?,
         checklist: json_column(r, 11)?,
+        files: json_column(r, 12)?,
     })
 }
 
@@ -133,9 +151,14 @@ fn is_date(s: &str) -> bool {
     }
     let num = |r: std::ops::Range<usize>| {
         let part = &s[r];
-        part.bytes().all(|c| c.is_ascii_digit()).then(|| part.parse::<u32>().ok()).flatten()
+        part.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
     };
-    let (Some(y), Some(m), Some(d)) = (num(0..4), num(5..7), num(8..10)) else { return false };
+    let (Some(y), Some(m), Some(d)) = (num(0..4), num(5..7), num(8..10)) else {
+        return false;
+    };
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
     let days = match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -165,7 +188,10 @@ fn clean_priority(s: &str) -> anyhow::Result<Option<String>> {
         return Ok(None);
     }
     if !PRIORITIES.contains(&s.as_str()) {
-        bail!("the priority \"{s}\" is not one of: {}", PRIORITIES.join(", "));
+        bail!(
+            "the priority \"{s}\" is not one of: {}",
+            PRIORITIES.join(", ")
+        );
     }
     Ok(Some(s))
 }
@@ -214,7 +240,10 @@ fn apply(t: &mut Task, f: TaskFields) -> anyhow::Result<()> {
     }
     if let Some(list) = f.checklist {
         let old = std::mem::take(&mut t.checklist);
-        let was_done = |text: &str| old.iter().any(|o| o.done && o.text.to_lowercase() == text.to_lowercase());
+        let was_done = |text: &str| {
+            old.iter()
+                .any(|o| o.done && o.text.to_lowercase() == text.to_lowercase())
+        };
         t.checklist = list
             .into_iter()
             .map(|i| {
@@ -247,9 +276,24 @@ impl TaskStore {
         })
     }
 
+    /// The saved files for the file ids in `f`, or None when `f` has no list.
+    fn files(&self, f: &TaskFields) -> anyhow::Result<Option<Vec<FileRef>>> {
+        f.files
+            .as_ref()
+            .map(|ids| ids.iter().map(|id| uploads::get(&self.dir, id)).collect())
+            .transpose()
+    }
+
     /// Adds a task with only a title and a description.
     pub fn add(&self, title: &str, notes: &str, added_by: &str) -> anyhow::Result<Task> {
-        self.create(TaskFields { title: Some(title.into()), notes: Some(notes.into()), ..Default::default() }, added_by)
+        self.create(
+            TaskFields {
+                title: Some(title.into()),
+                notes: Some(notes.into()),
+                ..Default::default()
+            },
+            added_by,
+        )
     }
 
     /// Adds a task with all the fields in `f`. The title is necessary.
@@ -267,11 +311,20 @@ impl TaskStore {
             priority: None,
             tags: Vec::new(),
             checklist: Vec::new(),
+            files: Vec::new(),
         };
+        let files = self.files(&f)?;
         apply(&mut task, f)?;
+        if let Some(files) = files {
+            task.files = files;
+        }
         db::write(&self.dir, |tx| {
             task.id = new_id();
-            while tx.query_row("SELECT 1 FROM task WHERE id = ?1", [&task.id], |_| Ok(())).optional()?.is_some() {
+            while tx
+                .query_row("SELECT 1 FROM task WHERE id = ?1", [&task.id], |_| Ok(()))
+                .optional()?
+                .is_some()
+            {
                 task.id = new_id();
             }
             // insert() already writes the title and the description.
@@ -284,11 +337,22 @@ impl TaskStore {
     /// Changes the fields in `f`. The other fields stay as they are.
     pub fn update(&self, id: &str, f: TaskFields) -> anyhow::Result<Task> {
         db::write(&self.dir, |tx| {
-            let Some(mut task) = tx.query_row(&format!("SELECT {COLUMNS} FROM task WHERE id = ?1"), [id], from_row).optional()? else {
+            let Some(mut task) = tx
+                .query_row(
+                    &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+                    [id],
+                    from_row,
+                )
+                .optional()?
+            else {
                 bail!("no task with id {id}");
             };
             let old_text = (task.title.clone(), task.notes.clone());
+            let files = self.files(&f)?;
             apply(&mut task, f)?;
+            if let Some(files) = files {
+                task.files = files;
+            }
             let text_changed = old_text != (task.title.clone(), task.notes.clone());
             write_fields(tx, &task, text_changed)?;
             Ok(task)
@@ -300,7 +364,14 @@ impl TaskStore {
     /// the step at `index`: if the checklist changed, the tick fails.
     pub fn set_step(&self, id: &str, index: usize, text: &str, done: bool) -> anyhow::Result<Task> {
         db::write(&self.dir, |tx| {
-            let Some(mut task) = tx.query_row(&format!("SELECT {COLUMNS} FROM task WHERE id = ?1"), [id], from_row).optional()? else {
+            let Some(mut task) = tx
+                .query_row(
+                    &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+                    [id],
+                    from_row,
+                )
+                .optional()?
+            else {
                 bail!("no task with id {id}");
             };
             match task.checklist.get_mut(index) {
@@ -318,16 +389,29 @@ impl TaskStore {
     pub fn set_done(&self, id: &str, done: bool) -> anyhow::Result<Task> {
         db::write(&self.dir, |tx| {
             let done_at = done.then(|| now() as i64);
-            if tx.execute("UPDATE task SET done = ?1, done_at = ?2 WHERE id = ?3", rusqlite::params![done, done_at, id])? == 0 {
+            if tx.execute(
+                "UPDATE task SET done = ?1, done_at = ?2 WHERE id = ?3",
+                rusqlite::params![done, done_at, id],
+            )? == 0
+            {
                 bail!("no task with id {id}");
             }
-            Ok(tx.query_row(&format!("SELECT {COLUMNS} FROM task WHERE id = ?1"), [id], from_row)?)
+            Ok(tx.query_row(
+                &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+                [id],
+                from_row,
+            )?)
         })
     }
 
     /// Tasks that match `query` by words or by meaning in the title or the
     /// notes, best match first. Done tasks only when `include_done` is true.
-    pub fn search(&self, query: &str, include_done: bool, limit: Option<u32>) -> anyhow::Result<Vec<Task>> {
+    pub fn search(
+        &self,
+        query: &str,
+        include_done: bool,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<Task>> {
         db::read(&self.dir, |c| {
             let ids = db::hybrid(
                 c,
@@ -341,7 +425,10 @@ impl TaskStore {
                 limit,
             )?;
             let mut get = c.prepare(&format!("SELECT {COLUMNS} FROM task WHERE rowid = ?1"))?;
-            Ok(ids.iter().map(|id| get.query_row([id], from_row)).collect::<Result<_, _>>()?)
+            Ok(ids
+                .iter()
+                .map(|id| get.query_row([id], from_row))
+                .collect::<Result<_, _>>()?)
         })
     }
 
@@ -360,11 +447,22 @@ impl TaskStore {
 /// them runs the word-search trigger (db.rs), which indexes the task again.
 fn write_fields(tx: &Transaction, t: &Task, text_changed: bool) -> anyhow::Result<()> {
     if text_changed {
-        tx.execute("UPDATE task SET title = ?1, notes = ?2 WHERE id = ?3", rusqlite::params![t.title, t.notes, t.id])?;
+        tx.execute(
+            "UPDATE task SET title = ?1, notes = ?2 WHERE id = ?3",
+            rusqlite::params![t.title, t.notes, t.id],
+        )?;
     }
     tx.execute(
-        "UPDATE task SET due = ?1, start = ?2, priority = ?3, tags = ?4, checklist = ?5 WHERE id = ?6",
-        rusqlite::params![t.due, t.start, t.priority, serde_json::to_string(&t.tags)?, serde_json::to_string(&t.checklist)?, t.id],
+        "UPDATE task SET due = ?1, start = ?2, priority = ?3, tags = ?4, checklist = ?5, files = ?6 WHERE id = ?7",
+        rusqlite::params![
+            t.due,
+            t.start,
+            t.priority,
+            serde_json::to_string(&t.tags)?,
+            serde_json::to_string(&t.checklist)?,
+            serde_json::to_string(&t.files)?,
+            t.id
+        ],
     )?;
     Ok(())
 }
@@ -422,11 +520,25 @@ mod tests {
             due: Some("2026-12-20".into()),
             start: Some("2026-12-01".into()),
             priority: Some("High".into()),
-            tags: Some(vec!["travel".into(), "#Home".into(), " ".into(), "TRAVEL".into()]),
+            tags: Some(vec![
+                "travel".into(),
+                "#Home".into(),
+                " ".into(),
+                "TRAVEL".into(),
+            ]),
             checklist: Some(vec![
-                StepFields { text: " Pick dates ".into(), done: Some(true) },
-                StepFields { text: "  ".into(), done: Some(false) },
-                StepFields { text: "Pay".into(), done: None },
+                StepFields {
+                    text: " Pick dates ".into(),
+                    done: Some(true),
+                },
+                StepFields {
+                    text: "  ".into(),
+                    done: Some(false),
+                },
+                StepFields {
+                    text: "Pay".into(),
+                    done: None,
+                },
             ]),
             ..Default::default()
         }
@@ -441,9 +553,25 @@ mod tests {
         assert_eq!(t.start.as_deref(), Some("2026-12-01"));
         assert_eq!(t.priority.as_deref(), Some("high"));
         assert_eq!(t.tags, vec!["travel", "Home"], "no empty tags, no copies");
-        assert_eq!(t.checklist, vec![ChecklistItem { text: "Pick dates".into(), done: true }, ChecklistItem { text: "Pay".into(), done: false }]);
+        assert_eq!(
+            t.checklist,
+            vec![
+                ChecklistItem {
+                    text: "Pick dates".into(),
+                    done: true
+                },
+                ChecklistItem {
+                    text: "Pay".into(),
+                    done: false
+                }
+            ]
+        );
         let saved = s.load().unwrap().pop().unwrap();
-        assert_eq!((saved.tags, saved.checklist, saved.due), (t.tags, t.checklist, t.due), "the database keeps the same fields");
+        assert_eq!(
+            (saved.tags, saved.checklist, saved.due),
+            (t.tags, t.checklist, t.due),
+            "the database keeps the same fields"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -451,13 +579,42 @@ mod tests {
     fn update_changes_only_the_given_fields() {
         let (s, dir) = store("update");
         let t = s.create(fields(), "you").unwrap();
-        let u = s.update(&t.id, TaskFields { priority: Some("".into()), due: Some("2026-12-24".into()), ..Default::default() }).unwrap();
+        let u = s
+            .update(
+                &t.id,
+                TaskFields {
+                    priority: Some("".into()),
+                    due: Some("2026-12-24".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(u.priority, None, "an empty text clears the priority");
         assert_eq!(u.due.as_deref(), Some("2026-12-24"));
-        assert_eq!((u.title.as_str(), u.start.as_deref(), u.tags.len(), u.checklist.len()), ("Book flights", Some("2026-12-01"), 2, 2));
-        let u = s.update(&t.id, TaskFields { start: Some(" ".into()), tags: Some(vec![]), ..Default::default() }).unwrap();
+        assert_eq!(
+            (
+                u.title.as_str(),
+                u.start.as_deref(),
+                u.tags.len(),
+                u.checklist.len()
+            ),
+            ("Book flights", Some("2026-12-01"), 2, 2)
+        );
+        let u = s
+            .update(
+                &t.id,
+                TaskFields {
+                    start: Some(" ".into()),
+                    tags: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!((u.start, u.tags.len()), (None, 0));
-        assert!(s.update("t123", TaskFields::default()).is_err(), "unknown id");
+        assert!(
+            s.update("t123", TaskFields::default()).is_err(),
+            "unknown id"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -466,20 +623,85 @@ mod tests {
         let (s, dir) = store("bad");
         let t = s.add("Pay rent", "", "you").unwrap();
         for (f, words) in [
-            (TaskFields { due: Some("2026-02-29".into()), ..Default::default() }, "not a day"),
-            (TaskFields { due: Some("tomorrow".into()), ..Default::default() }, "not a day"),
-            (TaskFields { start: Some("2026-13-01".into()), ..Default::default() }, "not a day"),
-            (TaskFields { priority: Some("p1".into()), ..Default::default() }, "not one of"),
-            (TaskFields { start: Some("2026-12-02".into()), due: Some("2026-12-01".into()), ..Default::default() }, "after the due date"),
-            (TaskFields { title: Some(" ".into()), ..Default::default() }, "title is empty"),
+            (
+                TaskFields {
+                    due: Some("2026-02-29".into()),
+                    ..Default::default()
+                },
+                "not a day",
+            ),
+            (
+                TaskFields {
+                    due: Some("tomorrow".into()),
+                    ..Default::default()
+                },
+                "not a day",
+            ),
+            (
+                TaskFields {
+                    start: Some("2026-13-01".into()),
+                    ..Default::default()
+                },
+                "not a day",
+            ),
+            (
+                TaskFields {
+                    priority: Some("p1".into()),
+                    ..Default::default()
+                },
+                "not one of",
+            ),
+            (
+                TaskFields {
+                    start: Some("2026-12-02".into()),
+                    due: Some("2026-12-01".into()),
+                    ..Default::default()
+                },
+                "after the due date",
+            ),
+            (
+                TaskFields {
+                    title: Some(" ".into()),
+                    ..Default::default()
+                },
+                "title is empty",
+            ),
         ] {
             let e = s.update(&t.id, f).unwrap_err().to_string();
             assert!(e.contains(words), "got {e}");
         }
-        assert!(s.update(&t.id, TaskFields { due: Some("2028-02-29".into()), ..Default::default() }).is_ok(), "a leap day is a real day");
-        s.update(&t.id, TaskFields { due: Some("2026-12-01".into()), ..Default::default() }).unwrap();
-        let e = s.update(&t.id, TaskFields { start: Some("2026-12-05".into()), ..Default::default() }).unwrap_err();
-        assert!(e.to_string().contains("after the due date"), "checks against the saved due date");
+        assert!(
+            s.update(
+                &t.id,
+                TaskFields {
+                    due: Some("2028-02-29".into()),
+                    ..Default::default()
+                }
+            )
+            .is_ok(),
+            "a leap day is a real day"
+        );
+        s.update(
+            &t.id,
+            TaskFields {
+                due: Some("2026-12-01".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let e = s
+            .update(
+                &t.id,
+                TaskFields {
+                    start: Some("2026-12-05".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("after the due date"),
+            "checks against the saved due date"
+        );
         assert_eq!(s.load().unwrap()[0].start, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -488,11 +710,37 @@ mod tests {
     fn a_step_with_no_done_value_keeps_its_tick() {
         let (s, dir) = store("keep-tick");
         let t = s.create(fields(), "you").unwrap();
-        let step = |text: &str| StepFields { text: text.into(), done: None };
-        let u = s.update(&t.id, TaskFields { checklist: Some(vec![step("pick DATES"), step("Pay"), step("Pack")]), ..Default::default() }).unwrap();
+        let step = |text: &str| StepFields {
+            text: text.into(),
+            done: None,
+        };
+        let u = s
+            .update(
+                &t.id,
+                TaskFields {
+                    checklist: Some(vec![step("pick DATES"), step("Pay"), step("Pack")]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let done: Vec<bool> = u.checklist.iter().map(|c| c.done).collect();
-        assert_eq!(done, vec![true, false, false], "the done step stays done; a new step is not done");
-        let u = s.update(&t.id, TaskFields { checklist: Some(vec![StepFields { text: "Pick dates".into(), done: Some(false) }]), ..Default::default() }).unwrap();
+        assert_eq!(
+            done,
+            vec![true, false, false],
+            "the done step stays done; a new step is not done"
+        );
+        let u = s
+            .update(
+                &t.id,
+                TaskFields {
+                    checklist: Some(vec![StepFields {
+                        text: "Pick dates".into(),
+                        done: Some(false),
+                    }]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert!(!u.checklist[0].done, "a done value that is given wins");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -505,7 +753,10 @@ mod tests {
         s.set_step(&t.id, 0, "Pick dates", false).unwrap();
         s.set_step(&t.id, 1, "Pay", true).unwrap();
         let saved = s.load().unwrap().pop().unwrap();
-        assert_eq!(saved.checklist.iter().map(|c| c.done).collect::<Vec<_>>(), vec![false, true]);
+        assert_eq!(
+            saved.checklist.iter().map(|c| c.done).collect::<Vec<_>>(),
+            vec![false, true]
+        );
         let e = s.set_step(&t.id, 1, "Pick dates", true).unwrap_err();
         assert!(e.to_string().contains("checklist changed"), "got {e}");
         assert!(s.set_step(&t.id, 5, "Pay", true).is_err(), "no step 5");
@@ -517,18 +768,41 @@ mod tests {
     fn search_follows_a_title_change() {
         let (s, dir) = store("search-edit");
         let t = s.create(fields(), "you").unwrap();
-        s.update(&t.id, TaskFields { title: Some("Book trains".into()), ..Default::default() }).unwrap();
-        assert!(s.search("flights", false, None).unwrap().is_empty(), "the old title is not found");
+        s.update(
+            &t.id,
+            TaskFields {
+                title: Some("Book trains".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            s.search("flights", false, None).unwrap().is_empty(),
+            "the old title is not found"
+        );
         assert_eq!(s.search("trains", false, None).unwrap().len(), 1);
-        s.update(&t.id, TaskFields { priority: Some("low".into()), ..Default::default() }).unwrap();
-        assert_eq!(s.search("trains", false, None).unwrap().len(), 1, "other changes keep the search entry");
+        s.update(
+            &t.id,
+            TaskFields {
+                priority: Some("low".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            s.search("trains", false, None).unwrap().len(),
+            1,
+            "other changes keep the search entry"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn many_fast_adds_get_unique_ids() {
         let (s, dir) = store("ids");
-        let ids: std::collections::HashSet<_> = (0..5).map(|i| s.add(&format!("Task {i}"), "", "you").unwrap().id).collect();
+        let ids: std::collections::HashSet<_> = (0..5)
+            .map(|i| s.add(&format!("Task {i}"), "", "you").unwrap().id)
+            .collect();
         assert_eq!(ids.len(), 5);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -582,7 +856,10 @@ mod tests {
         s.remove(&old.id).unwrap();
         let new = s.add("New", "", "you").unwrap();
         assert_ne!(old.id, new.id);
-        assert!(s.set_done(&old.id, true).is_err(), "an old id must not change the new task");
+        assert!(
+            s.set_done(&old.id, true).is_err(),
+            "an old id must not change the new task"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -593,13 +870,26 @@ mod tests {
         let b = s.add("Call Sam", "about invoices", "you").unwrap();
         s.add("Buy milk", "", "you").unwrap();
         let ids = |v: Vec<Task>| v.into_iter().map(|t| t.id).collect::<Vec<_>>();
-        assert_eq!(ids(s.search("invoice", false, None).unwrap()), vec![a.id.clone(), b.id.clone()], "title first");
-        assert_eq!(ids(s.search("hosting", false, None).unwrap()), vec![a.id.clone()]);
+        assert_eq!(
+            ids(s.search("invoice", false, None).unwrap()),
+            vec![a.id.clone(), b.id.clone()],
+            "title first"
+        );
+        assert_eq!(
+            ids(s.search("hosting", false, None).unwrap()),
+            vec![a.id.clone()]
+        );
         s.set_done(&a.id, true).unwrap();
-        assert_eq!(ids(s.search("invoice", false, None).unwrap()), vec![b.id.clone()]);
+        assert_eq!(
+            ids(s.search("invoice", false, None).unwrap()),
+            vec![b.id.clone()]
+        );
         assert_eq!(s.search("invoice", true, None).unwrap().len(), 2);
         s.remove(&b.id).unwrap();
-        assert!(s.search("sam", true, None).unwrap().is_empty(), "a deleted task is not found");
+        assert!(
+            s.search("sam", true, None).unwrap().is_empty(),
+            "a deleted task is not found"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -622,7 +912,11 @@ mod tests {
         let children: Vec<_> = (0..2)
             .map(|_| {
                 std::process::Command::new(&exe)
-                    .args(["--exact", "tasks::tests::two_programs_write_at_the_same_time", "--quiet"])
+                    .args([
+                        "--exact",
+                        "tasks::tests::two_programs_write_at_the_same_time",
+                        "--quiet",
+                    ])
                     .env(CHILD, &dir)
                     .stdout(std::process::Stdio::null())
                     .spawn()

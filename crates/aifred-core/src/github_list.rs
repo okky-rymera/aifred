@@ -39,8 +39,13 @@ impl GithubStore {
     /// Use u64::MAX to get the saved list at any age.
     pub fn cached(&self, max_age_secs: u64, now: u64) -> anyhow::Result<Option<GithubList>> {
         db::read(&self.dir, |c| {
-            let fetched_at: Option<u64> =
-                c.query_row("SELECT fetched_at FROM work_fetch WHERE source = ?1", [SOURCE], |r| r.get(0)).optional()?;
+            let fetched_at: Option<u64> = c
+                .query_row(
+                    "SELECT fetched_at FROM work_fetch WHERE source = ?1",
+                    [SOURCE],
+                    |r| r.get(0),
+                )
+                .optional()?;
             match fetched_at {
                 Some(f) if f != 0 && now.saturating_sub(f) < max_age_secs => {
                     Ok(Some(view(db::list_data(c, SOURCE, None)?, f)))
@@ -59,17 +64,29 @@ impl GithubStore {
     ///
     /// A saved item that cannot be read counts as no saved links: the new list
     /// from GitHub is more important. The save then repairs the item.
-    pub fn save_fetch(&self, mut items: Vec<GithubItem>, no_links: &[String], now: u64) -> anyhow::Result<GithubList> {
+    pub fn save_fetch(
+        &self,
+        mut items: Vec<GithubItem>,
+        no_links: &[String],
+        now: u64,
+    ) -> anyhow::Result<GithubList> {
         db::write(&self.dir, |tx| {
             if !no_links.is_empty() {
-                let mut q = tx.prepare("SELECT data FROM work_item WHERE source = ?1 AND item_id = ?2")?;
+                let mut q =
+                    tx.prepare("SELECT data FROM work_item WHERE source = ?1 AND item_id = ?2")?;
                 for item in items.iter_mut().filter(|i| no_links.contains(&i.id)) {
-                    let Some(data) = q.query_row([SOURCE, &item.id], |r| r.get::<_, String>(0)).optional()? else {
+                    let Some(data) = q
+                        .query_row([SOURCE, &item.id], |r| r.get::<_, String>(0))
+                        .optional()?
+                    else {
                         continue;
                     };
                     match serde_json::from_str::<GithubItem>(&data) {
                         Ok(saved) => keep_saved_links(item, &saved),
-                        Err(e) => eprintln!("aifred: cannot use the saved GitHub links of {}: {e}", item.id),
+                        Err(e) => eprintln!(
+                            "aifred: cannot use the saved GitHub links of {}: {e}",
+                            item.id
+                        ),
                     }
                 }
             }
@@ -101,11 +118,17 @@ impl GithubStore {
         }
         let fetched = match crate::github::my_items(&crate::github::owners_from_env()).await {
             Ok(f) => f,
-            Err(e) => return Some(format!("Cannot reach GitHub, so the GitHub items come from the saved list. {e:#}")),
+            Err(e) => {
+                return Some(format!(
+                    "Cannot reach GitHub, so the GitHub items come from the saved list. {e:#}"
+                ));
+            }
         };
         match self.save_fetch(fetched.items, &fetched.no_links, crate::files::now()) {
             Ok(_) => None,
-            Err(e) => Some(format!("Cannot save the new GitHub list, so the GitHub items come from the saved list. {e:#}")),
+            Err(e) => Some(format!(
+                "Cannot save the new GitHub list, so the GitHub items come from the saved list. {e:#}"
+            )),
         }
     }
 
@@ -149,7 +172,11 @@ fn keep_saved_links(item: &mut GithubItem, saved: &GithubItem) {
 }
 
 fn view(items: Vec<GithubItem>, fetched_at: u64) -> GithubList {
-    GithubList { items: join_linked(items), fetched_at, warning: None }
+    GithubList {
+        items: join_linked(items),
+        fetched_at,
+        warning: None,
+    }
 }
 
 /// Shows an issue and the pull requests that close it as one row.
@@ -167,15 +194,26 @@ fn view(items: Vec<GithubItem>, fetched_at: u64) -> GithubList {
 ///   "updated" times, so new activity on the pull request is visible.
 fn join_linked(items: Vec<GithubItem>) -> Vec<GithubItem> {
     use std::collections::{HashMap, HashSet};
-    let issues: HashSet<String> = items.iter().filter(|i| !i.is_pull_request()).map(|i| i.id.clone()).collect();
-    let reasons: HashMap<String, String> = items.iter().map(|i| (i.id.clone(), i.reason.clone())).collect();
+    let issues: HashSet<String> = items
+        .iter()
+        .filter(|i| !i.is_pull_request())
+        .map(|i| i.id.clone())
+        .collect();
+    let reasons: HashMap<String, String> = items
+        .iter()
+        .map(|i| (i.id.clone(), i.reason.clone()))
+        .collect();
     let mut joined: HashMap<String, Vec<Link>> = HashMap::new();
     // The newest "updated" time of the pull requests inside each issue.
     let mut newest: HashMap<String, String> = HashMap::new();
     let mut rows = Vec::with_capacity(items.len());
     for item in items {
         let mine: Vec<String> = if item.is_pull_request() {
-            item.links.iter().filter(|l| issues.contains(&l.id)).map(|l| l.id.clone()).collect()
+            item.links
+                .iter()
+                .filter(|l| issues.contains(&l.id))
+                .map(|l| l.id.clone())
+                .collect()
         } else {
             Vec::new()
         };
@@ -184,7 +222,8 @@ fn join_linked(items: Vec<GithubItem>) -> Vec<GithubItem> {
             continue;
         }
         let as_link = Link::from(&item);
-        let inside = item.reason != "review_requested" && !item.more_links && mine.len() == item.links.len();
+        let inside =
+            item.reason != "review_requested" && !item.more_links && mine.len() == item.links.len();
         for id in mine {
             if inside {
                 let t = newest.entry(id.clone()).or_default();
@@ -260,7 +299,10 @@ mod tests {
     }
 
     fn link_ids(i: &GithubItem) -> Vec<(u64, Option<&str>)> {
-        i.links.iter().map(|l| (l.number, l.reason.as_deref())).collect()
+        i.links
+            .iter()
+            .map(|l| (l.number, l.reason.as_deref()))
+            .collect()
     }
 
     #[test]
@@ -277,7 +319,10 @@ mod tests {
         let mut p = pr(143, "your_pr", &[142]);
         p.updated = "2026-10-20T08:00:00Z".into();
         let l = join_linked(vec![item(142), p]);
-        assert_eq!(l[0].updated, "2026-10-20T08:00:00Z", "the PR got comments after the issue changed");
+        assert_eq!(
+            l[0].updated, "2026-10-20T08:00:00Z",
+            "the PR got comments after the issue changed"
+        );
         // An older PR does not change the time.
         let mut p = pr(143, "your_pr", &[142]);
         p.updated = "2026-09-01T08:00:00Z".into();
@@ -299,7 +344,11 @@ mod tests {
     fn pr_for_an_issue_that_is_not_yours_stays_a_row() {
         let l = join_linked(vec![pr(143, "your_pr", &[142])]);
         assert_eq!(ids(&l), vec![143]);
-        assert_eq!(link_ids(&l[0]), vec![(142, None)], "it shows a link to the issue");
+        assert_eq!(
+            link_ids(&l[0]),
+            vec![(142, None)],
+            "it shows a link to the issue"
+        );
     }
 
     #[test]
@@ -307,17 +356,32 @@ mod tests {
         // PR 150 is not in your list. GitHub sent it as a link of the issue.
         let mut issue = item(142);
         issue.links = vec![link(&pr(150, "", &[]))];
-        let l = join_linked(vec![issue, pr(143, "your_pr", &[142]), pr(144, "your_pr", &[142])]);
+        let l = join_linked(vec![
+            issue,
+            pr(143, "your_pr", &[142]),
+            pr(144, "your_pr", &[142]),
+        ]);
         assert_eq!(ids(&l), vec![142]);
-        assert_eq!(link_ids(&l[0]), vec![(150, None), (143, Some("your_pr")), (144, Some("your_pr"))]);
+        assert_eq!(
+            link_ids(&l[0]),
+            vec![(150, None), (143, Some("your_pr")), (144, Some("your_pr"))]
+        );
     }
 
     #[test]
     fn review_request_for_your_issue_keeps_its_row() {
         let l = join_linked(vec![pr(150, "review_requested", &[142]), item(142)]);
-        assert_eq!(ids(&l), vec![150, 142], "two rows: the review and the issue");
+        assert_eq!(
+            ids(&l),
+            vec![150, 142],
+            "two rows: the review and the issue"
+        );
         assert_eq!(link_ids(&l[0]), vec![(142, Some("assigned"))]);
-        assert_eq!(link_ids(&l[1]), vec![(150, Some("review_requested"))], "the issue still links to the review");
+        assert_eq!(
+            link_ids(&l[1]),
+            vec![(150, Some("review_requested"))],
+            "the issue still links to the review"
+        );
     }
 
     #[test]
@@ -348,10 +412,13 @@ mod tests {
     #[test]
     fn failed_link_lookup_keeps_the_saved_links() {
         let (s, d) = store("keep-links");
-        s.save_fetch(vec![item(142), pr(143, "your_pr", &[142])], &[], 1000).unwrap();
+        s.save_fetch(vec![item(142), pr(143, "your_pr", &[142])], &[], 1000)
+            .unwrap();
         // The next fetch did not get the links of 143.
         let items = vec![item(142), pr(143, "your_pr", &[])];
-        let l = s.save_fetch(items, &["acme/shop#143".into()], 2000).unwrap();
+        let l = s
+            .save_fetch(items, &["acme/shop#143".into()], 2000)
+            .unwrap();
         assert_eq!(ids(&l.items), vec![142], "the PR stays inside the issue");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -363,17 +430,30 @@ mod tests {
         p.more_links = true;
         let l = join_linked(vec![item(1), p]);
         assert_eq!(ids(&l), vec![1, 3], "the PR keeps its row");
-        assert_eq!(link_ids(&l[0]), vec![(3, Some("your_pr"))], "the issue still links to it");
+        assert_eq!(
+            link_ids(&l[0]),
+            vec![(3, Some("your_pr"))],
+            "the issue still links to it"
+        );
     }
 
     #[test]
     fn a_broken_saved_item_does_not_stop_a_new_fetch() {
         let (s, d) = store("broken");
         s.save_fetch(vec![item(1)], &[], 1000).unwrap();
-        db::write(&d, |tx| Ok(tx.execute("UPDATE work_item SET data = '{ half'", [])?)).unwrap();
-        let l = s.save_fetch(vec![item(1)], &["acme/shop#1".into()], 2000).unwrap();
+        db::write(&d, |tx| {
+            Ok(tx.execute("UPDATE work_item SET data = '{ half'", [])?)
+        })
+        .unwrap();
+        let l = s
+            .save_fetch(vec![item(1)], &["acme/shop#1".into()], 2000)
+            .unwrap();
         assert_eq!(ids(&l.items), vec![1]);
-        assert_eq!(ids(&s.cached(u64::MAX, 2000).unwrap().unwrap().items), vec![1], "the item is repaired");
+        assert_eq!(
+            ids(&s.cached(u64::MAX, 2000).unwrap().unwrap().items),
+            vec![1],
+            "the item is repaired"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -385,19 +465,47 @@ mod tests {
         let mut b = item(2);
         b.title = "Update docs".into();
         s.save_fetch(vec![a, b], &[], 1000).unwrap();
-        s.save_details("acme/shop#2", "The checkout page needs a new screenshot.").unwrap();
+        s.save_details("acme/shop#2", "The checkout page needs a new screenshot.")
+            .unwrap();
         let found = |q: &str, old: bool| -> Vec<u64> {
-            s.search(q, &[], old, None).unwrap().iter().map(|h| h.item["number"].as_u64().unwrap()).collect()
+            s.search(q, &[], old, None)
+                .unwrap()
+                .iter()
+                .map(|h| h.item["number"].as_u64().unwrap())
+                .collect()
         };
-        assert_eq!(found("checkout", false), vec![1, 2], "the title counts more than the description");
+        assert_eq!(
+            found("checkout", false),
+            vec![1, 2],
+            "the title counts more than the description"
+        );
         assert_eq!(found("acme", false).len(), 2, "the repository is searched");
         s.save_fetch(vec![item(2)], &[], 2000).unwrap();
-        assert_eq!(found("checkout button", false), vec![2], "item 1 left the list");
+        assert_eq!(
+            found("checkout button", false),
+            vec![2],
+            "item 1 left the list"
+        );
         let hits = s.search("button", &[], true, None).unwrap();
         assert_eq!((hits[0].in_list, hits[0].last_seen), (false, 1000));
-        let v = s.search("button", &[], true, None).unwrap().remove(0).into_json();
-        assert_eq!((v["number"].as_u64(), v["in_list"].as_bool(), v["last_seen"].as_u64()), (Some(1), Some(false), Some(1000)));
-        assert_eq!(found("screenshot", false), vec![2], "a new download keeps the description");
+        let v = s
+            .search("button", &[], true, None)
+            .unwrap()
+            .remove(0)
+            .into_json();
+        assert_eq!(
+            (
+                v["number"].as_u64(),
+                v["in_list"].as_bool(),
+                v["last_seen"].as_u64()
+            ),
+            (Some(1), Some(false), Some(1000))
+        );
+        assert_eq!(
+            found("screenshot", false),
+            vec![2],
+            "a new download keeps the description"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -418,10 +526,16 @@ mod tests {
         ours.title = "Fix the checkout page".into();
         items.push(ours);
         s.save_fetch(items, &[], 1000).unwrap();
-        let hits = s.search("checkout", &["acme".into()], false, Some(2)).unwrap();
+        let hits = s
+            .search("checkout", &["acme".into()], false, Some(2))
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].item["id"], "acme/shop#9");
-        assert_eq!(s.search("checkout", &[], false, Some(10)).unwrap().len(), 4, "no limit: all owners");
+        assert_eq!(
+            s.search("checkout", &[], false, Some(10)).unwrap().len(),
+            4,
+            "no limit: all owners"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -431,11 +545,22 @@ mod tests {
         s.save_fetch(vec![item(1), item(2)], &[], 1000).unwrap();
         s.save_fetch(vec![item(2)], &[], 2000).unwrap();
         let rows: Vec<(String, bool, i64, i64)> = db::read(&d, |c| {
-            let mut q = c.prepare("SELECT item_id, in_list, first_seen, last_seen FROM work_item ORDER BY item_id")?;
-            Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?)
+            let mut q = c.prepare(
+                "SELECT item_id, in_list, first_seen, last_seen FROM work_item ORDER BY item_id",
+            )?;
+            Ok(
+                q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                    .collect::<Result<_, _>>()?,
+            )
         })
         .unwrap();
-        assert_eq!(rows, vec![("acme/shop#1".into(), false, 1000, 1000), ("acme/shop#2".into(), true, 1000, 2000)]);
+        assert_eq!(
+            rows,
+            vec![
+                ("acme/shop#1".into(), false, 1000, 1000),
+                ("acme/shop#2".into(), true, 1000, 2000)
+            ]
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -456,8 +581,15 @@ mod tests {
         let (s, d) = store("replace");
         s.save_fetch(vec![item(1), item(2)], &[], 1000).unwrap();
         let l = s.save_fetch(vec![item(2)], &[], 2000).unwrap();
-        assert_eq!(ids(&l.items), vec![2], "an item that GitHub closed leaves the list");
-        assert_eq!(ids(&s.cached(u64::MAX, 2100).unwrap().unwrap().items), vec![2]);
+        assert_eq!(
+            ids(&l.items),
+            vec![2],
+            "an item that GitHub closed leaves the list"
+        );
+        assert_eq!(
+            ids(&s.cached(u64::MAX, 2100).unwrap().unwrap().items),
+            vec![2]
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

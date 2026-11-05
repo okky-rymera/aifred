@@ -15,7 +15,9 @@ pub mod tasks;
 
 /// Runs the tool server with this name until Claude Code closes the connection.
 pub fn run(name: &str) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async {
         match name {
             "tasks" => tasks::serve().await,

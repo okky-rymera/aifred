@@ -17,7 +17,11 @@ use aifred_core::{Assistant, default_data_dir};
 
 async fn ask(a: &Assistant<ClaudeBackend>, prompt: &str) -> anyhow::Result<()> {
     let mut on_event = |e: Event| match e {
-        Event::ToolCall { server, tool, input } => eprintln!("[aifred] tool: {server}.{tool} {input}"),
+        Event::ToolCall {
+            server,
+            tool,
+            input,
+        } => eprintln!("[aifred] tool: {server}.{tool} {input}"),
         Event::Notice { message } => eprintln!("[aifred] {message}"),
     };
     let ans = a.ask(prompt, &mut on_event).await?;
@@ -74,15 +78,23 @@ pub const COMMANDS: [&str; 5] = ["ask", "chat", "remember", "new", "index"];
 
 /// Runs one terminal command. `args` are the words after the program name.
 pub fn run(args: Vec<String>) -> anyhow::Result<()> {
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run_async(args))
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_async(args))
 }
 
 async fn run_async(args: Vec<String>) -> anyhow::Result<()> {
     if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
-        eprintln!("[aifred] warning: ANTHROPIC_API_KEY is set, so claude uses the API key, not your login.");
+        eprintln!(
+            "[aifred] warning: ANTHROPIC_API_KEY is set, so claude uses the API key, not your login."
+        );
     }
     let dir = default_data_dir()?;
-    let backend = ClaudeBackend { work_dir: dir.join("claude"), model: std::env::var("AIFRED_MODEL").ok() };
+    let backend = ClaudeBackend {
+        work_dir: dir.join("claude"),
+        model: std::env::var("AIFRED_MODEL").ok(),
+    };
     let program = std::env::current_exe()?;
     let a = Arc::new(Assistant::new(dir, backend, program)?);
 

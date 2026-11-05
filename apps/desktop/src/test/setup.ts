@@ -10,3 +10,6 @@ afterEach(() => {
   cleanup();
   clearMocks();
 });
+
+// jsdom has no scroll on elements either.
+Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;

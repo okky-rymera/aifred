@@ -1,132 +1,132 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
-import { TodoList } from "./Todo";
-import { RestartButton, SettingsPage } from "./Settings";
+import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
+import { Ctx, useApp, type AppCtx, type ChatState, type ListState } from "./ctx";
+import { Detail } from "./Detail";
+import { Home } from "./Home";
+import { addDays, buildItems, dayOf, schedule, type Item } from "./items";
 import { MemoryList } from "./Memory";
+import { PlanChat, PlanView } from "./Plan";
+import { RestartButton, SettingsPage } from "./Settings";
 
-type Message = {
-  role: "user" | "assistant" | "error";
-  text: string;
-  meta?: string;
-  /** Facts from memory that the app added to the question. */
-  facts?: string[];
-};
+type Page = "home" | "plan" | "memory" | "settings";
+type Toast = { text: string; undo?: () => void; error?: boolean };
+/** A task that was just closed in ClickUp. The window keeps each one with
+ * its own undo: a second close must not lose the undo of the first. */
+type Closed = { id: string; title: string; before: string };
 
-const BRIEF_PROMPT =
-  "What needs my attention right now? Give me a short TL;DR list, most urgent first.";
+const EMPTY_CHAT: ChatState = { msgs: [], busy: false, progress: [] };
 
-const SUGGESTIONS = [
-  { label: "Brief me", prompt: BRIEF_PROMPT },
-  { label: "What should I review?", prompt: "Which pull requests wait for my review? One line each." },
-  { label: "Plan my day", prompt: "Look at my to-do list, GitHub items, and ClickUp tasks. Suggest an order for today." },
-];
-
-function modelLabel(id: string | null): string {
-  return api.CHAT_MODELS.find((m) => m.id === id)?.label ?? id ?? "Default";
+/** Today, as "YYYY-MM-DD". It changes at midnight. A check each minute also works after the computer sleeps. */
+function useToday(): string {
+  const [day, setDay] = useState(() => dayOf(new Date()));
+  useEffect(() => {
+    const timer = setInterval(() => setDay(dayOf(new Date())), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+  return day;
 }
 
-function formatMeta(a: api.Answer): string {
-  const parts = [`${(a.stats.total_ms / 1000).toFixed(1)}s`];
-  if (a.model) parts.push(modelLabel(a.model));
-  const n = a.stats.tool_calls.length;
-  if (n) parts.push(`${n} lookup${n === 1 ? "" : "s"}`);
-  if (a.cost_usd != null) parts.push(`~$${a.cost_usd.toFixed(3)} usage`);
-  return parts.join(" · ");
+/** "5m ago" for a time in Unix seconds. */
+function agoSecs(t: number): string {
+  const s = Date.now() / 1000 - t;
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
 }
 
-/** Picks the model for the next messages. The app remembers the last pick. */
-function ModelPicker(props: { model: string | null; onChange: (model: string | null) => void; disabled?: boolean }) {
-  return (
-    <select
-      aria-label="Model"
-      title={api.CHAT_MODELS.find((m) => m.id === props.model)?.hint}
-      value={props.model ?? ""}
-      disabled={props.disabled}
-      onChange={(e) => props.onChange(e.target.value || null)}
-      className="h-10 rounded-xl border border-stone-300 bg-white px-2 text-xs text-stone-600 outline-none focus:border-amber-500 disabled:opacity-40 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
-    >
-      {api.CHAT_MODELS.map((m) => (
-        <option key={m.id ?? ""} value={m.id ?? ""} title={m.hint}>
-          {m.label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-function ChatInput(props: {
-  busy: boolean;
-  onSend: (text: string) => void;
-  big?: boolean;
-  autoFocus?: boolean;
-  model: string | null;
-  onModel: (model: string | null) => void;
-}) {
-  const [input, setInput] = useState("");
-  function send() {
-    if (!input.trim() || props.busy) return;
-    props.onSend(input);
-    setInput("");
+/** A value that this window keeps for you on this computer. It can be missing. */
+function stored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
   }
-  return (
-    <div className="flex items-end gap-2">
-      <textarea
-        value={input}
-        autoFocus={props.autoFocus}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            send();
-          }
-        }}
-        rows={props.big ? 2 : 1}
-        placeholder={props.big ? "Ask AIfred anything about your work…" : "Ask AIfred…"}
-        className={`max-h-40 flex-1 resize-none rounded-xl border border-stone-300 bg-white px-4 outline-none focus:border-amber-500 dark:border-stone-700 dark:bg-stone-900 ${
-          props.big ? "py-3 text-[15px] shadow-sm" : "py-2.5 text-sm"
-        }`}
-      />
-      <ModelPicker model={props.model} onChange={props.onModel} disabled={props.busy} />
-      <button
-        onClick={send}
-        disabled={props.busy || !input.trim()}
-        className="h-10 rounded-xl bg-[#252e4a] px-4 text-sm font-medium text-stone-50 hover:bg-[#323d62] disabled:opacity-40"
-      >
-        Send
-      </button>
-    </div>
-  );
 }
+function store(key: string, value: string | null) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    /* the window works without it */
+  }
+}
+
+/** The model argument of one message: the pick, or "default" for the default model. */
+const pickArg = (m: string | null) => m ?? "default";
+
+/** A message with files and no text asks AIfred to look at the files. */
+const withFiles = (text: string, files: unknown[]) => (text.trim() || !files.length ? text : "Look at these files.");
+
+const turnMsgs = (turns: (api.Turn | api.SideTurn)[]): ChatMsg[] =>
+  turns.map((t) => ({ role: t.role, text: t.text, files: t.files, info: "info" in t ? t.info : undefined }));
 
 export default function App() {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [progress, setProgress] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [chatOpen, setChatOpen] = useState(false);
+  const today = useToday();
+  const [page, setPage] = useState<Page>("home");
   const [info, setInfo] = useState<api.Info | null>(null);
+  const [loadError, setLoadError] = useState("");
   const [facts, setFacts] = useState<api.Fact[]>([]);
-  const [showMemory, setShowMemory] = useState(false);
   const [tasks, setTasks] = useState<api.Task[]>([]);
   const [tasksError, setTasksError] = useState("");
-  const [loadError, setLoadError] = useState("");
+  const [tasksLoaded, setTasksLoaded] = useState(false);
   const [github, setGithub] = useState<api.GithubList>({ items: [], fetched_at: 0 });
-  const [settings, setSettings] = useState<api.Settings | null>(null);
-  const [model, setModel] = useState<string | null>(null);
-  const [page, setPage] = useState<"home" | "settings">("home");
-  const [githubState, setGithubState] = useState("loading");
+  const [githubState, setGithubState] = useState<ListState>("loading");
   const [clickup, setClickup] = useState<api.ClickupList>({ items: [], fetched_at: 0 });
-  const [clickupState, setClickupState] = useState("loading");
+  const [clickupState, setClickupState] = useState<ListState>("loading");
   const [clickupToken, setClickupToken] = useState<api.ClickupTokenStatus | null>(null);
+  const [settings, setSettings] = useState<api.Settings | null>(null);
   const [update, setUpdate] = useState<api.UpdateStatus | null>(null);
   const [restartError, setRestartError] = useState("");
-  /** Counts ClickUp loads. Only the newest load may change the screen. */
-  const clickupLoad = useRef(0);
-  const bottom = useRef<HTMLDivElement>(null);
-  /** Counts GitHub loads. Only the newest load may change the screen. */
+  const [meta, setMeta] = useState<api.ItemMeta[]>([]);
+  const [est, setEst] = useState<Record<string, api.Estimate>>({});
+  const [brief, setBrief] = useState<api.Brief | null>(null);
+  const [briefLoaded, setBriefLoaded] = useState("");
+  const [briefState, setBriefState] = useState("idle");
+  const [plan, setPlan] = useState<api.DayPlan | null>(null);
+  // The day whose plan is loaded. Until today's plan loads, a change must
+  // not save: it would use the plan of the day before.
+  const [planLoaded, setPlanLoaded] = useState("");
+  const [models, setModels] = useState<AppCtx["models"]>(() => ({
+    main: null,
+    plan: stored("aifred-model-plan") || null,
+    // "" is a saved pick of Default. No saved pick at all is Haiku.
+    item: ((m) => (m === null ? "haiku" : m || null))(stored("aifred-model-item")),
+  }));
+
+  /** False until the saved main model is loaded. Before that, a question
+   * sends no model, so the backend uses the saved pick itself. */
+  const mainModelKnown = useRef(false);
+  const [main, setMain] = useState<ChatState>(EMPTY_CHAT);
+  const [mainOpen, setMainOpen] = useState(false);
+  const [planChat, setPlanChat] = useState<ChatState>(EMPTY_CHAT);
+  const [planChatOpen, setPlanChatOpen] = useState(false);
+  /** The day of the plan chat on the screen. */
+  const planDay = useRef("");
+  const [itemChats, setItemChats] = useState<Record<string, ChatState>>({});
+  // A restart to update must wait for every running answer and the brief.
+  const anyBusy = main.busy || planChat.busy || Object.values(itemChats).some((c) => c.busy) || briefState === "writing";
+  const [sel, setSel] = useState<string | null>(null);
+  const [side, setSide] = useState<"chat" | "task">("chat");
+  const [unread, setUnread] = useState(false);
+  const [toastState, setToast] = useState<Toast | null>(null);
+  const [closed, setClosed] = useState<Closed[]>([]);
+  /** The ClickUp tasks that are closing now. A second click on one does nothing. */
+  const closing = useRef(new Set<string>());
+  const [sideW, setSideW] = useState<number | null>(() => {
+    const w = Number(stored("aifred-side-w"));
+    return w >= 300 ? w : null;
+  });
+  const [, setWinW] = useState(0);
+  const appRef = useRef<HTMLDivElement>(null);
   const githubLoad = useRef(0);
+  const clickupLoad = useRef(0);
+  const briefTried = useRef(new Set<string>());
+  const now = useRef({ sel, side });
+  now.current = { sel, side };
+
+  // ---------- Loading ----------
 
   const loadTasks = useCallback(() => {
     api
@@ -134,52 +134,55 @@ export default function App() {
       .then((t) => {
         setTasks(t);
         setTasksError("");
+        setTasksLoaded(true);
       })
       .catch((e) => setTasksError(String(e)));
   }, []);
-
-  /** force: ask GitHub now. Without force, the app can use its saved list. */
-  /** Loads can overlap (reload, then a tick). An older answer must not
-   * replace a newer one, so we drop all but the answer to the newest load. */
-  const loadGithub = useCallback((force: boolean) => {
-    const n = ++githubLoad.current;
-    setGithubState("loading");
-    api
-      .githubItems(force)
-      .then((list) => {
-        if (n !== githubLoad.current) return;
-        setGithub(list);
-        setGithubState("ok");
-      })
-      .catch((e) => {
-        if (n !== githubLoad.current) return;
-        setGithubState(String(e));
-      });
+  const loadMeta = useCallback(() => {
+    api.itemMeta().then(setMeta).catch(() => {});
+    api.estimates().then(setEst).catch(() => {});
   }, []);
 
-  /** Like loadGithub. Does nothing when ClickUp is not connected. */
-  const loadClickup = useCallback((force: boolean, connected: boolean) => {
-    const n = ++clickupLoad.current;
-    if (!connected) {
-      setClickup({ items: [], fetched_at: 0 });
-      setClickupState("off");
-      return;
-    }
-    setClickupState("loading");
-    api
-      .clickupItems(force)
-      .then((list) => {
-        if (n !== clickupLoad.current) return;
-        setClickup(list);
-        setClickupState("ok");
-      })
-      .catch((e) => {
-        if (n !== clickupLoad.current) return;
-        setClickupState(String(e));
-      });
-  }, []);
+  /** Loads can overlap (reload, then a tick). Only the answer to the newest load may change the screen. */
+  const loadGithub = useCallback(
+    (force: boolean) => {
+      const n = ++githubLoad.current;
+      setGithubState("loading");
+      api
+        .githubItems(force)
+        .then((list) => {
+          if (n !== githubLoad.current) return;
+          setGithub(list);
+          setGithubState("ok");
+          loadMeta();
+        })
+        .catch((e) => n === githubLoad.current && setGithubState(String(e)));
+    },
+    [loadMeta],
+  );
 
-  /** Reads whether ClickUp is connected, then loads its list. */
+  const loadClickup = useCallback(
+    (force: boolean, connected: boolean) => {
+      const n = ++clickupLoad.current;
+      if (!connected) {
+        setClickup({ items: [], fetched_at: 0 });
+        setClickupState("off");
+        return;
+      }
+      setClickupState("loading");
+      api
+        .clickupItems(force)
+        .then((list) => {
+          if (n !== clickupLoad.current) return;
+          setClickup(list);
+          setClickupState("ok");
+          loadMeta();
+        })
+        .catch((e) => n === clickupLoad.current && setClickupState(String(e)));
+    },
+    [loadMeta],
+  );
+
   const checkClickup = useCallback(
     (force: boolean) => {
       api
@@ -198,24 +201,62 @@ export default function App() {
     const failed = (what: string) => (e: unknown) => setLoadError(`Cannot load ${what}: ${e}`);
     api
       .history()
-      .then((turns) => setMessages(turns.map((t) => ({ role: t.role, text: t.text }))))
+      .then((turns) => setMain((c) => ({ ...c, msgs: turnMsgs(turns) })))
       .catch(failed("the conversation"));
     api.info().then(setInfo).catch(failed("app info"));
     api.memoryFacts().then(setFacts).catch(failed("memory"));
     api
       .getSettings()
-      .then(setSettings)
+      .then((s) => setSettings({ ...api.DEFAULT_SETTINGS, ...s }))
       .catch((e) => {
         failed("settings")(e);
-        setSettings({ refresh_minutes: 15 });
+        setSettings(api.DEFAULT_SETTINGS);
       });
-    api.chatModel().then(setModel).catch(failed("the chat model"));
+    api
+      .chatModel()
+      .then((m) => {
+        mainModelKnown.current = true;
+        setModels((all) => ({ ...all, main: m }));
+      })
+      .catch(failed("the chat model"));
     loadTasks();
+    loadMeta();
     loadGithub(false);
     checkClickup(false);
-  }, [loadTasks, loadGithub, checkClickup]);
+  }, [loadTasks, loadMeta, loadGithub, checkClickup]);
 
-  // Reload the GitHub list on the timer from the settings. 0 means never.
+  // The plan, the brief, and the plan chat belong to one day. A new day loads them again.
+  useEffect(() => {
+    let live = true;
+    planDay.current = today;
+    setPlanChat(EMPTY_CHAT);
+    setPlan(null);
+    api
+      .dayPlan(today)
+      .then((p) => {
+        if (!live) return;
+        setPlan(p);
+        setPlanLoaded(today);
+      })
+      .catch(() => {});
+    api
+      .brief(today)
+      .then((b) => {
+        if (!live) return;
+        setBrief(b);
+        setBriefLoaded(today);
+      })
+      .catch(() => live && setBriefLoaded(today));
+    api
+      .sideHistory(`plan:${today}`)
+      .then((t) => live && setPlanChat((c) => ({ ...c, msgs: [...turnMsgs(t), ...c.msgs] })))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [today]);
+
+  // Reload the GitHub and ClickUp lists on the timer from the settings. 0 means never.
   const refreshMinutes = settings?.refresh_minutes ?? 0;
   useEffect(() => {
     if (refreshMinutes <= 0) return;
@@ -242,52 +283,572 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, progress, chatOpen]);
+  const writeBrief = useCallback(() => {
+    const day = today;
+    briefTried.current.add(day);
+    setBriefState("writing");
+    api
+      .writeBrief(day)
+      .then((b) => {
+        if (b.day === dayOf(new Date())) setBrief(b);
+        setBriefState("idle");
+        api.estimates().then(setEst).catch(() => {});
+      })
+      .catch((e) => setBriefState(String(e)));
+  }, [today]);
 
-  async function send(prompt: string) {
-    const text = prompt.trim();
-    if (!text || busy) return;
-    setChatOpen(true);
-    setBusy(true);
-    setProgress([]);
-    setMessages((m) => [...m, { role: "user", text }]);
+  // The brief writes itself once a day, after the lists are loaded, when the setting is on.
+  const listsReady = githubState !== "loading" && clickupState !== "loading";
+  useEffect(() => {
+    if (!settings?.auto_brief || briefLoaded !== today || brief || !listsReady || briefTried.current.has(today)) return;
+    writeBrief();
+  }, [settings?.auto_brief, briefLoaded, today, brief, listsReady, writeBrief]);
+
+  // ---------- Items ----------
+
+  const items = useMemo(
+    () => buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}),
+    [tasks, github.items, clickup.items, meta, est, brief],
+  );
+  const byKey = useMemo(() => new Map(items.map((i) => [i.key, i])), [items]);
+  const planItems = useMemo(() => (plan?.items ?? []).map((p) => byKey.get(p.key)).filter((i): i is Item => !!i), [plan, byKey]);
+  const cfg = settings ?? api.DEFAULT_SETTINGS;
+  const sched = useMemo(() => schedule(planItems, cfg), [planItems, cfg]);
+
+  // An item that left the list (closed in ClickUp, deleted) closes its panel.
+  useEffect(() => {
+    if (sel && !byKey.has(sel) && githubState !== "loading" && clickupState !== "loading") setSel(null);
+  }, [sel, byKey, githubState, clickupState]);
+
+  // ---------- Toast ----------
+
+  const toastTimer = useRef<number | undefined>(undefined);
+  const toast = useCallback((text: string, undo?: () => void, error?: boolean) => {
+    setToast({ text, undo, error });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), error ? 6000 : 4000);
+  }, []);
+
+  /** Runs a change. A failure shows its reason. Returns true when it worked. */
+  const run = useCallback(
+    async <T,>(p: Promise<T>, after?: (v: T) => void): Promise<boolean> => {
+      try {
+        const v = await p;
+        after?.(v);
+        return true;
+      } catch (e) {
+        toast(String(e), undefined, true);
+        return false;
+      }
+    },
+    [toast],
+  );
+
+  // ---------- Actions on items ----------
+
+  const putTask = (t: api.Task) => setTasks((all) => all.map((x) => (x.id === t.id ? t : x)));
+
+  const toggleDone = useCallback(
+    (i: Item) => {
+      if (i.task) {
+        const done = !i.done;
+        run(api.setTaskDone(i.task.id, done), (t) => {
+          putTask(t);
+          if (done) toast(`Finished: ${i.title}`, () => run(api.setTaskDone(t.id, false), putTask));
+        });
+      } else if (i.cu) {
+        const c = i.cu;
+        if (closing.current.has(c.id)) return;
+        closing.current.add(c.id);
+        // This changes the real task in ClickUp, so there is an undo.
+        run(api.clickupMarkDone(c.id), (before) => {
+          setClickup((l) => ({ ...l, items: l.items.filter((x) => x.id !== c.id) }));
+          setClosed((l) => [...l.filter((x) => x.id !== c.id), { id: c.id, title: c.title, before }]);
+        }).finally(() => closing.current.delete(c.id));
+      }
+    },
+    [run, toast],
+  );
+
+  const undoClose = useCallback(
+    (c: Closed) =>
+      run(api.clickupUndoDone(c.id, c.before), () => {
+        setClosed((l) => l.filter((x) => x.id !== c.id));
+        loadClickup(true, true);
+      }),
+    [run, loadClickup],
+  );
+
+  const addTask = useCallback(
+    (fields: api.TaskChanges & { title: string }) =>
+      run(api.createTask(fields), (t) => {
+        setTasks((all) => [...all, t]);
+        toast(`Added: ${t.title}`, () => run(api.deleteTask(t.id), () => setTasks((all) => all.filter((x) => x.id !== t.id))));
+        loadMeta();
+      }),
+    [run, toast, loadMeta],
+  );
+
+  const editTask = useCallback((id: string, changes: api.TaskChanges) => run(api.editTask(id, changes), putTask), [run]);
+
+  const tickStep = useCallback(
+    (id: string, index: number) => {
+      const t = tasks.find((x) => x.id === id);
+      const c = t?.checklist[index];
+      if (c) run(api.setTaskStep(id, index, c.text, !c.done), putTask);
+    },
+    [tasks, run],
+  );
+
+  const deleteTask = useCallback(
+    (i: Item) => {
+      if (!i.task) return;
+      const t = i.task;
+      run(api.deleteTask(t.id), () => {
+        setTasks((all) => all.filter((x) => x.id !== t.id));
+        if (now.current.sel === i.key) setSel(null);
+        toast(`Deleted: ${t.title}`);
+      });
+    },
+    [run, toast],
+  );
+
+  // ---------- The plan ----------
+
+  // Only a plan of the day on screen may change the screen. An answer
+  // that comes back after midnight belongs to the old day.
+  const putPlan = useCallback((day: string, p: api.DayPlan | null) => {
+    if (planDay.current === day) setPlan(p);
+  }, []);
+
+  /** True when the list of the item is loaded, so an item that is not in it is gone. */
+  const listLoaded = useCallback(
+    (key: string) => {
+      if (key.startsWith("task:")) return tasksLoaded;
+      if (key.startsWith("github:")) return githubState === "ok";
+      if (key.startsWith("clickup:")) return clickupState === "ok" || clickupState === "off";
+      return true;
+    },
+    [tasksLoaded, githubState, clickupState],
+  );
+
+  /**
+   * Saves the plan with `keys` (the items on screen) in this order. A plan
+   * item that is not on screen because its list did not load yet keeps its
+   * place, so the save does not delete it.
+   */
+  const savePlan = useCallback(
+    (keys: string[], text?: string) => {
+      const day = today;
+      if (planLoaded !== day) {
+        toast("The plan for today is still loading. Try again in a moment.", undefined, true);
+        return;
+      }
+      const before = plan;
+      const old = (plan?.items ?? []).map((p) => p.key);
+      const shown = new Set(keys);
+      const hidden = new Set(old.filter((k) => !shown.has(k) && !byKey.has(k) && !listLoaded(k)));
+      const merged: string[] = [];
+      let n = 0;
+      for (const k of old) {
+        if (hidden.has(k)) merged.push(k);
+        else if (n < keys.length) merged.push(keys[n++]);
+      }
+      merged.push(...keys.slice(n));
+      const why = new Map((plan?.items ?? []).map((p) => [p.key, p.why]));
+      const next: api.PlanItem[] = merged.map((key) => (why.get(key) ? { key, why: why.get(key) } : { key }));
+      const mode = plan?.mode ?? "self";
+      setPlan({ day, mode, items: next, updated: Date.now() / 1000 });
+      api
+        .setDayPlan(day, mode, next)
+        .then((p) => {
+          putPlan(day, p);
+          if (text) {
+            toast(text, () => {
+              const old = before?.items ?? [];
+              putPlan(day, before);
+              if (before) api.setDayPlan(day, before.mode, old).then((p) => putPlan(day, p)).catch(() => {});
+              else api.clearDayPlan(day).catch(() => {});
+            });
+          }
+        })
+        .catch((e) => {
+          putPlan(day, before);
+          toast(`The plan is not saved: ${e}`, undefined, true);
+        });
+    },
+    [plan, planLoaded, today, toast, byKey, listLoaded, putPlan],
+  );
+
+  const planKeys = useMemo(() => planItems.map((i) => i.key), [planItems]);
+  const addToPlan = useCallback(
+    (key: string, at?: number) => {
+      const keys = planKeys.filter((k) => k !== key);
+      keys.splice(at ?? keys.length, 0, key);
+      savePlan(keys, `Added to today's plan: ${byKey.get(key)?.title ?? ""}`);
+    },
+    [planKeys, savePlan, byKey],
+  );
+  const removeFromPlan = useCallback(
+    (key: string) => savePlan(planKeys.filter((k) => k !== key), `Taken out of the plan: ${byKey.get(key)?.title ?? ""}`),
+    [planKeys, savePlan, byKey],
+  );
+
+  const tomorrow = useCallback(
+    (i: Item) => {
+      const t = i.task;
+      if (!t) return;
+      const next = addDays(today, 1);
+      const before = { due: t.due ?? "", start: t.start ?? "" };
+      const changes: api.TaskChanges = { due: next, ...(t.start && t.start > next ? { start: "" } : {}) };
+      const wasIn = planKeys.includes(i.key);
+      run(api.editTask(t.id, changes), (nt) => {
+        putTask(nt);
+        if (wasIn) savePlan(planKeys.filter((k) => k !== i.key));
+        toast(`Moved to tomorrow: ${t.title}`, () => {
+          run(api.editTask(t.id, before), putTask);
+          if (wasIn) savePlan(planKeys);
+        });
+      });
+    },
+    [today, planKeys, run, savePlan, toast],
+  );
+
+  const setMinutes = useCallback((key: string, minutes: number) => {
+    setEst((e) => ({ ...e, [key]: { minutes, by: "you" } }));
+    api.setEstimate(key, minutes).catch(() => api.estimates().then(setEst).catch(() => {}));
+  }, []);
+
+  // ---------- Chats ----------
+
+  const reloadAfterAnswer = useCallback(() => {
+    // AIfred can add or finish tasks, add facts, and change the plan while it answers.
+    loadTasks();
+    loadMeta();
+    api.memoryFacts().then(setFacts).catch(() => {});
+    api.dayPlan(today).then((p) => putPlan(today, p)).catch(() => {});
+  }, [loadTasks, loadMeta, today, putPlan]);
+
+  /** Runs one question in a chat and puts the messages in `set`. */
+  async function chat(
+    set: (f: (c: ChatState) => ChatState) => void,
+    busy: boolean,
+    text: string,
+    files: api.FileRef[],
+    ask: (progress: (e: api.ProgressEvent) => void) => Promise<api.Answer>,
+  ): Promise<boolean> {
+    if (busy || !text.trim()) return false;
+    set((c) => ({ busy: true, progress: [], msgs: [...c.msgs, { role: "user", text: text.trim(), files }] }));
     try {
-      const answer = await api.ask(text, (e) => setProgress((p) => [...p, api.describe(e)]));
-      setMessages((m) => [...m, { role: "assistant", text: answer.text, meta: formatMeta(answer), facts: answer.memory }]);
+      const a = await ask((e) => set((c) => ({ ...c, progress: [...c.progress, api.describe(e)] })));
+      set((c) => ({ ...c, msgs: [...c.msgs, { role: "assistant", text: a.text, info: a.info, facts: a.memory }] }));
     } catch (e) {
-      setMessages((m) => [...m, { role: "error", text: String(e) }]);
+      set((c) => ({ ...c, msgs: [...c.msgs, { role: "error", text: String(e) }] }));
     } finally {
-      setBusy(false);
-      setProgress([]);
-      // AIfred can add or finish tasks, and add or forget facts, while it answers.
-      loadTasks();
-      api.memoryFacts().then(setFacts).catch(() => {});
+      set((c) => ({ ...c, busy: false, progress: [] }));
+      reloadAfterAnswer();
     }
+    if (now.current.sel && now.current.side === "task") setUnread(true);
+    return true;
   }
 
-  /** Saves the pick first, so the next message uses it. */
-  async function pickModel(m: string | null) {
-    const before = model;
-    setModel(m);
+  const sendMain = (text: string, files: api.FileRef[]) => {
+    setMainOpen(true);
+    setSide("chat");
+    if (page !== "home") setPage("home");
+    text = withFiles(text, files);
+    const model = mainModelKnown.current ? pickArg(models.main) : undefined;
+    return chat(setMain, main.busy, text, files, (p) => api.ask(text.trim(), p, { model, files: files.map((f) => f.id) }));
+  };
+
+  const sendPlan = (text: string, files: api.FileRef[] = []) => {
+    setSide("chat");
+    text = withFiles(text, files);
+    // An answer that comes back after midnight belongs to the old day's
+    // chat (the backend saved it there), so it does not go into the new one.
+    const day = today;
+    const set = (f: (c: ChatState) => ChatState) => setPlanChat((c) => (planDay.current === day ? f(c) : c));
+    return chat(set, planChat.busy, text, files, (p) => api.askSide(`plan:${today}`, text.trim(), p, { model: pickArg(models.plan), files: files.map((f) => f.id) }));
+  };
+
+  const askItem = (key: string, text: string, files: api.FileRef[]) => {
+    const set = (f: (c: ChatState) => ChatState) => setItemChats((all) => ({ ...all, [key]: f(all[key] ?? EMPTY_CHAT) }));
+    text = withFiles(text, files);
+    return chat(set, itemChats[key]?.busy ?? false, text, files, (p) => api.askSide(`item:${key}`, text.trim(), p, { model: pickArg(models.item), files: files.map((f) => f.id) }));
+  };
+
+  // The chat of an item loads when its panel opens, one time. A message
+  // that the user sent before the load came back stays after the old ones.
+  const itemLoaded = useRef(new Set<string>());
+  useEffect(() => {
+    if (!sel || itemLoaded.current.has(sel)) return;
+    const key = sel;
+    itemLoaded.current.add(key);
+    api
+      .sideHistory(`item:${key}`)
+      .then((t) =>
+        setItemChats((all) => {
+          const c = all[key] ?? EMPTY_CHAT;
+          return { ...all, [key]: { ...c, msgs: [...turnMsgs(t), ...c.msgs] } };
+        }),
+      )
+      .catch(() => itemLoaded.current.delete(key));
+  }, [sel]);
+
+  async function pickModel(box: "main" | "plan" | "item", m: string | null) {
+    const before = models[box];
+    setModels((all) => ({ ...all, [box]: m }));
+    if (box !== "main") {
+      store(`aifred-model-${box}`, m ?? "");
+      return;
+    }
+    // The main pick is saved in the app, so the next start and the terminal use it too.
     try {
       await api.setChatModel(m);
     } catch (e) {
-      setModel(before);
-      setMessages((all) => [...all, { role: "error", text: `Cannot change the model: ${e}` }]);
+      setModels((all) => ({ ...all, main: before }));
+      toast(`Cannot change the model: ${e}`, undefined, true);
     }
   }
 
   async function startNew() {
     try {
       await api.newConversation();
-      setMessages([]);
-      setChatOpen(false);
+      setMain(EMPTY_CHAT);
+      setMainOpen(false);
     } catch (e) {
-      setMessages((m) => [...m, { role: "error", text: String(e) }]);
+      toast(String(e), undefined, true);
     }
   }
+
+  const goPlan = () => {
+    setPage("plan");
+    setSel(null);
+    setSide("chat");
+  };
+
+  const startPlan = (mode: "ai" | "self") => {
+    goPlan();
+    if (mode === "self") {
+      if (planLoaded !== today) {
+        toast("The plan for today is still loading. Try again in a moment.", undefined, true);
+        return;
+      }
+      const day = today;
+      run(api.setDayPlan(day, "self", plan?.items ?? []), (p) => putPlan(day, p));
+      return;
+    }
+    setPlanChatOpen(true);
+    sendPlan(plan?.items.length ? "Plan my day again from the start." : "Plan my day.");
+  };
+
+  const startOver = () => {
+    run(Promise.all([api.clearDayPlan(today), api.clearSide(`plan:${today}`)]), () => {
+      setPlan(null);
+      setPlanChat(EMPTY_CHAT);
+    });
+  };
+
+  const open = (key: string) => {
+    if (!byKey.has(key)) return;
+    setSel(key);
+    setSide("task");
+    if (page !== "home" && page !== "plan") setPage("home");
+    requestAnimationFrame(() => document.getElementById(`row-${key}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  };
+  const close = () => {
+    setSel(null);
+    setSide("chat");
+  };
+
+  // Escape closes the task panel, then the plan chat on a narrow window.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (sel) close();
+      else if (planChatOpen) setPlanChatOpen(false);
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  });
+
+  // ---------- The width of the right side ----------
+
+  const clampW = (w: number) => {
+    const W = appRef.current?.clientWidth ?? 1400;
+    const max = Math.max(300, W - 52 - 420);
+    return Math.round(Math.min(max, Math.max(300, w)));
+  };
+  // A smaller window can make the saved width too wide. Draw again with the new limit.
+  useEffect(() => {
+    let t: number | undefined;
+    const resize = () => {
+      clearTimeout(t);
+      t = window.setTimeout(() => setWinW(window.innerWidth), 120);
+    };
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+  const setW = (w: number | null) => {
+    setSideW(w);
+    store("aifred-side-w", w === null ? null : String(w));
+    if (w === null) appRef.current?.style.removeProperty("--side-w");
+  };
+  const handle = (
+    <div
+      className="sz-h"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Width of the side panel. Drag, or use the arrow keys. Double-click to reset."
+      tabIndex={0}
+      onPointerDown={(e) => {
+        if (e.button > 0) return;
+        e.preventDefault();
+        const start = { x: e.clientX, w: (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().width };
+        const el = e.currentTarget;
+        el.setPointerCapture?.(e.pointerId);
+        document.body.classList.add("sizing");
+        let w = start.w;
+        const move = (ev: PointerEvent) => {
+          w = clampW(start.w + (start.x - ev.clientX));
+          // Straight on the page while you drag, so React does not draw each step.
+          appRef.current?.style.setProperty("--side-w", `${w}px`);
+        };
+        const end = () => {
+          document.body.classList.remove("sizing");
+          el.removeEventListener("pointermove", move);
+          el.removeEventListener("pointerup", end);
+          el.removeEventListener("pointercancel", end);
+          setW(w);
+        };
+        el.addEventListener("pointermove", move);
+        el.addEventListener("pointerup", end);
+        el.addEventListener("pointercancel", end);
+      }}
+      onDoubleClick={() => setW(null)}
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        e.preventDefault();
+        const cur = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().width;
+        setW(clampW(cur + (e.key === "ArrowLeft" ? 20 : -20)));
+      }}
+    />
+  );
+
+  // ---------- Layout ----------
+
+  const onPlan = page === "plan";
+  const chatOn = onPlan ? true : page === "home" && mainOpen;
+  const selItem = sel && (page === "home" || onPlan) ? byKey.get(sel) : undefined;
+  const showSide = (v: "chat" | "task") => {
+    setSide(v);
+    if (v === "chat") {
+      setUnread(false);
+      if (onPlan) setPlanChatOpen(true);
+    }
+  };
+
+  const tabs =
+    selItem && chatOn ? (
+      <div className="stabs" role="tablist" aria-label="Open on the right">
+        <div
+          className={`stab${side === "chat" ? " on" : ""}`}
+          role="tab"
+          aria-selected={side === "chat"}
+          tabIndex={0}
+          onClick={() => showSide("chat")}
+          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), showSide("chat"))}
+        >
+          {ICON.chat}
+          <span className="lb">{onPlan ? "Plan chat" : "Conversation"}</span>
+          {unread && side !== "chat" && <span className="new" title="New answer" />}
+          {!onPlan && (
+            <button
+              className="x"
+              aria-label="Close the conversation"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMainOpen(false);
+                setSide("task");
+                setUnread(false);
+              }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        <div
+          className={`stab task${side === "task" ? " on" : ""}`}
+          role="tab"
+          aria-selected={side === "task"}
+          tabIndex={0}
+          onClick={() => showSide("task")}
+          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), showSide("task"))}
+        >
+          {ICON.task}
+          <span className="lb">{selItem.title}</span>
+          <button
+            className="x"
+            aria-label="Close the task"
+            onClick={(e) => {
+              e.stopPropagation();
+              close();
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    ) : null;
+
+  const ctx: AppCtx = {
+    today,
+    items,
+    byKey,
+    settings: cfg,
+    plan,
+    planItems,
+    sched,
+    brief,
+    briefState,
+    githubState,
+    clickupState,
+    githubWarning: github.warning,
+    clickupWarning: clickup.warning,
+    tasksError,
+    sel,
+    open,
+    close,
+    main,
+    mainOpen,
+    openMain: () => {
+      setPage("home");
+      setMainOpen(true);
+      showSide("chat");
+    },
+    sendMain,
+    planChat,
+    sendPlan,
+    itemChat: (key) => itemChats[key] ?? EMPTY_CHAT,
+    askItem,
+    models,
+    setModel: pickModel,
+    toggleDone,
+    addTask,
+    editTask,
+    tickStep,
+    deleteTask,
+    tomorrow,
+    setMinutes,
+    savePlan,
+    addToPlan,
+    removeFromPlan,
+    startPlan,
+    startOver,
+    writeBrief,
+    toast,
+    goPlan,
+  };
 
   // Open links in the system browser, not inside the app window.
   function onClick(e: React.MouseEvent) {
@@ -298,216 +859,214 @@ export default function App() {
     }
   }
 
+  const sync = (() => {
+    const parts: React.ReactNode[] = [];
+    const one = (name: string, state: ListState, at: number, warn?: string) => {
+      if (state === "off") return;
+      if (state === "loading") parts.push(<span key={name}>{name}…</span>);
+      else if (state !== "ok") parts.push(<span key={name} className="err" title={state}>{name}: error</span>);
+      else parts.push(<span key={name} className={warn ? "warn" : ""} title={warn}>{name} {at ? agoSecs(at) : ""}</span>);
+    };
+    one("GitHub", githubState, github.fetched_at, github.warning);
+    one("ClickUp", clickupState, clickup.fetched_at, clickup.warning);
+    return parts;
+  })();
+  const loading = githubState === "loading" || clickupState === "loading";
+  const bad = (!["loading", "ok", "off"].includes(githubState)) || (!["loading", "ok", "off"].includes(clickupState));
+
+  const rail = (k: Page | "chat", icon: React.ReactNode, label: string, onClick: () => void, on: boolean, dot?: boolean) => (
+    <button key={k} className={on ? "on" : ""} title={label} aria-label={label} aria-pressed={on} onClick={onClick}>
+      {icon}
+      {dot && <span className="new" />}
+    </button>
+  );
+
   return (
-    <div className="flex h-full" onClick={onClick}>
-      {/* Left sidebar */}
-      <aside className="flex w-60 shrink-0 flex-col gap-4 border-r border-stone-200 bg-stone-100/60 p-4 dark:border-stone-800 dark:bg-stone-900/60">
-        <button
-          onClick={() => {
-            setChatOpen(false);
-            setPage("home");
-          }}
-          className="flex items-center gap-2 text-left"
-          title="Home"
-        >
-          <div className="grid size-8 place-items-center rounded-lg bg-[#252e4a]">
-            <div className="size-3.5 rounded-full border-[3px] border-amber-400" />
-          </div>
-          <div>
-            <div className="font-semibold leading-tight">AIfred</div>
-            <div className="text-xs text-stone-500">{info?.backend ?? "…"}</div>
-          </div>
-        </button>
-
-        <button
-          onClick={startNew}
-          disabled={busy}
-          className="rounded-lg border border-stone-300 px-3 py-2 text-sm hover:bg-stone-200 disabled:opacity-50 dark:border-stone-700 dark:hover:bg-stone-800"
-        >
-          New conversation
-        </button>
-
-        <div className="flex min-h-0 flex-1 flex-col">
-          <button
-            onClick={() => setShowMemory((s) => !s)}
-            className="flex items-center justify-between text-left text-xs font-semibold uppercase tracking-wide text-stone-500"
-          >
-            What AIfred knows about you
-            <span>{showMemory ? "−" : "+"}</span>
-          </button>
-          {showMemory && (
-            <MemoryList
-              facts={facts}
-              onAdd={(f) => setFacts((all) => [...all, f])}
-              onChange={(f) => setFacts((all) => all.map((x) => (x.id === f.id ? f : x)))}
-            />
-          )}
-        </div>
-
-        <button
-          onClick={() => setPage("settings")}
-          className="text-left text-xs font-semibold uppercase tracking-wide text-stone-500 hover:text-stone-800 dark:hover:text-stone-200"
-        >
-          Settings
-        </button>
-
-        {update?.state === "ready" && (
-          <div className="space-y-2 rounded-lg border border-amber-400/60 bg-amber-50 p-2 text-xs dark:bg-amber-950/30">
-            <div>AIfred {update.latest} is ready.</div>
-            <RestartButton small busy={busy} onError={setRestartError} />
-            {restartError && <div className="text-red-600">{restartError}</div>}
-          </div>
-        )}
-
-        <div className="space-y-1 text-[11px] text-stone-500">
-          {loadError && <div className="text-red-600">{loadError}</div>}
-          {info?.api_key_set && (
-            <div className="text-red-600">ANTHROPIC_API_KEY is set: Claude uses the API key, not your login.</div>
-          )}
-          <div>GitHub: {info?.github_owners ? `only ${info.github_owners}` : "all owners"}</div>
-          {info && <div title="Finds facts, chats, and tasks by meaning, not only by words.">Meaning search: {info.meaning_search}</div>}
-          <div className="truncate" title={info?.data_dir}>
-            Data: {info?.data_dir}
-          </div>
-        </div>
-      </aside>
-
-      {/* Home */}
-      <main className="min-w-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl px-6 py-8">
-          {page === "settings" && settings && (
-            <SettingsPage
-              settings={settings}
-              onSaved={setSettings}
-              onBack={() => setPage("home")}
-              clickupToken={clickupToken}
-              onClickupTokenChanged={() => checkClickup(true)}
-              update={update}
-              onUpdateChanged={setUpdate}
-              busy={busy}
-            />
-          )}
-          {page === "home" && !chatOpen && (
-            <div className="mb-10">
-              <div className="mb-4 text-2xl font-semibold">Good to see you.</div>
-              <ChatInput big autoFocus busy={busy} onSend={send} model={model} onModel={pickModel} />
-              <div className="mt-3 flex flex-wrap gap-2">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s.label}
-                    onClick={() => send(s.prompt)}
-                    disabled={busy}
-                    className="rounded-full border border-stone-300 px-3 py-1 text-xs text-stone-600 hover:bg-stone-200 disabled:opacity-50 dark:border-stone-700 dark:text-stone-300 dark:hover:bg-stone-800"
-                  >
-                    {s.label}
-                  </button>
-                ))}
-                {messages.length > 0 && (
-                  <button
-                    onClick={() => setChatOpen(true)}
-                    className="ml-auto text-xs text-amber-700 hover:underline dark:text-amber-400"
-                  >
-                    Continue the conversation ({messages.length} messages) →
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-          {page === "home" && (
-            <TodoList
-              tasks={tasks}
-              github={github.items}
-              fetchedAt={github.fetched_at}
-              githubWarning={github.warning}
-              githubState={githubState}
-              tasksError={tasksError}
-              clickup={clickup.items}
-              clickupState={clickupState}
-              clickupFetchedAt={clickup.fetched_at}
-              clickupWarning={clickup.warning}
-              onClickupDone={(id) => setClickup((l) => ({ ...l, items: l.items.filter((i) => i.id !== id) }))}
-              onClickupReload={() => loadClickup(true, clickupOn)}
-              onChange={loadTasks}
-              onRefresh={() => {
+    <Ctx.Provider value={ctx}>
+      <div
+        ref={appRef}
+        className={`app ${onPlan ? "plan" : "home"}`}
+        style={sideW ? ({ "--side-w": `${clampW(sideW)}px` } as React.CSSProperties) : undefined}
+        onClick={onClick}
+      >
+        <div className="chrome">
+          <span className="logo" aria-hidden />
+          <span className="name">AIfred</span>
+          <span className="hide-s">{info?.backend ?? ""}</span>
+          <span className="sync" role="status">
+            <span className={`ok${loading ? " busy" : bad ? " bad" : ""}`} />
+            {sync.map((p, i) => (
+              <span key={i} className={i ? "hide-s" : ""}>
+                {i ? "· " : ""}
+                {p}
+              </span>
+            ))}
+            <button
+              className="reload"
+              title="Reload the list"
+              aria-label="Reload the list"
+              onClick={() => {
                 loadTasks();
                 loadGithub(true);
                 loadClickup(true, clickupOn);
               }}
-            />
+            >
+              ↻
+            </button>
+          </span>
+        </div>
+        <div className="body">
+          <nav className="rail" aria-label="App">
+            {rail("home", ICON.home, "Home", () => (setPage("home"), setSel(null)), page === "home")}
+            {rail("plan", ICON.cal, "Day plan", goPlan, onPlan)}
+            {rail("chat", ICON.chat, "Conversation", ctx.openMain, page === "home" && mainOpen)}
+            {rail("memory", ICON.mem, "What AIfred knows about you", () => (setPage("memory"), setSel(null)), page === "memory")}
+            <span className="sp" />
+            {rail("settings", ICON.gear, "Settings", () => (setPage("settings"), setSel(null)), page === "settings", update?.state === "ready")}
+          </nav>
+
+          {page === "home" && (
+            <div className="home-col">
+              <div className="banners">
+                {loadError && <div className="banner err">{loadError}</div>}
+                {info?.api_key_set && <div className="banner err">ANTHROPIC_API_KEY is set: Claude uses the API key, not your login.</div>}
+                {update?.state === "ready" && (
+                  <div className="banner">
+                    <span>AIfred {update.latest} is ready.</span>
+                    <RestartButton small busy={anyBusy} onError={setRestartError} />
+                    {restartError && <span>{restartError}</span>}
+                  </div>
+                )}
+              </div>
+              <Home />
+            </div>
+          )}
+          {onPlan && <PlanView onChat={() => (setPlanChatOpen(true), showSide("chat"))} />}
+          {page === "settings" && settings && (
+            <div className="scroll page-main page">
+              <div className="page-inner">
+                <SettingsPage
+                  settings={settings}
+                  onSaved={setSettings}
+                  info={info}
+                  clickupToken={clickupToken}
+                  onClickupTokenChanged={() => checkClickup(true)}
+                  update={update}
+                  onUpdateChanged={setUpdate}
+                  busy={anyBusy}
+                />
+              </div>
+            </div>
+          )}
+          {page === "memory" && (
+            <div className="scroll page-main page">
+              <div className="page-inner">
+                <h2 className="title">What AIfred knows about you</h2>
+                <p className="note-line" style={{ paddingTop: 0 }}>
+                  AIfred uses these facts in your chats. It also adds and forgets facts when you tell it to.
+                </p>
+                <MemoryList
+                  facts={facts}
+                  onAdd={(f) => setFacts((all) => [...all, f])}
+                  onChange={(f) => setFacts((all) => all.map((x) => (x.id === f.id ? f : x)))}
+                />
+              </div>
+            </div>
+          )}
+
+          {selItem && (
+            <Detail key={selItem.key} item={selItem} hidden={chatOn && side === "chat"} tabs={tabs} handle={handle} />
+          )}
+          {page === "home" && mainOpen && (
+            <aside className="chat" aria-label="Conversation" hidden={!!selItem && side === "task"}>
+              {handle}
+              {tabs}
+              <div className="chat-h">
+                Conversation
+                <span className="sp" />
+                <button className="linkbtn" onClick={startNew} disabled={main.busy}>
+                  New
+                </button>
+                <button className="linkbtn" title="Close the conversation panel" onClick={() => setMainOpen(false)}>
+                  Close
+                </button>
+              </div>
+              <MainMessages />
+            </aside>
+          )}
+          {onPlan && (
+            <aside className={`chat${planChatOpen ? " open" : ""}`} aria-label="Plan chat" hidden={!!selItem && side === "task"}>
+              {handle}
+              {tabs}
+              <div className="chat-h">
+                Plan chat
+                <span className="sp" />
+                <button className="linkbtn m-only" onClick={() => setPlanChatOpen(false)}>
+                  Close
+                </button>
+              </div>
+              <PlanChat />
+            </aside>
           )}
         </div>
-      </main>
-
-      {/* Right sidebar: the conversation, after the first message */}
-      {chatOpen && (
-        <aside aria-label="Conversation" className="flex w-[440px] shrink-0 flex-col border-l border-stone-200 dark:border-stone-800">
-          <div className="flex items-center gap-2 border-b border-stone-200 px-4 py-2.5 dark:border-stone-800">
-            <span className="text-sm font-semibold">Conversation</span>
-            <button
-              onClick={startNew}
-              disabled={busy}
-              className="ml-auto rounded px-2 py-1 text-xs text-stone-500 hover:bg-stone-200 disabled:opacity-40 dark:hover:bg-stone-800"
-            >
-              New
+        <div className="toasts">
+        {closed.map((c) => (
+          <div key={c.id} className="toast" role="status">
+            <span>Closed in ClickUp: {c.title}</span>
+            <button aria-label={`Undo: ${c.title}`} onClick={() => undoClose(c)}>
+              Undo
             </button>
-            <button
-              onClick={() => setChatOpen(false)}
-              title="Close the conversation panel"
-              className="rounded px-2 py-1 text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-800"
-            >
+            <button aria-label={`Hide this message: ${c.title}`} onClick={() => setClosed((l) => l.filter((x) => x.id !== c.id))}>
               ✕
             </button>
           </div>
-
-          <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4">
-            {messages.map((m, i) =>
-              m.role === "user" ? (
-                <div key={i} className="flex justify-end">
-                  <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-[#252e4a] px-4 py-2 text-sm text-stone-50">
-                    {m.text}
-                  </div>
-                </div>
-              ) : m.role === "error" ? (
-                <div key={i} className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-                  {m.text}
-                </div>
-              ) : (
-                <div key={i}>
-                  <div className="md text-sm leading-relaxed">
-                    <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
-                  </div>
-                  {m.meta && <div className="mt-2 text-xs text-stone-400">{m.meta}</div>}
-                  {m.facts && m.facts.length > 0 && (
-                    <details className="mt-1 text-xs text-stone-400">
-                      <summary className="cursor-pointer">
-                        Used {m.facts.length} fact{m.facts.length === 1 ? "" : "s"} from memory
-                      </summary>
-                      <ul className="mt-1 list-disc pl-4">
-                        {m.facts.map((f, j) => (
-                          <li key={j}>{f}</li>
-                        ))}
-                      </ul>
-                    </details>
-                  )}
-                </div>
-              ),
+        ))}
+        {toastState && (
+          <div className={`toast${toastState.error ? " err" : ""}`} role={toastState.error ? "alert" : "status"}>
+            <span>{toastState.text}</span>
+            {toastState.undo && (
+              <button
+                onClick={() => {
+                  toastState.undo!();
+                  setToast(null);
+                }}
+              >
+                Undo
+              </button>
             )}
-            {busy && (
-              <div className="space-y-1 text-sm text-stone-500">
-                {progress.map((p, i) => (
-                  <div key={i}>✓ {p}</div>
-                ))}
-                <div className="animate-pulse">Thinking…</div>
-              </div>
-            )}
-            <div ref={bottom} />
+            <button aria-label="Hide this message" onClick={() => setToast(null)}>
+              ✕
+            </button>
           </div>
+        )}
+        </div>
+      </div>
+    </Ctx.Provider>
+  );
+}
 
-          <div className="border-t border-stone-200 p-3 dark:border-stone-800">
-            <ChatInput autoFocus busy={busy} onSend={send} model={model} onModel={pickModel} />
-          </div>
-        </aside>
-      )}
-    </div>
+/** The messages of the main conversation, with the chat box under them. */
+function MainMessages() {
+  const { main, sendMain, models, setModel, open, byKey } = useApp();
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.scrollTo({ top: ref.current.scrollHeight });
+  }, [main.msgs.length, main.busy, main.progress.length]);
+  return (
+    <>
+      <div className="msgs" ref={ref}>
+        <Messages list={main.msgs} busy={main.busy} progress={main.progress} onItem={open} hasItem={(k) => byKey.has(k)} />
+      </div>
+      <div className="chat-in">
+        <Composer
+          id="main-panel"
+          placeholder="Ask AIfred…"
+          busy={main.busy}
+          model={models.main}
+          onModel={(m) => setModel("main", m)}
+          onSend={(text, files) => sendMain(text, files)}
+        />
+      </div>
+    </>
   );
 }

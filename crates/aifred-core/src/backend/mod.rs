@@ -38,6 +38,12 @@ pub struct AskRequest {
     pub session: Option<String>,
     /// The model for this message, for example "sonnet". None: the backend's own default.
     pub model: Option<String>,
+    /// Folders with files that the user sent with this message. The backend
+    /// may read files in these folders, and nowhere else (uploads.rs).
+    pub files: Vec<PathBuf>,
+    /// A side chat (side.rs): it has no saved session, and it must not
+    /// share files with a main question that runs at the same time.
+    pub side: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -63,7 +69,11 @@ pub struct AskResponse {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     /// The model started to use a tool.
-    ToolCall { server: String, tool: String, input: serde_json::Value },
+    ToolCall {
+        server: String,
+        tool: String,
+        input: serde_json::Value,
+    },
     /// A backend notice, for example a session that could not resume.
     Notice { message: String },
 }

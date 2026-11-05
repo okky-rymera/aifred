@@ -49,7 +49,10 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// downloads only once for all tests.
 pub fn models_dir(dir: &Path) -> PathBuf {
     if cfg!(test) {
-        return PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-models"));
+        return PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/test-models"
+        ));
     }
     dir.join("models")
 }
@@ -73,7 +76,10 @@ pub fn embed_query(dir: &Path, text: &str) -> Result<Vec<f32>, ModelError> {
         Ok(mut v) => Ok(v.remove(0)),
         Err(HelperError::Slow) => {
             *SLOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-            Err(ModelError(format!("the model did not answer in {} seconds, so this search uses word search only", QUERY_WAIT.as_secs())))
+            Err(ModelError(format!(
+                "the model did not answer in {} seconds, so this search uses word search only",
+                QUERY_WAIT.as_secs()
+            )))
         }
         Err(HelperError::Failed(e)) => Err(e),
     }
@@ -86,7 +92,10 @@ pub fn embed_query(dir: &Path, text: &str) -> Result<Vec<f32>, ModelError> {
 pub fn embed_texts(dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, ModelError> {
     embed_with(dir, texts, ANSWER_WAIT).map_err(|e| match e {
         HelperError::Failed(e) => e,
-        HelperError::Slow => ModelError(format!("the helper did not answer in {} seconds", ANSWER_WAIT.as_secs())),
+        HelperError::Slow => ModelError(format!(
+            "the helper did not answer in {} seconds",
+            ANSWER_WAIT.as_secs()
+        )),
     })
 }
 
@@ -140,13 +149,20 @@ fn socket_path(dir: &Path) -> Result<PathBuf, String> {
         .as_os_str()
         .as_encoded_bytes()
         .iter()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3));
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3)
+        });
     Ok(run.join(format!("aifred-embed-{hash:016x}.sock")))
 }
 
 /// The vectors from the helper. Err(None): no answer in `wait`.
-fn ask_helper(dir: &Path, texts: &[String], wait: Duration) -> Result<Vec<Vec<f32>>, Option<String>> {
-    let request = serde_json::to_string(&serde_json::json!({ "texts": texts })).map_err(|e| Some(e.to_string()))?;
+fn ask_helper(
+    dir: &Path,
+    texts: &[String],
+    wait: Duration,
+) -> Result<Vec<Vec<f32>>, Option<String>> {
+    let request = serde_json::to_string(&serde_json::json!({ "texts": texts }))
+        .map_err(|e| Some(e.to_string()))?;
     let socket = socket_path(dir).map_err(Some)?;
     // Two tries: a helper can stop for idle just when this connects.
     let mut last_error = String::new();
@@ -161,7 +177,14 @@ fn ask_helper(dir: &Path, texts: &[String], wait: Duration) -> Result<Vec<Vec<f3
         match send(stream, &request, wait) {
             Ok(line) => return read_answer(&line, texts.len()).map_err(Some),
             // The read wait ended. A second try would wait again.
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return Err(None),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(None);
+            }
             Err(e) => last_error = format!("the meaning search helper stopped: {e}"),
         }
     }
@@ -175,21 +198,28 @@ fn send(stream: UnixStream, request: &str, wait: Duration) -> std::io::Result<St
     out.write_all(b"\n")?;
     let mut line = String::new();
     if BufReader::new(stream).read_line(&mut line)? == 0 {
-        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no answer"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "no answer",
+        ));
     }
     Ok(line)
 }
 
 fn read_answer(line: &str, count: usize) -> Result<Vec<Vec<f32>>, String> {
-    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("a bad answer from the helper: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| format!("a bad answer from the helper: {e}"))?;
     if let Some(e) = v["error"].as_str() {
         return Err(e.to_string());
     }
     if v["model"].as_str() != Some(MODEL) {
-        return Err(format!("the helper uses another model ({}). Build all AIfred programs again.", v["model"]));
+        return Err(format!(
+            "the helper uses another model ({}). Build all AIfred programs again.",
+            v["model"]
+        ));
     }
-    let vectors: Vec<Vec<f32>> =
-        serde_json::from_value(v["vectors"].clone()).map_err(|e| format!("a bad answer from the helper: {e}"))?;
+    let vectors: Vec<Vec<f32>> = serde_json::from_value(v["vectors"].clone())
+        .map_err(|e| format!("a bad answer from the helper: {e}"))?;
     if vectors.len() != count || vectors.iter().any(|x| x.len() != DIMS) {
         return Err("a bad answer from the helper: wrong number of vectors".into());
     }
@@ -198,12 +228,18 @@ fn read_answer(line: &str, count: usize) -> Result<Vec<Vec<f32>>, String> {
 
 /// Waits until a new helper opens its socket. When the helper stops first,
 /// the error is the last line of its log.
-fn connect_new(dir: &Path, socket: &Path, mut helper: Option<std::process::Child>) -> Result<UnixStream, String> {
+fn connect_new(
+    dir: &Path,
+    socket: &Path,
+    mut helper: Option<std::process::Child>,
+) -> Result<UnixStream, String> {
     let start = Instant::now();
     let result = loop {
         match UnixStream::connect(socket) {
             Ok(s) => break Ok(s),
-            Err(e) if start.elapsed() > START_WAIT => break Err(format!("the meaning search helper did not start: {e}")),
+            Err(e) if start.elapsed() > START_WAIT => {
+                break Err(format!("the meaning search helper did not start: {e}"));
+            }
             Err(_) => {}
         }
         if let Some(Ok(Some(_))) = helper.as_mut().map(|c| c.try_wait()) {
@@ -237,7 +273,8 @@ fn start_helper(dir: &Path, socket: &Path) -> Result<Option<std::process::Child>
     let Some(program) = crate::program::path() else {
         return Err("the meaning search helper is missing: this program is not AIfred".into());
     };
-    let log = std::fs::File::create(dir.join("embed.log")).map_err(|e| format!("cannot make embed.log: {e}"))?;
+    let log = std::fs::File::create(dir.join("embed.log"))
+        .map_err(|e| format!("cannot make embed.log: {e}"))?;
     let child = std::process::Command::new(program)
         .arg(crate::program::EMBED_HELPER)
         .arg(dir)
@@ -257,7 +294,9 @@ fn start_helper(dir: &Path, socket: &Path) -> Result<Option<std::process::Child>
 fn start_helper(dir: &Path, socket: &Path) -> Result<Option<std::process::Child>, String> {
     let (dir, socket) = (dir.to_path_buf(), socket.to_path_buf());
     std::thread::spawn(move || {
-        if let Err(e) = aifred_embed::serve(&dir, &socket, &models_dir(&dir), Duration::from_secs(30)) {
+        if let Err(e) =
+            aifred_embed::serve(&dir, &socket, &models_dir(&dir), Duration::from_secs(30))
+        {
             eprintln!("test helper: {e:#}");
         }
     });
@@ -282,9 +321,27 @@ struct Kind {
 }
 
 const KINDS: [Kind; 5] = [
-    Kind { table: "memory", vec: "memory_vec", key: "id", text: "text", filter: "1" },
-    Kind { table: "turn", vec: "turn_vec", key: "id", text: "text", filter: "1" },
-    Kind { table: "task", vec: "task_vec", key: "rowid", text: "title || char(10) || notes", filter: "1" },
+    Kind {
+        table: "memory",
+        vec: "memory_vec",
+        key: "id",
+        text: "text",
+        filter: "1",
+    },
+    Kind {
+        table: "turn",
+        vec: "turn_vec",
+        key: "id",
+        text: "text",
+        filter: "1",
+    },
+    Kind {
+        table: "task",
+        vec: "task_vec",
+        key: "rowid",
+        text: "title || char(10) || notes",
+        filter: "1",
+    },
     Kind {
         table: "work_item",
         vec: "work_item_vec",
@@ -292,7 +349,13 @@ const KINDS: [Kind; 5] = [
         text: "title || char(10) || place || char(10) || details",
         filter: "1",
     },
-    Kind { table: "conversation", vec: "conversation_vec", key: "id", text: "summary", filter: "summary IS NOT NULL" },
+    Kind {
+        table: "conversation",
+        vec: "conversation_vec",
+        key: "id",
+        text: "summary",
+        filter: "summary IS NOT NULL",
+    },
 ];
 
 /// Checks that the helper answers and the model works, with one short text.
@@ -350,7 +413,8 @@ pub fn fill_missing(dir: &Path) -> anyhow::Result<usize> {
         loop {
             let rows: Vec<(i64, String)> = db::read(dir, |c| {
                 let mut q = c.prepare(&missing)?;
-                Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
+                Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()?)
             })?;
             if rows.is_empty() {
                 break;
@@ -391,11 +455,22 @@ pub(crate) mod tests {
     fn a_long_data_folder_gets_its_socket_in_the_runtime_folder() {
         let short = Path::new("https://rp2.alfred511.top/huggingface/home/sam/.aifred");
         assert_eq!(socket_path(short).unwrap(), short.join(SOCKET));
-        let long = PathBuf::from(format!("https://rp2.alfred511.top/huggingface/home/sam/{}", "x".repeat(120)));
+        let long = PathBuf::from(format!(
+            "https://rp2.alfred511.top/huggingface/home/sam/{}",
+            "x".repeat(120)
+        ));
         if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| Path::new(d).is_dir()) {
             let p = socket_path(&long).unwrap();
-            assert!(p.starts_with(&run) && p.as_os_str().len() <= 108, "{}", p.display());
-            assert_eq!(p, socket_path(&long).unwrap(), "the same folder, the same socket");
+            assert!(
+                p.starts_with(&run) && p.as_os_str().len() <= 108,
+                "{}",
+                p.display()
+            );
+            assert_eq!(
+                p,
+                socket_path(&long).unwrap(),
+                "the same folder, the same socket"
+            );
             assert_ne!(p, socket_path(&long.join("y")).unwrap());
         }
     }
@@ -416,7 +491,10 @@ pub(crate) mod tests {
     use crate::tasks::TaskStore;
 
     fn count(dir: &Path, table: &str) -> i64 {
-        db::read(dir, |c| Ok(c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?)).unwrap()
+        db::read(dir, |c| {
+            Ok(c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?)
+        })
+        .unwrap()
     }
 
     #[test]
@@ -426,7 +504,8 @@ pub(crate) mod tests {
         m.add("I prefer window seats", "you", false).unwrap();
         m.add("My cat is called Miso", "you", false).unwrap();
         let h = History::new(&d);
-        h.append("user", "Remind me about the dentist on Tuesday", "claude").unwrap();
+        h.append("user", "Remind me about the dentist on Tuesday", "claude")
+            .unwrap();
         h.append("assistant", "Sure, noted.", "claude").unwrap();
         let t = TaskStore::new(&d);
         t.add("Send the invoice to Acme", "", "you").unwrap();
@@ -436,7 +515,9 @@ pub(crate) mod tests {
             "url": "u", "reason": "assigned", "updated": "2026-10-01T10:00:00Z"
         }))
         .unwrap();
-        GithubStore::new(&d).save_fetch(vec![gh], &[], 1000).unwrap();
+        GithubStore::new(&d)
+            .save_fetch(vec![gh], &[], 1000)
+            .unwrap();
         let cu = |id: &str, title: &str| -> ClickupItem {
             serde_json::from_value(serde_json::json!({
                 "id": id, "title": title, "url": "u", "status": "to do", "list": "Admin", "workspace": "Rymera", "updated": 1
@@ -444,7 +525,15 @@ pub(crate) mod tests {
             .unwrap()
         };
         let cs = ClickupStore::new(&d);
-        cs.save("acct", crate::clickup::MyTasks { items: vec![cu("a", "Q4 budget"), cu("b", "Team lunch")], cut: vec![] }, 1000).unwrap();
+        cs.save(
+            "acct",
+            crate::clickup::MyTasks {
+                items: vec![cu("a", "Q4 budget"), cu("b", "Team lunch")],
+                cut: vec![],
+            },
+            1000,
+        )
+        .unwrap();
 
         let made = fill_missing(&d).unwrap();
         assert_eq!(made, 2 + 2 + 2 + 1 + 2);
@@ -453,11 +542,19 @@ pub(crate) mod tests {
         // No word is shared between each question and the text it must find.
         let facts = m.search("book my flight", Some(1)).unwrap();
         assert_eq!(facts[0].text, "I prefer window seats");
-        assert_eq!(m.search("pets", Some(1)).unwrap()[0].text, "My cat is called Miso");
+        assert_eq!(
+            m.search("pets", Some(1)).unwrap()[0].text,
+            "My cat is called Miso"
+        );
         let chats = h.search("doctor appointment", Some(1)).unwrap();
         assert_eq!(chats[0].hit.text, "Remind me about the dentist on Tuesday");
-        assert_eq!(t.search("billing", false, Some(1)).unwrap()[0].title, "Send the invoice to Acme");
-        let items = GithubStore::new(&d).search("wrong cost", &[], false, Some(1)).unwrap();
+        assert_eq!(
+            t.search("billing", false, Some(1)).unwrap()[0].title,
+            "Send the invoice to Acme"
+        );
+        let items = GithubStore::new(&d)
+            .search("wrong cost", &[], false, Some(1))
+            .unwrap();
         assert_eq!(items[0].item["title"], "Fix the price rounding");
         let tasks = cs.search("acct", "money plan", false, Some(1)).unwrap();
         assert_eq!(tasks[0].item["title"], "Q4 budget");
@@ -465,12 +562,26 @@ pub(crate) mod tests {
         // Only common words: no word search. The meaning search runs, but
         // nothing is related, so nothing comes back.
         assert!(crate::db::match_query("who are you").is_none());
-        assert!(m.search("who are you", None).unwrap().is_empty(), "nothing related");
-        assert!(m.search("thanks!", None).unwrap().is_empty(), "nothing related");
-        assert!(t.search("write a haiku about the sea", false, None).unwrap().is_empty(), "nothing related");
+        assert!(
+            m.search("who are you", None).unwrap().is_empty(),
+            "nothing related"
+        );
+        assert!(
+            m.search("thanks!", None).unwrap().is_empty(),
+            "nothing related"
+        );
+        assert!(
+            t.search("write a haiku about the sea", false, None)
+                .unwrap()
+                .is_empty(),
+            "nothing related"
+        );
 
         // A word match still comes first.
-        assert_eq!(t.search("park", false, Some(1)).unwrap()[0].title, "Walk in the park");
+        assert_eq!(
+            t.search("park", false, Some(1)).unwrap()[0].title,
+            "Walk in the park"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -489,9 +600,18 @@ pub(crate) mod tests {
         assert_eq!(fill_missing(&d).unwrap(), 2);
 
         g.save_fetch(vec![gh], &[], 2000).unwrap();
-        assert_eq!(count(&d, "work_item_vec"), 1, "the same item again keeps its vector");
-        g.save_details("acme/shop#1", "Prices show too many decimals").unwrap();
-        assert_eq!(count(&d, "work_item_vec"), 0, "a new description deletes the old vector");
+        assert_eq!(
+            count(&d, "work_item_vec"),
+            1,
+            "the same item again keeps its vector"
+        );
+        g.save_details("acme/shop#1", "Prices show too many decimals")
+            .unwrap();
+        assert_eq!(
+            count(&d, "work_item_vec"),
+            0,
+            "a new description deletes the old vector"
+        );
 
         t.set_done(&task.id, true).unwrap();
         assert_eq!(count(&d, "task_vec"), 1, "done does not change the text");
@@ -519,10 +639,27 @@ pub(crate) mod tests {
         let d = temp("embed-model");
         MemoryStore::new(&d).add("I like tea", "you", true).unwrap();
         assert_eq!(fill_missing(&d).unwrap(), 1);
-        db::write(&d, |tx| Ok(tx.execute("UPDATE meta SET value = 'old-model' WHERE key = 'embed_model'", [])?)).unwrap();
-        assert!(MemoryStore::new(&d).search("coffee", None).unwrap().is_empty(), "old vectors are not used");
+        db::write(&d, |tx| {
+            Ok(tx.execute(
+                "UPDATE meta SET value = 'old-model' WHERE key = 'embed_model'",
+                [],
+            )?)
+        })
+        .unwrap();
+        assert!(
+            MemoryStore::new(&d)
+                .search("coffee", None)
+                .unwrap()
+                .is_empty(),
+            "old vectors are not used"
+        );
         assert_eq!(fill_missing(&d).unwrap(), 1, "all vectors again");
-        assert_eq!(db::read(&d, |c| db::meta(c, "embed_model")).unwrap().as_deref(), Some(MODEL));
+        assert_eq!(
+            db::read(&d, |c| db::meta(c, "embed_model"))
+                .unwrap()
+                .as_deref(),
+            Some(MODEL)
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
