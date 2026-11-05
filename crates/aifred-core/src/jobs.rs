@@ -141,12 +141,22 @@ pub struct Claim {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     /// The run told the user something.
-    Ok { output: String, cost_usd: Option<f64> },
+    Ok {
+        output: String,
+        cost_usd: Option<f64>,
+    },
     /// The run had nothing to tell.
-    Quiet { cost_usd: Option<f64> },
+    Quiet {
+        cost_usd: Option<f64>,
+    },
     /// The run finished the job: the job has no more runs.
-    Finished { output: String, cost_usd: Option<f64> },
-    Failed { error: String },
+    Finished {
+        output: String,
+        cost_usd: Option<f64>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// What a new job needs.
@@ -184,7 +194,9 @@ pub fn local_zone() -> String {
 
 pub fn zone(name: &str) -> anyhow::Result<chrono_tz::Tz> {
     chrono_tz::Tz::from_str(name.trim()).map_err(|_| {
-        anyhow::anyhow!("\"{name}\" is not a time zone. Use an IANA name, for example \"Asia/Jakarta\".")
+        anyhow::anyhow!(
+            "\"{name}\" is not a time zone. Use an IANA name, for example \"Asia/Jakarta\"."
+        )
     })
 }
 
@@ -219,7 +231,10 @@ pub fn show(ts: i64, tz: &str) -> String {
         return ts.to_string();
     };
     match zone(tz) {
-        Ok(z) => utc.with_timezone(&z).format("%a %-d %b %Y %H:%M").to_string(),
+        Ok(z) => utc
+            .with_timezone(&z)
+            .format("%a %-d %b %Y %H:%M")
+            .to_string(),
         Err(_) => utc.format("%a %-d %b %Y %H:%M UTC").to_string(),
     }
 }
@@ -227,7 +242,10 @@ pub fn show(ts: i64, tz: &str) -> String {
 /// A Unix time as the local time "YYYY-MM-DDTHH:MM" in the zone `tz`.
 pub fn local_text(ts: i64, tz: &str) -> anyhow::Result<String> {
     let utc = DateTime::<Utc>::from_timestamp(ts, 0).context("the time is out of range")?;
-    Ok(utc.with_timezone(&zone(tz)?).format("%Y-%m-%dT%H:%M").to_string())
+    Ok(utc
+        .with_timezone(&zone(tz)?)
+        .format("%Y-%m-%dT%H:%M")
+        .to_string())
 }
 
 /// Like `local_text`, but parse_local gives the same minute back. In the hour
@@ -241,18 +259,27 @@ pub fn local_text_exact(ts: i64, tz: &str) -> anyhow::Result<String> {
         return Ok(text);
     }
     let utc = DateTime::<Utc>::from_timestamp(ts, 0).context("the time is out of range")?;
-    Ok(utc.with_timezone(&z).format("%Y-%m-%dT%H:%M%:z").to_string())
+    Ok(utc
+        .with_timezone(&z)
+        .format("%Y-%m-%dT%H:%M%:z")
+        .to_string())
 }
 
 /// The RRULE text without "RRULE:" and spaces, with capital letters.
 fn clean_rule(rule: &str) -> anyhow::Result<String> {
     let r = rule.trim();
-    let r = r.strip_prefix("RRULE:").unwrap_or(r).trim().to_ascii_uppercase();
+    let r = r
+        .strip_prefix("RRULE:")
+        .unwrap_or(r)
+        .trim()
+        .to_ascii_uppercase();
     if r.is_empty() {
         bail!("the repeat rule is empty. Example: FREQ=WEEKLY;BYDAY=MO");
     }
     if r.contains('\n') || r.contains("DTSTART") {
-        bail!("give only the RRULE part, for example FREQ=WEEKLY;BYDAY=MO. Give the first time as \"start\".");
+        bail!(
+            "give only the RRULE part, for example FREQ=WEEKLY;BYDAY=MO. Give the first time as \"start\"."
+        );
     }
     // At most once an hour. With FREQ at least HOURLY and at most one BYMINUTE
     // and one BYSECOND value, two times are at least one hour apart: all times
@@ -265,7 +292,9 @@ fn clean_rule(rule: &str) -> anyhow::Result<String> {
             _ => false,
         };
         if too_often {
-            bail!("a job can repeat at most once an hour. Use FREQ=HOURLY or slower, with at most one BYMINUTE value and one BYSECOND value.");
+            bail!(
+                "a job can repeat at most once an hour. Use FREQ=HOURLY or slower, with at most one BYMINUTE value and one BYSECOND value."
+            );
         }
     }
     Ok(r)
@@ -391,11 +420,24 @@ fn describe_rule(rule: &str, start: &str) -> String {
             "BYMONTHDAY" => {
                 month_days = v
                     .split(',')
-                    .map(|d| if d == "-1" { "the last day".to_string() } else { format!("day {d}") })
+                    .map(|d| {
+                        if d == "-1" {
+                            "the last day".to_string()
+                        } else {
+                            format!("day {d}")
+                        }
+                    })
                     .collect()
             }
             "COUNT" => end = format!(", {v} times"),
-            "UNTIL" => end = format!(", until {}", v.get(..8).map(|d| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..])).unwrap_or_default()),
+            "UNTIL" => {
+                end = format!(
+                    ", until {}",
+                    v.get(..8)
+                        .map(|d| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..]))
+                        .unwrap_or_default()
+                )
+            }
             "WKST" => {}
             _ => return format!("Repeats from {start}: {rule}"),
         }
@@ -413,7 +455,9 @@ fn describe_rule(rule: &str, start: &str) -> String {
         "WEEKLY" if days.is_empty() => every("week"),
         "WEEKLY" if interval == 1 => format!("Every {}", join_words(&days)),
         "WEEKLY" => format!("{} on {}", every("week"), join_words(&days)),
-        "MONTHLY" if !month_days.is_empty() => format!("{} on {}", every("month"), join_words(&month_days)),
+        "MONTHLY" if !month_days.is_empty() => {
+            format!("{} on {}", every("month"), join_words(&month_days))
+        }
         "MONTHLY" if !days.is_empty() => format!("{} on {}", every("month"), join_words(&days)),
         "MONTHLY" => every("month"),
         "YEARLY" => every("year"),
@@ -424,8 +468,7 @@ fn describe_rule(rule: &str, start: &str) -> String {
 
 // ---------- Store ----------
 
-const COLUMNS: &str =
-    "id, title, action, message, trigger, tz, status, next_run, created_by, created, updated, failures";
+const COLUMNS: &str = "id, title, action, message, trigger, tz, status, next_run, created_by, created, updated, failures";
 
 fn from_row(r: &Row) -> rusqlite::Result<Job> {
     let trigger: String = r.get(4)?;
@@ -467,9 +510,13 @@ fn can_start(trigger: &Trigger, tz: &str, status: &str, now: i64) -> bool {
 }
 
 fn get_in(c: &Connection, id: &str) -> anyhow::Result<Job> {
-    c.query_row(&format!("SELECT {COLUMNS} FROM job WHERE id = ?1"), [id], from_row)
-        .optional()?
-        .with_context(|| format!("no job with id {id}"))
+    c.query_row(
+        &format!("SELECT {COLUMNS} FROM job WHERE id = ?1"),
+        [id],
+        from_row,
+    )
+    .optional()?
+    .with_context(|| format!("no job with id {id}"))
 }
 
 pub fn get(dir: &Path, id: &str) -> anyhow::Result<Job> {
@@ -479,7 +526,11 @@ pub fn get(dir: &Path, id: &str) -> anyhow::Result<Job> {
 /// The jobs, the next run first. `all` false: only active and paused jobs.
 pub fn list(dir: &Path, all: bool) -> anyhow::Result<Vec<Job>> {
     db::read(dir, |c| {
-        let filter = if all { "" } else { "WHERE status IN ('active', 'paused')" };
+        let filter = if all {
+            ""
+        } else {
+            "WHERE status IN ('active', 'paused')"
+        };
         let mut st = c.prepare(&format!(
             "SELECT {COLUMNS} FROM job {filter}
              ORDER BY status != 'active', next_run IS NULL, next_run, created"
@@ -530,7 +581,10 @@ fn check_trigger(trigger: &Trigger, tz: &str, now: i64) -> anyhow::Result<Option
             let t = parse_local(at, zone(tz)?)?.timestamp();
             // A minute of slack: "now" from the AI can be a little old.
             if t < now - 60 {
-                bail!("the time {at} ({tz}) is in the past. Now is {}.", show(now, tz));
+                bail!(
+                    "the time {at} ({tz}) is in the past. Now is {}.",
+                    show(now, tz)
+                );
             }
             Ok(Some(t.max(now)))
         }
@@ -563,7 +617,11 @@ fn new_id() -> String {
 
 /// The id of the newest event, or 0.
 fn last_event(tx: &Connection) -> anyhow::Result<i64> {
-    Ok(tx.query_row("SELECT COALESCE(MAX(id), 0) FROM job_event", [], |r| r.get(0))?)
+    Ok(
+        tx.query_row("SELECT COALESCE(MAX(id), 0) FROM job_event", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 pub fn create(dir: &Path, j: NewJob) -> anyhow::Result<Job> {
@@ -576,7 +634,9 @@ pub fn create(dir: &Path, j: NewJob) -> anyhow::Result<Job> {
         bail!("the job needs a message: the reminder text, or the instructions for the AI");
     }
     let trigger = j.trigger.context("the job needs a time or an event")?;
-    let tz = j.tz.filter(|z| !z.trim().is_empty()).unwrap_or_else(local_zone);
+    let tz =
+        j.tz.filter(|z| !z.trim().is_empty())
+            .unwrap_or_else(local_zone);
     let t = now() as i64;
     let next = check_trigger(&trigger, &tz, t)?;
     db::write(dir, |tx| {
@@ -620,14 +680,22 @@ pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
             Some(s) => s.trim().to_string(),
             None => old.title.clone(),
         };
-        let message = ch.message.map(|m| m.trim().to_string()).unwrap_or(old.message.clone());
-        let tz = ch.tz.filter(|z| !z.trim().is_empty()).unwrap_or(old.tz.clone());
+        let message = ch
+            .message
+            .map(|m| m.trim().to_string())
+            .unwrap_or(old.message.clone());
+        let tz = ch
+            .tz
+            .filter(|z| !z.trim().is_empty())
+            .unwrap_or(old.tz.clone());
         let new_time = ch.trigger.is_some() || tz != old.tz;
         let trigger = ch.trigger.unwrap_or(old.trigger.clone());
         let status = match ch.status.as_deref() {
             // A new time for a job that ended ("move that reminder to
             // Friday"): the job starts again. A paused job stays paused.
-            None if new_time && matches!(old.status.as_str(), "done" | "off") => "active".to_string(),
+            None if new_time && matches!(old.status.as_str(), "done" | "off") => {
+                "active".to_string()
+            }
             None => old.status.clone(),
             Some(s @ ("active" | "paused")) => s.to_string(),
             Some(s) => bail!("the status must be \"active\" or \"paused\", not \"{s}\""),
@@ -644,12 +712,16 @@ pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
                 |r| r.get(0),
             )?;
             if old.status != "paused" && open >= MAX_JOBS {
-                bail!("AIfred has {open} jobs, the most it can keep. Delete or finish a job first.");
+                bail!(
+                    "AIfred has {open} jobs, the most it can keep. Delete or finish a job first."
+                );
             }
         }
         // A new time, or a job that starts again: the next run is from now,
         // so the missed times do not all run.
-        let next = if let (true, false, "paused", Trigger::Once { at }) = (resumed, new_time, old.status.as_str(), &trigger) {
+        let next = if let (true, false, "paused", Trigger::Once { at }) =
+            (resumed, new_time, old.status.as_str(), &trigger)
+        {
             // The pause held the run back. When its time passed during the
             // pause, it runs at the next tick, and the run shows it as late.
             Some(parse_local(at, zone(&tz)?)?.timestamp())
@@ -735,7 +807,9 @@ impl SchedulerLock {
         match file.try_lock() {
             Ok(()) => Ok(Some(SchedulerLock { _file: file })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(e)) => Err(e).context("cannot lock the scheduler file"),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(e).context("cannot lock the scheduler file")
+            }
         }
     }
 }
@@ -756,7 +830,15 @@ pub fn recover(dir: &Path) -> anyhow::Result<usize> {
     })
 }
 
-fn add_run(tx: &Transaction, job: &str, planned: i64, state: &str, note: &str, started: Option<i64>, late: bool) -> anyhow::Result<Option<i64>> {
+fn add_run(
+    tx: &Transaction,
+    job: &str,
+    planned: i64,
+    state: &str,
+    note: &str,
+    started: Option<i64>,
+    late: bool,
+) -> anyhow::Result<Option<i64>> {
     let n = tx.execute(
         "INSERT OR IGNORE INTO job_run (job, planned, started, state, late, note)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -800,17 +882,23 @@ pub fn claim_due(dir: &Path, now: i64) -> anyhow::Result<Vec<Claim>> {
             let mut st = tx.prepare(&format!(
                 "SELECT {COLUMNS}, cursor FROM job WHERE status = 'active'"
             ))?;
-            st.query_map([], |r| Ok((r.get(0)?, from_row(r).and_then(|j| Ok((j, r.get(12)?))))))?
-                .collect::<Result<_, _>>()?
+            st.query_map([], |r| {
+                Ok((r.get(0)?, from_row(r).and_then(|j| Ok((j, r.get(12)?)))))
+            })?
+            .collect::<Result<_, _>>()?
         };
         let mut out = vec![];
         for (id, job) in jobs {
             // A savepoint for each job: a failure undoes only this job's writes.
             tx.execute_batch("SAVEPOINT one_job")?;
-            let claim = job.map_err(anyhow::Error::from).and_then(|(job, cursor)| match &job.trigger {
-                Trigger::Event { event, wait_secs } => claim_event(tx, &job, cursor, event, *wait_secs, now),
-                _ => claim_time(tx, &job, now),
-            });
+            let claim =
+                job.map_err(anyhow::Error::from)
+                    .and_then(|(job, cursor)| match &job.trigger {
+                        Trigger::Event { event, wait_secs } => {
+                            claim_event(tx, &job, cursor, event, *wait_secs, now)
+                        }
+                        _ => claim_time(tx, &job, now),
+                    });
             match claim {
                 Ok(c) => out.extend(c),
                 Err(e) => {
@@ -875,11 +963,16 @@ fn claim_time(tx: &Transaction, job: &Job, now: i64) -> anyhow::Result<Option<Cl
     if let Some(&newest) = later.last() {
         // The missed times, without the newest: at most MAX_SKIP_ROWS rows.
         // The oldest row tells how many times have no row.
-        let missed: Vec<i64> = std::iter::once(planned).chain(later[..later.len() - 1].iter().copied()).collect();
+        let missed: Vec<i64> = std::iter::once(planned)
+            .chain(later[..later.len() - 1].iter().copied())
+            .collect();
         let cut = missed.len().saturating_sub(MAX_SKIP_ROWS);
         for (i, t) in missed[cut..].iter().enumerate() {
             if i == 0 && cut > 0 {
-                skip(*t, &format!("AIfred was not running at this time, and at {cut} earlier times."))?;
+                skip(
+                    *t,
+                    &format!("AIfred was not running at this time, and at {cut} earlier times."),
+                )?;
             } else {
                 skip(*t, "AIfred was not running at this time.")?;
             }
@@ -896,12 +989,28 @@ fn claim_time(tx: &Transaction, job: &Job, now: i64) -> anyhow::Result<Option<Cl
         Ok(())
     };
     if repeat && now - planned > STALE_SECS {
-        add_run(tx, &job.id, planned, "skipped", "Too late: AIfred was not running at this time.", None, false)?;
+        add_run(
+            tx,
+            &job.id,
+            planned,
+            "skipped",
+            "Too late: AIfred was not running at this time.",
+            None,
+            false,
+        )?;
         set_next(next)?;
         return Ok(None);
     }
     if busy(tx, &job.id)? {
-        add_run(tx, &job.id, planned, "skipped", "The last run was still busy.", None, false)?;
+        add_run(
+            tx,
+            &job.id,
+            planned,
+            "skipped",
+            "The last run was still busy.",
+            None,
+            false,
+        )?;
         set_next(next)?;
         return Ok(None);
     }
@@ -909,10 +1018,22 @@ fn claim_time(tx: &Transaction, job: &Job, now: i64) -> anyhow::Result<Option<Cl
     let run = add_run(tx, &job.id, planned, "running", "", Some(now), late)?;
     set_next(next)?;
     let job = get_in(tx, &job.id)?;
-    Ok(run.map(|run| Claim { job, run, planned, late }))
+    Ok(run.map(|run| Claim {
+        job,
+        run,
+        planned,
+        late,
+    }))
 }
 
-fn claim_event(tx: &Transaction, job: &Job, cursor: i64, event: &str, wait: u32, now: i64) -> anyhow::Result<Option<Claim>> {
+fn claim_event(
+    tx: &Transaction,
+    job: &Job,
+    cursor: i64,
+    event: &str,
+    wait: u32,
+    now: i64,
+) -> anyhow::Result<Option<Claim>> {
     let (first, last, top): (Option<i64>, Option<i64>, Option<i64>) = tx.query_row(
         "SELECT MIN(ts), MAX(ts), MAX(id) FROM job_event WHERE name = ?1 AND id > ?2",
         rusqlite::params![event, cursor],
@@ -952,7 +1073,12 @@ fn claim_event(tx: &Transaction, job: &Job, cursor: i64, event: &str, wait: u32,
     )?;
     let run = add_run(tx, &job.id, due, "running", "", Some(now), false)?;
     let job = get_in(tx, &job.id)?;
-    Ok(run.map(|run| Claim { job, run, planned: due, late: false }))
+    Ok(run.map(|run| Claim {
+        job,
+        run,
+        planned: due,
+        late: false,
+    }))
 }
 
 /// Saves how a run ended, and what it means for the job:
@@ -971,7 +1097,9 @@ pub fn finish(dir: &Path, run: i64, outcome: Outcome) -> anyhow::Result<Option<J
             return Ok(None);
         };
         let (state, output, note, cost) = match &outcome {
-            Outcome::Ok { output, cost_usd } | Outcome::Finished { output, cost_usd } => ("ok", output.as_str(), "", *cost_usd),
+            Outcome::Ok { output, cost_usd } | Outcome::Finished { output, cost_usd } => {
+                ("ok", output.as_str(), "", *cost_usd)
+            }
             Outcome::Quiet { cost_usd } => ("quiet", "", "", *cost_usd),
             Outcome::Failed { error } => ("failed", "", error.as_str(), None),
         };
@@ -980,7 +1108,11 @@ pub fn finish(dir: &Path, run: i64, outcome: Outcome) -> anyhow::Result<Option<J
             rusqlite::params![run, state, t, output, note, cost],
         )?;
         let Some(j) = tx
-            .query_row(&format!("SELECT {COLUMNS} FROM job WHERE id = ?1"), [&job], from_row)
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM job WHERE id = ?1"),
+                [&job],
+                from_row,
+            )
             .optional()?
         else {
             return Ok(None);
@@ -994,7 +1126,10 @@ pub fn finish(dir: &Path, run: i64, outcome: Outcome) -> anyhow::Result<Option<J
                         rusqlite::params![j.id, failures],
                     )?;
                 } else if matches!(j.trigger, Trigger::Event { .. }) || j.status == "paused" {
-                    tx.execute("UPDATE job SET failures = ?2 WHERE id = ?1", rusqlite::params![j.id, failures])?;
+                    tx.execute(
+                        "UPDATE job SET failures = ?2 WHERE id = ?1",
+                        rusqlite::params![j.id, failures],
+                    )?;
                 } else {
                     let retry = t + 60 * (1i64 << (failures - 1));
                     let next = j.next_run.map_or(retry, |n| n.min(retry));
@@ -1019,26 +1154,46 @@ pub fn finish(dir: &Path, run: i64, outcome: Outcome) -> anyhow::Result<Option<J
 }
 
 /// Short answers that mean NOTHING, in lower case, with no punctuation.
-const QUIET_ANSWERS: &[&str] = &["nothing", "nothing to report", "nothing to tell", "nothing new"];
+const QUIET_ANSWERS: &[&str] = &[
+    "nothing",
+    "nothing to report",
+    "nothing to tell",
+    "nothing new",
+];
 
 /// The outcome of an agent answer: NOTHING is quiet, "DONE:" ends the job.
 /// Capital letters and markdown marks ("**DONE:**", "Nothing.") do not matter.
 pub fn agent_outcome(answer: &str, cost_usd: Option<f64>) -> Outcome {
     let a = answer.trim();
-    let bare = a.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_ascii_lowercase();
-    if bare.is_empty() || bare == NOTHING.to_ascii_lowercase() || QUIET_ANSWERS.contains(&bare.as_str()) {
+    let bare = a
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase();
+    if bare.is_empty()
+        || bare == NOTHING.to_ascii_lowercase()
+        || QUIET_ANSWERS.contains(&bare.as_str())
+    {
         return Outcome::Quiet { cost_usd };
     }
     // "DONE:", "**DONE:**", "**Done**:", "Done: ...": the marks around the word go.
     let mark = |c: char| matches!(c, '*' | '_' | '#' | '`') || c.is_whitespace();
     let word = DONE.trim_end_matches(':');
     let start = a.trim_start_matches(mark);
-    if let Some(head) = start.get(..word.len()).filter(|h| h.eq_ignore_ascii_case(word))
-        && let Some(rest) = start[head.len()..].trim_start_matches(mark).strip_prefix(':')
+    if let Some(head) = start
+        .get(..word.len())
+        .filter(|h| h.eq_ignore_ascii_case(word))
+        && let Some(rest) = start[head.len()..]
+            .trim_start_matches(mark)
+            .strip_prefix(':')
     {
-        return Outcome::Finished { output: rest.trim_start_matches(mark).trim().to_string(), cost_usd };
+        return Outcome::Finished {
+            output: rest.trim_start_matches(mark).trim().to_string(),
+            cost_usd,
+        };
     }
-    Outcome::Ok { output: a.to_string(), cost_usd }
+    Outcome::Ok {
+        output: a.to_string(),
+        cost_usd,
+    }
 }
 
 #[cfg(test)]
@@ -1068,7 +1223,10 @@ mod tests {
     }
 
     fn repeat(start: &str, rule: &str) -> Trigger {
-        Trigger::Repeat { start: start.into(), rule: rule.into() }
+        Trigger::Repeat {
+            start: start.into(),
+            rule: rule.into(),
+        }
     }
 
     #[test]
@@ -1077,23 +1235,56 @@ mod tests {
         // Every Monday at 09:00, asked on Thursday 5 Nov 2026.
         let mon = repeat("2026-11-05T09:00", "FREQ=WEEKLY;BYDAY=MO");
         let after = ts("2026-11-05T12:00", jkt);
-        let got: Vec<String> = times_after(&mon, jkt, after, 3).unwrap().iter().map(|t| show(*t, jkt)).collect();
-        assert_eq!(got, ["Mon 9 Nov 2026 09:00", "Mon 16 Nov 2026 09:00", "Mon 23 Nov 2026 09:00"]);
+        let got: Vec<String> = times_after(&mon, jkt, after, 3)
+            .unwrap()
+            .iter()
+            .map(|t| show(*t, jkt))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "Mon 9 Nov 2026 09:00",
+                "Mon 16 Nov 2026 09:00",
+                "Mon 23 Nov 2026 09:00"
+            ]
+        );
         // The 3rd and the 17th.
         let days = repeat("2026-11-05T09:00", "RRULE:FREQ=MONTHLY;BYMONTHDAY=3,17");
-        let got: Vec<String> = times_after(&days, jkt, after, 3).unwrap().iter().map(|t| show(*t, jkt)).collect();
-        assert_eq!(got, ["Tue 17 Nov 2026 09:00", "Thu 3 Dec 2026 09:00", "Thu 17 Dec 2026 09:00"]);
+        let got: Vec<String> = times_after(&days, jkt, after, 3)
+            .unwrap()
+            .iter()
+            .map(|t| show(*t, jkt))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "Tue 17 Nov 2026 09:00",
+                "Thu 3 Dec 2026 09:00",
+                "Thu 17 Dec 2026 09:00"
+            ]
+        );
         // The last day of the month, also in February.
         let last = repeat("2027-01-01T17:00", "FREQ=MONTHLY;BYMONTHDAY=-1");
-        let got: Vec<String> = times_after(&last, jkt, ts("2027-01-01T00:00", jkt), 2).unwrap().iter().map(|t| show(*t, jkt)).collect();
+        let got: Vec<String> = times_after(&last, jkt, ts("2027-01-01T00:00", jkt), 2)
+            .unwrap()
+            .iter()
+            .map(|t| show(*t, jkt))
+            .collect();
         assert_eq!(got, ["Sun 31 Jan 2027 17:00", "Sun 28 Feb 2027 17:00"]);
         // Every other Thursday from 12 Nov.
         let other = repeat("2026-11-12T10:00", "FREQ=WEEKLY;INTERVAL=2;BYDAY=TH");
-        let got: Vec<String> = times_after(&other, jkt, after, 2).unwrap().iter().map(|t| show(*t, jkt)).collect();
+        let got: Vec<String> = times_after(&other, jkt, after, 2)
+            .unwrap()
+            .iter()
+            .map(|t| show(*t, jkt))
+            .collect();
         assert_eq!(got, ["Thu 12 Nov 2026 10:00", "Thu 26 Nov 2026 10:00"]);
         // The last Friday of the month.
         let fri = repeat("2026-11-05T16:00", "FREQ=MONTHLY;BYDAY=-1FR");
-        assert_eq!(show(times_after(&fri, jkt, after, 1).unwrap()[0], jkt), "Fri 27 Nov 2026 16:00");
+        assert_eq!(
+            show(times_after(&fri, jkt, after, 1).unwrap()[0], jkt),
+            "Fri 27 Nov 2026 16:00"
+        );
         // A rule with an end.
         let five = repeat("2026-11-06T09:00", "FREQ=DAILY;COUNT=2");
         assert_eq!(times_after(&five, jkt, after, 10).unwrap().len(), 2);
@@ -1104,8 +1295,19 @@ mod tests {
         let ny = "America/New_York";
         // Clocks go back on 1 Nov 2026: the daily 09:00 stays 09:00.
         let daily = repeat("2026-10-30T09:00", "FREQ=DAILY");
-        let got: Vec<String> = times_after(&daily, ny, ts("2026-10-30T10:00", ny), 3).unwrap().iter().map(|t| show(*t, ny)).collect();
-        assert_eq!(got, ["Sat 31 Oct 2026 09:00", "Sun 1 Nov 2026 09:00", "Mon 2 Nov 2026 09:00"]);
+        let got: Vec<String> = times_after(&daily, ny, ts("2026-10-30T10:00", ny), 3)
+            .unwrap()
+            .iter()
+            .map(|t| show(*t, ny))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "Sat 31 Oct 2026 09:00",
+                "Sun 1 Nov 2026 09:00",
+                "Mon 2 Nov 2026 09:00"
+            ]
+        );
         // 02:30 on 8 Mar 2026 does not exist in New York.
         let e = parse_local("2026-03-08T02:30", zone(ny).unwrap()).unwrap_err();
         assert!(e.to_string().contains("summer time"), "{e}");
@@ -1114,32 +1316,116 @@ mod tests {
     #[test]
     fn plain_words_for_the_common_rules() {
         let jkt = "Asia/Jakarta";
-        assert_eq!(describe(&repeat("2026-11-09T09:00", "FREQ=WEEKLY;BYDAY=MO"), jkt), "Every Monday at 09:00 (Asia/Jakarta)");
-        assert_eq!(describe(&repeat("2026-11-09T09:00", "FREQ=MONTHLY;BYMONTHDAY=3,17"), jkt), "Every month on day 3 and day 17 at 09:00 (Asia/Jakarta)");
-        assert_eq!(describe(&repeat("2026-11-12T10:00", "FREQ=WEEKLY;INTERVAL=2;BYDAY=TH"), jkt), "Every 2 weeks on Thursday at 10:00 (Asia/Jakarta)");
-        assert_eq!(describe(&repeat("2026-11-12T16:00", "FREQ=MONTHLY;BYDAY=-1FR"), jkt), "Every month on the last Friday at 16:00 (Asia/Jakarta)");
-        assert_eq!(describe(&Trigger::Once { at: "2026-11-13T15:00".into() }, jkt), "Once, Fri 13 Nov 2026 at 15:00 (Asia/Jakarta)");
-        assert!(describe(&Trigger::Event { event: TASK_DONE.into(), wait_secs: 90 }, "").starts_with("Each time you finish a task"));
+        assert_eq!(
+            describe(&repeat("2026-11-09T09:00", "FREQ=WEEKLY;BYDAY=MO"), jkt),
+            "Every Monday at 09:00 (Asia/Jakarta)"
+        );
+        assert_eq!(
+            describe(
+                &repeat("2026-11-09T09:00", "FREQ=MONTHLY;BYMONTHDAY=3,17"),
+                jkt
+            ),
+            "Every month on day 3 and day 17 at 09:00 (Asia/Jakarta)"
+        );
+        assert_eq!(
+            describe(
+                &repeat("2026-11-12T10:00", "FREQ=WEEKLY;INTERVAL=2;BYDAY=TH"),
+                jkt
+            ),
+            "Every 2 weeks on Thursday at 10:00 (Asia/Jakarta)"
+        );
+        assert_eq!(
+            describe(&repeat("2026-11-12T16:00", "FREQ=MONTHLY;BYDAY=-1FR"), jkt),
+            "Every month on the last Friday at 16:00 (Asia/Jakarta)"
+        );
+        assert_eq!(
+            describe(
+                &Trigger::Once {
+                    at: "2026-11-13T15:00".into()
+                },
+                jkt
+            ),
+            "Once, Fri 13 Nov 2026 at 15:00 (Asia/Jakarta)"
+        );
+        assert!(
+            describe(
+                &Trigger::Event {
+                    event: TASK_DONE.into(),
+                    wait_secs: 90
+                },
+                ""
+            )
+            .starts_with("Each time you finish a task")
+        );
     }
 
     #[test]
     fn create_checks_the_input_and_the_limit() {
         let d = dir("create");
         let jkt = "Asia/Jakarta";
-        let past = job("Old", Trigger::Once { at: "2020-01-01T09:00".into() }, jkt);
-        assert!(create(&d, past).unwrap_err().to_string().contains("in the past"));
+        let past = job(
+            "Old",
+            Trigger::Once {
+                at: "2020-01-01T09:00".into(),
+            },
+            jkt,
+        );
+        assert!(
+            create(&d, past)
+                .unwrap_err()
+                .to_string()
+                .contains("in the past")
+        );
         let bad = job("Bad", repeat("2026-11-09T09:00", "FREQ=MINUTELY"), jkt);
-        assert!(create(&d, bad).unwrap_err().to_string().contains("once an hour"));
-        let zone_err = job("Zone", repeat("2030-11-09T09:00", "FREQ=DAILY"), "Mars/Base");
-        assert!(create(&d, zone_err).unwrap_err().to_string().contains("IANA"));
-        let ok = create(&d, job("Timesheet", repeat("2030-11-04T09:00", "FREQ=WEEKLY;BYDAY=MO"), jkt)).unwrap();
+        assert!(
+            create(&d, bad)
+                .unwrap_err()
+                .to_string()
+                .contains("once an hour")
+        );
+        let zone_err = job(
+            "Zone",
+            repeat("2030-11-09T09:00", "FREQ=DAILY"),
+            "Mars/Base",
+        );
+        assert!(
+            create(&d, zone_err)
+                .unwrap_err()
+                .to_string()
+                .contains("IANA")
+        );
+        let ok = create(
+            &d,
+            job(
+                "Timesheet",
+                repeat("2030-11-04T09:00", "FREQ=WEEKLY;BYDAY=MO"),
+                jkt,
+            ),
+        )
+        .unwrap();
         assert_eq!(ok.next_run, Some(ts("2030-11-04T09:00", jkt)));
         assert_eq!(ok.status, "active");
         // The brief job is there from the start, so 19 more fit.
         for i in 0..(MAX_JOBS - 2) {
-            create(&d, job(&format!("J{i}"), repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt)).unwrap();
+            create(
+                &d,
+                job(
+                    &format!("J{i}"),
+                    repeat("2030-11-04T09:00", "FREQ=DAILY"),
+                    jkt,
+                ),
+            )
+            .unwrap();
         }
-        let e = create(&d, job("One too many", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt)).unwrap_err();
+        let e = create(
+            &d,
+            job(
+                "One too many",
+                repeat("2030-11-04T09:00", "FREQ=DAILY"),
+                jkt,
+            ),
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("the most it can keep"), "{e}");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -1148,15 +1434,35 @@ mod tests {
     fn a_job_runs_once_for_its_time() {
         let d = dir("once");
         let jkt = "Asia/Jakarta";
-        let j = create(&d, job("Call", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt)).unwrap();
+        let j = create(
+            &d,
+            job("Call", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt),
+        )
+        .unwrap();
         let t = ts("2030-11-04T09:00", jkt);
         assert!(claim_due(&d, t - 1).unwrap().is_empty(), "not yet");
         let c = claim_due(&d, t + 5).unwrap();
         assert_eq!(c.len(), 1);
         assert_eq!((c[0].planned, c[0].late), (t, false));
-        assert_eq!(c[0].job.next_run, Some(t + 86400), "the next run moved at the claim");
-        assert!(claim_due(&d, t + 10).unwrap().is_empty(), "a second claim gets nothing");
-        let after = finish(&d, c[0].run, Outcome::Ok { output: "Done".into(), cost_usd: None }).unwrap().unwrap();
+        assert_eq!(
+            c[0].job.next_run,
+            Some(t + 86400),
+            "the next run moved at the claim"
+        );
+        assert!(
+            claim_due(&d, t + 10).unwrap().is_empty(),
+            "a second claim gets nothing"
+        );
+        let after = finish(
+            &d,
+            c[0].run,
+            Outcome::Ok {
+                output: "Done".into(),
+                cost_usd: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(after.status, "active");
         assert_eq!(runs(&d, Some(&j.id), 10, true).unwrap()[0].state, "ok");
         std::fs::remove_dir_all(&d).unwrap();
@@ -1166,16 +1472,29 @@ mod tests {
     fn missed_times_give_one_late_run() {
         let d = dir("missed");
         let jkt = "Asia/Jakarta";
-        let j = create(&d, job("Daily", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt)).unwrap();
+        let j = create(
+            &d,
+            job("Daily", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt),
+        )
+        .unwrap();
         // The computer sleeps from Mon 08:00 to Wed 10:00: 3 times pass.
         let wake = ts("2030-11-06T10:00", jkt);
         let c = claim_due(&d, wake).unwrap();
         assert_eq!(c.len(), 1);
-        assert_eq!(c[0].planned, ts("2030-11-06T09:00", jkt), "the newest time runs");
+        assert_eq!(
+            c[0].planned,
+            ts("2030-11-06T09:00", jkt),
+            "the newest time runs"
+        );
         assert!(c[0].late);
         let all = runs(&d, Some(&j.id), 10, true).unwrap();
         assert_eq!(all.iter().filter(|r| r.state == "skipped").count(), 2);
-        assert!(runs(&d, Some(&j.id), 10, false).unwrap().iter().all(|r| r.state != "skipped"));
+        assert!(
+            runs(&d, Some(&j.id), 10, false)
+                .unwrap()
+                .iter()
+                .all(|r| r.state != "skipped")
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1183,8 +1502,26 @@ mod tests {
     fn a_repeat_that_is_too_old_waits_for_the_next_time_and_a_once_runs_late() {
         let d = dir("stale");
         let jkt = "Asia/Jakarta";
-        let daily = create(&d, job("Daily", repeat("2030-11-04T09:00", "FREQ=WEEKLY;BYDAY=MO"), jkt)).unwrap();
-        let once = create(&d, job("Once", Trigger::Once { at: "2030-11-04T09:00".into() }, jkt)).unwrap();
+        let daily = create(
+            &d,
+            job(
+                "Daily",
+                repeat("2030-11-04T09:00", "FREQ=WEEKLY;BYDAY=MO"),
+                jkt,
+            ),
+        )
+        .unwrap();
+        let once = create(
+            &d,
+            job(
+                "Once",
+                Trigger::Once {
+                    at: "2030-11-04T09:00".into(),
+                },
+                jkt,
+            ),
+        )
+        .unwrap();
         // Mon 09:00 + 13 hours.
         let c = claim_due(&d, ts("2030-11-04T22:00", jkt)).unwrap();
         assert_eq!(c.len(), 1);
@@ -1192,7 +1529,10 @@ mod tests {
         assert_eq!(c[0].job.status, "done", "it has no more times");
         let daily = get(&d, &daily.id).unwrap();
         assert_eq!(daily.next_run, Some(ts("2030-11-11T09:00", jkt)));
-        assert_eq!(runs(&d, Some(&daily.id), 5, true).unwrap()[0].note, "Too late: AIfred was not running at this time.");
+        assert_eq!(
+            runs(&d, Some(&daily.id), 5, true).unwrap()[0].note,
+            "Too late: AIfred was not running at this time."
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1200,12 +1540,24 @@ mod tests {
     fn failures_retry_then_turn_the_job_off() {
         let d = dir("fail");
         let jkt = "Asia/Jakarta";
-        let j = create(&d, job("Weekly", repeat("2030-11-04T09:00", "FREQ=WEEKLY"), jkt)).unwrap();
+        let j = create(
+            &d,
+            job("Weekly", repeat("2030-11-04T09:00", "FREQ=WEEKLY"), jkt),
+        )
+        .unwrap();
         let mut t = ts("2030-11-04T09:00", jkt);
         for i in 1..=MAX_FAILURES {
             let c = claim_due(&d, t).unwrap();
             assert_eq!(c.len(), 1, "run {i}");
-            let after = finish(&d, c[0].run, Outcome::Failed { error: "no network".into() }).unwrap().unwrap();
+            let after = finish(
+                &d,
+                c[0].run,
+                Outcome::Failed {
+                    error: "no network".into(),
+                },
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(after.failures, i);
             if i < MAX_FAILURES {
                 // The retry is soon, not next week. `finish` uses the real
@@ -1217,7 +1569,15 @@ mod tests {
             }
         }
         // Back on: the failures count from zero, and missed times do not run.
-        let on = update(&d, &j.id, JobChange { status: Some("active".into()), ..Default::default() }).unwrap();
+        let on = update(
+            &d,
+            &j.id,
+            JobChange {
+                status: Some("active".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!((on.status.as_str(), on.failures), ("active", 0));
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -1226,7 +1586,11 @@ mod tests {
     fn a_busy_run_and_a_restart_never_run_twice() {
         let d = dir("busy");
         let jkt = "Asia/Jakarta";
-        create(&d, job("Hourly", repeat("2030-11-04T09:00", "FREQ=HOURLY"), jkt)).unwrap();
+        create(
+            &d,
+            job("Hourly", repeat("2030-11-04T09:00", "FREQ=HOURLY"), jkt),
+        )
+        .unwrap();
         let t = ts("2030-11-04T09:00", jkt);
         let first = claim_due(&d, t).unwrap();
         assert_eq!(first.len(), 1);
@@ -1251,11 +1615,17 @@ mod tests {
             store.set_done(&t.id, true).unwrap();
         }
         let t = now() as i64;
-        assert!(claim_due(&d, t).unwrap().is_empty(), "it waits for more events");
+        assert!(
+            claim_due(&d, t).unwrap().is_empty(),
+            "it waits for more events"
+        );
         assert!(get(&d, BRIEF_JOB).unwrap().next_run.unwrap() >= t + 89);
         let c = claim_due(&d, t + 91).unwrap();
         assert_eq!(c.len(), 1, "8 tasks give one run");
-        assert!(claim_due(&d, t + 200).unwrap().is_empty(), "the events are used");
+        assert!(
+            claim_due(&d, t + 200).unwrap().is_empty(),
+            "the events are used"
+        );
         // A task that is opened again is not an event.
         let x = store.add("Again", "", "you").unwrap();
         store.set_done(&x.id, false).unwrap();
@@ -1287,10 +1657,31 @@ mod tests {
     fn pause_resume_and_a_new_time() {
         let d = dir("edit");
         let jkt = "Asia/Jakarta";
-        let j = create(&d, job("Mon", repeat("2030-11-04T09:00", "FREQ=WEEKLY;BYDAY=MO"), jkt)).unwrap();
-        let p = update(&d, &j.id, JobChange { status: Some("paused".into()), ..Default::default() }).unwrap();
+        let j = create(
+            &d,
+            job(
+                "Mon",
+                repeat("2030-11-04T09:00", "FREQ=WEEKLY;BYDAY=MO"),
+                jkt,
+            ),
+        )
+        .unwrap();
+        let p = update(
+            &d,
+            &j.id,
+            JobChange {
+                status: Some("paused".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(p.status, "paused");
-        assert!(claim_due(&d, ts("2030-11-04T09:00", jkt)).unwrap().is_empty(), "a paused job does not run");
+        assert!(
+            claim_due(&d, ts("2030-11-04T09:00", jkt))
+                .unwrap()
+                .is_empty(),
+            "a paused job does not run"
+        );
         let tue = update(
             &d,
             &j.id,
@@ -1310,17 +1701,47 @@ mod tests {
 
     #[test]
     fn agent_answers() {
-        assert_eq!(agent_outcome("NOTHING", None), Outcome::Quiet { cost_usd: None });
-        assert_eq!(agent_outcome(" **NOTHING.** ", None), Outcome::Quiet { cost_usd: None });
-        assert_eq!(agent_outcome("Nothing.", None), Outcome::Quiet { cost_usd: None });
-        assert_eq!(agent_outcome("Nothing to report.", None), Outcome::Quiet { cost_usd: None });
-        let merged = Outcome::Finished { output: "PR #123 is merged.".into(), cost_usd: Some(0.1) };
+        assert_eq!(
+            agent_outcome("NOTHING", None),
+            Outcome::Quiet { cost_usd: None }
+        );
+        assert_eq!(
+            agent_outcome(" **NOTHING.** ", None),
+            Outcome::Quiet { cost_usd: None }
+        );
+        assert_eq!(
+            agent_outcome("Nothing.", None),
+            Outcome::Quiet { cost_usd: None }
+        );
+        assert_eq!(
+            agent_outcome("Nothing to report.", None),
+            Outcome::Quiet { cost_usd: None }
+        );
+        let merged = Outcome::Finished {
+            output: "PR #123 is merged.".into(),
+            cost_usd: Some(0.1),
+        };
         assert_eq!(agent_outcome("DONE: PR #123 is merged.", Some(0.1)), merged);
-        assert_eq!(agent_outcome("**DONE:** PR #123 is merged.", Some(0.1)), merged);
-        assert_eq!(agent_outcome("**Done**: PR #123 is merged.", Some(0.1)), merged);
-        assert!(matches!(agent_outcome("PR #123 is still open.", None), Outcome::Ok { .. }));
-        assert!(matches!(agent_outcome("Nothing changed, but the PR has a new review.", None), Outcome::Ok { .. }));
-        assert!(matches!(agent_outcome("Done reviewing: 2 comments.", None), Outcome::Ok { .. }));
+        assert_eq!(
+            agent_outcome("**DONE:** PR #123 is merged.", Some(0.1)),
+            merged
+        );
+        assert_eq!(
+            agent_outcome("**Done**: PR #123 is merged.", Some(0.1)),
+            merged
+        );
+        assert!(matches!(
+            agent_outcome("PR #123 is still open.", None),
+            Outcome::Ok { .. }
+        ));
+        assert!(matches!(
+            agent_outcome("Nothing changed, but the PR has a new review.", None),
+            Outcome::Ok { .. }
+        ));
+        assert!(matches!(
+            agent_outcome("Done reviewing: 2 comments.", None),
+            Outcome::Ok { .. }
+        ));
     }
 
     #[test]
@@ -1331,9 +1752,19 @@ mod tests {
             "FREQ=DAILY;BYHOUR=9;BYMINUTE=0,1",
             "FREQ=HOURLY;BYSECOND=0,30",
         ] {
-            assert!(clean_rule(bad).unwrap_err().to_string().contains("once an hour"), "{bad}");
+            assert!(
+                clean_rule(bad)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("once an hour"),
+                "{bad}"
+            );
         }
-        for good in ["FREQ=HOURLY", "FREQ=DAILY;BYHOUR=9,17;BYMINUTE=30", "FREQ=HOURLY;BYMINUTE=15;BYSECOND=0"] {
+        for good in [
+            "FREQ=HOURLY",
+            "FREQ=DAILY;BYHOUR=9,17;BYMINUTE=30",
+            "FREQ=HOURLY;BYMINUTE=15;BYSECOND=0",
+        ] {
             clean_rule(good).unwrap();
         }
     }
@@ -1347,9 +1778,15 @@ mod tests {
         assert_eq!(second - first, 3600);
         let text = local_text_exact(second, ny).unwrap();
         assert_eq!(text, "2026-11-01T01:30-05:00");
-        assert_eq!(parse_local(&text, zone(ny).unwrap()).unwrap().timestamp(), second);
+        assert_eq!(
+            parse_local(&text, zone(ny).unwrap()).unwrap().timestamp(),
+            second
+        );
         // A plain time has no offset.
-        assert_eq!(local_text_exact(ts("2026-11-02T09:00", ny), ny).unwrap(), "2026-11-02T09:00");
+        assert_eq!(
+            local_text_exact(ts("2026-11-02T09:00", ny), ny).unwrap(),
+            "2026-11-02T09:00"
+        );
     }
 
     #[test]
@@ -1359,25 +1796,59 @@ mod tests {
         let t = now() as i64;
         let at = local_text(t + 3600, jkt).unwrap();
         let j = create(&d, job("Call Sam", Trigger::Once { at }, jkt)).unwrap();
-        update(&d, &j.id, JobChange { status: Some("paused".into()), ..Default::default() }).unwrap();
+        update(
+            &d,
+            &j.id,
+            JobChange {
+                status: Some("paused".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         // The time passes during the pause.
         let past = local_text(t - 3600, jkt).unwrap();
         let planned = ts(&past, jkt);
         db::write(&d, |tx| {
             let trig = serde_json::to_string(&Trigger::Once { at: past.clone() })?;
-            tx.execute("UPDATE job SET trigger = ?2 WHERE id = ?1", rusqlite::params![j.id, trig])?;
+            tx.execute(
+                "UPDATE job SET trigger = ?2 WHERE id = ?1",
+                rusqlite::params![j.id, trig],
+            )?;
             Ok(())
         })
         .unwrap();
         assert!(get(&d, &j.id).unwrap().can_start, "Start shows");
-        let back = update(&d, &j.id, JobChange { status: Some("active".into()), ..Default::default() }).unwrap();
-        assert_eq!((back.status.as_str(), back.next_run), ("active", Some(planned)));
+        let back = update(
+            &d,
+            &j.id,
+            JobChange {
+                status: Some("active".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (back.status.as_str(), back.next_run),
+            ("active", Some(planned))
+        );
         let c = claim_due(&d, t).unwrap();
-        assert_eq!((c.len(), c[0].late), (1, true), "it runs at once, as a late run");
+        assert_eq!(
+            (c.len(), c[0].late),
+            (1, true),
+            "it runs at once, as a late run"
+        );
         // Done now: no more times, so Start does not show and does not work.
         let done = get(&d, &j.id).unwrap();
         assert_eq!((done.status.as_str(), done.can_start), ("done", false));
-        let e = update(&d, &j.id, JobChange { status: Some("active".into()), ..Default::default() }).unwrap_err();
+        let e = update(
+            &d,
+            &j.id,
+            JobChange {
+                status: Some("active".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("no more times"), "{e}");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -1393,17 +1864,27 @@ mod tests {
         assert_eq!(c.len(), 1);
         // A new event while the run is busy (after the claim at t + 91).
         db::write(&d, |tx| {
-            tx.execute("INSERT INTO job_event (name, ts) VALUES (?1, ?2)", rusqlite::params![TASK_DONE, t + 100])?;
+            tx.execute(
+                "INSERT INTO job_event (name, ts) VALUES (?1, ?2)",
+                rusqlite::params![TASK_DONE, t + 100],
+            )?;
             Ok(())
         })
         .unwrap();
-        assert!(claim_due(&d, t + 200).unwrap().is_empty(), "the run is still busy");
+        assert!(
+            claim_due(&d, t + 200).unwrap().is_empty(),
+            "the run is still busy"
+        );
         let next = get(&d, BRIEF_JOB).unwrap().next_run.unwrap();
         assert_eq!(next, t + 200 + BUSY_RECHECK_SECS);
         // Not due on the next tick: that tick takes no write lock.
         assert!(!db::read(&d, |c| any_due(c, t + 230)).unwrap());
         finish(&d, c[0].run, Outcome::Quiet { cost_usd: None }).unwrap();
-        assert_eq!(claim_due(&d, t + 260).unwrap().len(), 1, "the new event runs after the busy run");
+        assert_eq!(
+            claim_due(&d, t + 260).unwrap().len(),
+            1,
+            "the new event runs after the busy run"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1412,9 +1893,15 @@ mod tests {
         let d = dir("schedlock");
         let first = SchedulerLock::take(&d).unwrap();
         assert!(first.is_some());
-        assert!(SchedulerLock::take(&d).unwrap().is_none(), "a second window waits");
+        assert!(
+            SchedulerLock::take(&d).unwrap().is_none(),
+            "a second window waits"
+        );
         drop(first);
-        assert!(SchedulerLock::take(&d).unwrap().is_some(), "it takes over when the first one stops");
+        assert!(
+            SchedulerLock::take(&d).unwrap().is_some(),
+            "it takes over when the first one stops"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1422,16 +1909,34 @@ mod tests {
     fn a_new_time_starts_an_ended_job_again() {
         let d = dir("revive");
         let jkt = "Asia/Jakarta";
-        let j = create(&d, job("Call", Trigger::Once { at: "2030-11-04T09:00".into() }, jkt)).unwrap();
+        let j = create(
+            &d,
+            job(
+                "Call",
+                Trigger::Once {
+                    at: "2030-11-04T09:00".into(),
+                },
+                jkt,
+            ),
+        )
+        .unwrap();
         let c = claim_due(&d, ts("2030-11-04T09:00", jkt)).unwrap();
         assert_eq!(c[0].job.status, "done");
         let moved = update(
             &d,
             &j.id,
-            JobChange { trigger: Some(Trigger::Once { at: "2030-11-08T10:00".into() }), ..Default::default() },
+            JobChange {
+                trigger: Some(Trigger::Once {
+                    at: "2030-11-08T10:00".into(),
+                }),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert_eq!((moved.status.as_str(), moved.next_run), ("active", Some(ts("2030-11-08T10:00", jkt))));
+        assert_eq!(
+            (moved.status.as_str(), moved.next_run),
+            ("active", Some(ts("2030-11-08T10:00", jkt)))
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1439,19 +1944,40 @@ mod tests {
     fn a_change_to_an_event_ignores_the_old_events() {
         let d = dir("toevent");
         let jkt = "Asia/Jakarta";
-        let j = create(&d, job("Daily", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt)).unwrap();
+        let j = create(
+            &d,
+            job("Daily", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt),
+        )
+        .unwrap();
         let store = crate::tasks::TaskStore::new(&d);
         let t = store.add("Old task", "", "you").unwrap();
         store.set_done(&t.id, true).unwrap();
         // Pause the brief job, so only this job can run.
-        update(&d, BRIEF_JOB, JobChange { status: Some("paused".into()), ..Default::default() }).unwrap();
+        update(
+            &d,
+            BRIEF_JOB,
+            JobChange {
+                status: Some("paused".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         update(
             &d,
             &j.id,
-            JobChange { trigger: Some(Trigger::Event { event: TASK_DONE.into(), wait_secs: 10 }), ..Default::default() },
+            JobChange {
+                trigger: Some(Trigger::Event {
+                    event: TASK_DONE.into(),
+                    wait_secs: 10,
+                }),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert!(claim_due(&d, now() as i64 + 3600).unwrap().is_empty(), "the old task does not count");
+        assert!(
+            claim_due(&d, now() as i64 + 3600).unwrap().is_empty(),
+            "the old task does not count"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1459,8 +1985,16 @@ mod tests {
     fn a_bad_job_turns_off_and_the_others_still_run() {
         let d = dir("bad");
         let jkt = "Asia/Jakarta";
-        let good = create(&d, job("Good", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt)).unwrap();
-        let bad = create(&d, job("Bad", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt)).unwrap();
+        let good = create(
+            &d,
+            job("Good", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt),
+        )
+        .unwrap();
+        let bad = create(
+            &d,
+            job("Bad", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt),
+        )
+        .unwrap();
         db::write(&d, |tx| {
             tx.execute("UPDATE job SET tz = 'Mars/Base' WHERE id = ?1", [&bad.id])?;
             Ok(())
@@ -1481,20 +2015,37 @@ mod tests {
     fn a_long_gap_writes_at_most_twenty_skipped_rows() {
         let d = dir("gap");
         let jkt = "Asia/Jakarta";
-        let j = create(&d, job("Hourly", repeat("2030-11-04T09:00", "FREQ=HOURLY"), jkt)).unwrap();
+        let j = create(
+            &d,
+            job("Hourly", repeat("2030-11-04T09:00", "FREQ=HOURLY"), jkt),
+        )
+        .unwrap();
         // Closed for 3 days: 72 hourly times pass.
         let c = claim_due(&d, ts("2030-11-07T09:30", jkt)).unwrap();
         assert_eq!(c.len(), 1);
-        let skipped: Vec<Run> = runs(&d, Some(&j.id), 200, true).unwrap().into_iter().filter(|r| r.state == "skipped").collect();
+        let skipped: Vec<Run> = runs(&d, Some(&j.id), 200, true)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.state == "skipped")
+            .collect();
         assert_eq!(skipped.len(), MAX_SKIP_ROWS);
-        assert!(skipped.last().unwrap().note.contains("52 earlier times"), "{}", skipped.last().unwrap().note);
+        assert!(
+            skipped.last().unwrap().note.contains("52 earlier times"),
+            "{}",
+            skipped.last().unwrap().note
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn the_brief_job_cannot_be_deleted() {
         let d = dir("keepbrief");
-        assert!(delete(&d, BRIEF_JOB).unwrap_err().to_string().contains("Pause"));
+        assert!(
+            delete(&d, BRIEF_JOB)
+                .unwrap_err()
+                .to_string()
+                .contains("Pause")
+        );
         assert!(get(&d, BRIEF_JOB).is_ok());
         std::fs::remove_dir_all(&d).unwrap();
     }

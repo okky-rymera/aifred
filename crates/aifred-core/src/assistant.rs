@@ -529,7 +529,13 @@ impl<B: Backend> Assistant<B> {
             servers.push(server(
                 "jobs",
                 home(),
-                &["schedule_job", "list_jobs", "update_job", "cancel_job", "job_runs"],
+                &[
+                    "schedule_job",
+                    "list_jobs",
+                    "update_job",
+                    "cancel_job",
+                    "job_runs",
+                ],
             ));
         }
         (servers, vec![])
@@ -802,7 +808,11 @@ impl<B: Backend> Assistant<B> {
 
     /// Runs an agent job (jobs.rs) with read-only tools. `planned` is the
     /// planned time of the run, in Unix seconds. It gives the answer and the cost.
-    pub async fn run_job(&self, job: &crate::jobs::Job, planned: i64) -> anyhow::Result<(String, Option<f64>)> {
+    pub async fn run_job(
+        &self,
+        job: &crate::jobs::Job,
+        planned: i64,
+    ) -> anyhow::Result<(String, Option<f64>)> {
         let (system, facts_small) = self
             .off_thread(|dir| {
                 let small = memory_is_small(dir)?;
@@ -1344,12 +1354,22 @@ mod tests {
         std::fs::write(dir.join("aifred"), "").unwrap();
         let a = assistant(dir.clone(), dir.join("aifred"));
         let (servers, _) = a.tool_servers_for(true);
-        assert!(servers.iter().all(|s| s.name != "jobs"), "a job must not make jobs");
+        assert!(
+            servers.iter().all(|s| s.name != "jobs"),
+            "a job must not make jobs"
+        );
         let tools: Vec<&str> = servers
             .iter()
             .flat_map(|s| s.allowed_tools.iter().map(String::as_str))
             .collect();
-        for write in ["add_task", "update_task", "complete_task", "set_day_plan", "add_memory", "forget_memory"] {
+        for write in [
+            "add_task",
+            "update_task",
+            "complete_task",
+            "set_day_plan",
+            "add_memory",
+            "forget_memory",
+        ] {
             assert!(!tools.contains(&write), "{write} must not be in a job run");
         }
         assert!(tools.contains(&"overview") && tools.contains(&"search_memory"));

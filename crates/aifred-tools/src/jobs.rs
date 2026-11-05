@@ -97,15 +97,22 @@ fn fail(e: anyhow::Error) -> ErrorData {
 }
 
 fn json(v: &Value) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(v.to_string())]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(
+        v.to_string(),
+    )]))
 }
 
 /// The trigger from the time fields, or None when all are empty.
 fn trigger(w: WhenArgs, tz: &str) -> anyhow::Result<Option<Trigger>> {
-    let given = [w.at.is_some(), w.in_minutes.is_some(), w.repeat.is_some(), w.after_event.is_some()]
-        .iter()
-        .filter(|b| **b)
-        .count();
+    let given = [
+        w.at.is_some(),
+        w.in_minutes.is_some(),
+        w.repeat.is_some(),
+        w.after_event.is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
     if given > 1 {
         anyhow::bail!("give only one of at, in_minutes, repeat, or after_event");
     }
@@ -120,14 +127,19 @@ fn trigger(w: WhenArgs, tz: &str) -> anyhow::Result<Option<Trigger>> {
         }
         // Real time, not clock time: "in 2 hours" across a summer time change is 2 hours.
         let t = aifred_core::files::now() as i64 + m as i64 * 60;
-        Some(Trigger::Once { at: jobs::local_text_exact(t, tz)? })
+        Some(Trigger::Once {
+            at: jobs::local_text_exact(t, tz)?,
+        })
     } else if let Some(rule) = w.repeat {
         let Some(start) = w.start else {
             anyhow::bail!("repeat needs start: the local time of the first run, YYYY-MM-DDTHH:MM");
         };
         Some(Trigger::Repeat { start, rule })
     } else {
-        w.after_event.map(|event| Trigger::Event { event, wait_secs: w.wait_seconds.unwrap_or(90) })
+        w.after_event.map(|event| Trigger::Event {
+            event,
+            wait_secs: w.wait_seconds.unwrap_or(90),
+        })
     })
 }
 
@@ -156,14 +168,25 @@ impl JobTools {
     #[tool(
         description = "Make one of your own jobs: a reminder for the user, or an agent job that you run later with read-only tools. Use it when the user asks you to remind them, or to check or do something at a later time, again and again, or after they finish a task. Give exactly one of at, in_minutes, repeat (with start), or after_event. Times are the user's local time. The answer has `when` and `next_runs`: tell them to the user so they can check the time."
     )]
-    async fn schedule_job(&self, Parameters(a): Parameters<ScheduleArgs>) -> Result<CallToolResult, ErrorData> {
-        let tz = a.timezone.clone().filter(|z| !z.trim().is_empty()).unwrap_or_else(jobs::local_zone);
+    async fn schedule_job(
+        &self,
+        Parameters(a): Parameters<ScheduleArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let tz = a
+            .timezone
+            .clone()
+            .filter(|z| !z.trim().is_empty())
+            .unwrap_or_else(jobs::local_zone);
         if a.action != "remind" && a.action != "agent" {
-            return Err(fail(anyhow::anyhow!("action must be \"remind\" or \"agent\"")));
+            return Err(fail(anyhow::anyhow!(
+                "action must be \"remind\" or \"agent\""
+            )));
         }
         let trigger = trigger(a.when, &tz).map_err(fail)?;
         if trigger.is_none() {
-            return Err(fail(anyhow::anyhow!("give a time: at, in_minutes, repeat with start, or after_event")));
+            return Err(fail(anyhow::anyhow!(
+                "give a time: at, in_minutes, repeat with start, or after_event"
+            )));
         }
         let job = jobs::create(
             &self.dir,
@@ -183,7 +206,10 @@ impl JobTools {
     #[tool(
         description = "List your own jobs (reminders and agent jobs), the next run first, with `when` in plain words and the next run times. Not the user's to-do tasks."
     )]
-    async fn list_jobs(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn list_jobs(
+        &self,
+        Parameters(a): Parameters<ListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let all = jobs::list(&self.dir, a.include_ended.unwrap_or(false)).map_err(fail)?;
         json(&Value::Array(all.iter().map(view).collect()))
     }
@@ -191,7 +217,10 @@ impl JobTools {
     #[tool(
         description = "Change one of your jobs: its name, message, time, or time zone, or pause it and start it again. Only the fields you send change. Use it only when the user asks. After a new time, tell the user the new `when` and `next_runs`."
     )]
-    async fn update_job(&self, Parameters(a): Parameters<UpdateArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn update_job(
+        &self,
+        Parameters(a): Parameters<UpdateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let tz = match &a.timezone {
             Some(z) if !z.trim().is_empty() => z.clone(),
             _ => jobs::get(&self.dir, &a.id).map_err(fail)?.tz,
@@ -212,8 +241,13 @@ impl JobTools {
         json(&view(&job))
     }
 
-    #[tool(description = "Delete one of your jobs and its run history. Use it when the user asks you to stop or cancel a job.")]
-    async fn cancel_job(&self, Parameters(a): Parameters<IdArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Delete one of your jobs and its run history. Use it when the user asks you to stop or cancel a job."
+    )]
+    async fn cancel_job(
+        &self,
+        Parameters(a): Parameters<IdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let job = jobs::get(&self.dir, &a.id).map_err(fail)?;
         jobs::delete(&self.dir, &a.id).map_err(fail)?;
         json(&json!({ "deleted": job.title }))
@@ -222,13 +256,23 @@ impl JobTools {
     #[tool(
         description = "The latest runs of your jobs, newest first: when each ran, the result (ok, quiet = nothing to tell, skipped, failed), and what it told the user. Use it when the user asks what a job found or why it did not run."
     )]
-    async fn job_runs(&self, Parameters(a): Parameters<RunsArgs>) -> Result<CallToolResult, ErrorData> {
-        let list = jobs::runs(&self.dir, a.id.as_deref(), a.limit.unwrap_or(10).clamp(1, 50), true).map_err(fail)?;
-        let titles: std::collections::HashMap<String, (String, String)> = jobs::list(&self.dir, true)
-            .map_err(fail)?
-            .into_iter()
-            .map(|j| (j.id, (j.title, j.tz)))
-            .collect();
+    async fn job_runs(
+        &self,
+        Parameters(a): Parameters<RunsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let list = jobs::runs(
+            &self.dir,
+            a.id.as_deref(),
+            a.limit.unwrap_or(10).clamp(1, 50),
+            true,
+        )
+        .map_err(fail)?;
+        let titles: std::collections::HashMap<String, (String, String)> =
+            jobs::list(&self.dir, true)
+                .map_err(fail)?
+                .into_iter()
+                .map(|j| (j.id, (j.title, j.tz)))
+                .collect();
         let out: Vec<Value> = list
             .into_iter()
             .map(|r| {
@@ -269,7 +313,8 @@ mod tests {
     use super::*;
 
     fn tools(name: &str) -> JobTools {
-        let dir = std::env::temp_dir().join(format!("aifred-jobs-mcp-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aifred-jobs-mcp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         JobTools { dir }
@@ -298,29 +343,66 @@ mod tests {
             start: Some("2030-11-04T09:00".into()),
             ..Default::default()
         };
-        let j = body(t.schedule_job(Parameters(schedule("Timesheet", when))).await.unwrap());
+        let j = body(
+            t.schedule_job(Parameters(schedule("Timesheet", when)))
+                .await
+                .unwrap(),
+        );
         assert_eq!(j["when"], "Every Monday at 09:00 (Asia/Jakarta)");
         assert_eq!(j["next_runs"][0], "Mon 4 Nov 2030 09:00");
         assert_eq!(j["next_runs"].as_array().unwrap().len(), 3);
         assert_eq!(j["created_by"], "aifred");
-        let list = body(t.list_jobs(Parameters(ListArgs { include_ended: None })).await.unwrap());
-        assert!(list.as_array().unwrap().iter().any(|x| x["title"] == "Timesheet"));
+        let list = body(
+            t.list_jobs(Parameters(ListArgs {
+                include_ended: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["title"] == "Timesheet")
+        );
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 
     #[tokio::test]
     async fn the_ai_learns_what_is_wrong() {
         let t = tools("errors");
-        let two = WhenArgs { at: Some("2030-11-04T09:00".into()), in_minutes: Some(5), ..Default::default() };
-        let e = t.schedule_job(Parameters(schedule("x", two))).await.unwrap_err();
+        let two = WhenArgs {
+            at: Some("2030-11-04T09:00".into()),
+            in_minutes: Some(5),
+            ..Default::default()
+        };
+        let e = t
+            .schedule_job(Parameters(schedule("x", two)))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("only one"), "{}", e.message);
-        let no_start = WhenArgs { repeat: Some("FREQ=DAILY".into()), ..Default::default() };
-        let e = t.schedule_job(Parameters(schedule("x", no_start))).await.unwrap_err();
+        let no_start = WhenArgs {
+            repeat: Some("FREQ=DAILY".into()),
+            ..Default::default()
+        };
+        let e = t
+            .schedule_job(Parameters(schedule("x", no_start)))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("start"), "{}", e.message);
-        let words = WhenArgs { at: Some("next Friday".into()), ..Default::default() };
-        let e = t.schedule_job(Parameters(schedule("x", words))).await.unwrap_err();
+        let words = WhenArgs {
+            at: Some("next Friday".into()),
+            ..Default::default()
+        };
+        let e = t
+            .schedule_job(Parameters(schedule("x", words)))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("YYYY-MM-DDTHH:MM"), "{}", e.message);
-        let e = t.schedule_job(Parameters(schedule("x", WhenArgs::default()))).await.unwrap_err();
+        let e = t
+            .schedule_job(Parameters(schedule("x", WhenArgs::default())))
+            .await
+            .unwrap_err();
         assert!(e.message.contains("give a time"), "{}", e.message);
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
@@ -328,8 +410,15 @@ mod tests {
     #[tokio::test]
     async fn in_minutes_pause_and_cancel() {
         let t = tools("edit");
-        let soon = WhenArgs { in_minutes: Some(120), ..Default::default() };
-        let j = body(t.schedule_job(Parameters(schedule("Soon", soon))).await.unwrap());
+        let soon = WhenArgs {
+            in_minutes: Some(120),
+            ..Default::default()
+        };
+        let j = body(
+            t.schedule_job(Parameters(schedule("Soon", soon)))
+                .await
+                .unwrap(),
+        );
         assert!(j["when"].as_str().unwrap().starts_with("Once, "));
         let id = j["id"].as_str().unwrap().to_string();
         let paused = body(
@@ -346,7 +435,11 @@ mod tests {
         );
         assert_eq!(paused["status"], "paused");
         assert_eq!(paused["next_runs"], json!([]));
-        let gone = body(t.cancel_job(Parameters(IdArgs { id: id.clone() })).await.unwrap());
+        let gone = body(
+            t.cancel_job(Parameters(IdArgs { id: id.clone() }))
+                .await
+                .unwrap(),
+        );
         assert_eq!(gone["deleted"], "Soon");
         assert!(t.cancel_job(Parameters(IdArgs { id })).await.is_err());
         std::fs::remove_dir_all(&t.dir).unwrap();

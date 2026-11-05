@@ -940,15 +940,30 @@ async fn jobs(app: State<'_, App>, all: bool) -> CmdResult<Vec<Job>> {
 /// The latest runs of one job, or of all jobs, newest first. No skipped runs
 /// unless `skipped` is true.
 #[tauri::command]
-async fn job_runs(app: State<'_, App>, id: Option<String>, limit: u32, skipped: bool) -> CmdResult<Vec<Run>> {
-    blocking(&app, move |a| aifred_core::jobs::runs(&a.dir, id.as_deref(), limit, skipped)).await
+async fn job_runs(
+    app: State<'_, App>,
+    id: Option<String>,
+    limit: u32,
+    skipped: bool,
+) -> CmdResult<Vec<Run>> {
+    blocking(&app, move |a| {
+        aifred_core::jobs::runs(&a.dir, id.as_deref(), limit, skipped)
+    })
+    .await
 }
 
 /// Pauses a job ("paused") or starts it again ("active").
 #[tauri::command]
 async fn set_job_status(app: State<'_, App>, id: String, status: String) -> CmdResult<Job> {
     blocking(&app, move |a| {
-        aifred_core::jobs::update(&a.dir, &id, JobChange { status: Some(status), ..Default::default() })
+        aifred_core::jobs::update(
+            &a.dir,
+            &id,
+            JobChange {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
     })
     .await
 }

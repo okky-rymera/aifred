@@ -31,15 +31,20 @@ pub fn start<R: Runtime>(h: AppHandle<R>) {
         loop {
             if lock.is_none() {
                 let d = dir.clone();
-                match tauri::async_runtime::spawn_blocking(move || jobs::SchedulerLock::take(&d)).await {
+                match tauri::async_runtime::spawn_blocking(move || jobs::SchedulerLock::take(&d))
+                    .await
+                {
                     Ok(Ok(Some(l))) => {
                         lock = Some(l);
                         // Runs that were busy when the last scheduler stopped
                         // do not run again. Safe now: no other window runs jobs.
                         let d = dir.clone();
-                        match tauri::async_runtime::spawn_blocking(move || jobs::recover(&d)).await {
+                        match tauri::async_runtime::spawn_blocking(move || jobs::recover(&d)).await
+                        {
                             Ok(Ok(0)) => {}
-                            Ok(Ok(n)) => eprintln!("aifred: {n} job runs stopped when AIfred closed"),
+                            Ok(Ok(n)) => {
+                                eprintln!("aifred: {n} job runs stopped when AIfred closed")
+                            }
                             Ok(Err(e)) => eprintln!("aifred: cannot check the job runs: {e:#}"),
                             Err(e) => eprintln!("aifred: cannot check the job runs: {e}"),
                         }
@@ -90,7 +95,10 @@ async fn run<R: Runtime>(h: AppHandle<R>, c: Claim) {
     let outcome = match c.job.action.as_str() {
         "remind" => {
             notify(&h, &c.job.title, &format!("{}{late}", c.job.message));
-            Outcome::Ok { output: c.job.message.clone(), cost_usd: None }
+            Outcome::Ok {
+                output: c.job.message.clone(),
+                cost_usd: None,
+            }
         }
         "brief" => {
             // The claim came after the events. A brief that read the tasks
@@ -100,20 +108,28 @@ async fn run<R: Runtime>(h: AppHandle<R>, c: Claim) {
             let _guard = app.brief_busy.lock().await;
             let today = aifred_core::plan::today();
             let (d, day) = (a.dir.clone(), today.clone());
-            let saved = tauri::async_runtime::spawn_blocking(move || aifred_core::brief::get(&d, &day))
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|r| r);
+            let saved =
+                tauri::async_runtime::spawn_blocking(move || aifred_core::brief::get(&d, &day))
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|r| r);
             // Only an update: a day with no brief gets none, so a finished
             // task costs no AI call when the user does not use the brief.
             match saved {
                 Ok(None) => Outcome::Quiet { cost_usd: None },
                 // The window wrote it while this run waited: no second AI call.
                 Ok(Some(b)) if b.written > claimed => Outcome::Quiet { cost_usd: None },
-                Err(e) => Outcome::Failed { error: format!("{e:#}") },
+                Err(e) => Outcome::Failed {
+                    error: format!("{e:#}"),
+                },
                 Ok(Some(_)) => match a.write_brief(&today).await {
-                    Ok(_) => Outcome::Ok { output: "The brief is new.".into(), cost_usd: None },
-                    Err(e) => Outcome::Failed { error: format!("{e:#}") },
+                    Ok(_) => Outcome::Ok {
+                        output: "The brief is new.".into(),
+                        cost_usd: None,
+                    },
+                    Err(e) => Outcome::Failed {
+                        error: format!("{e:#}"),
+                    },
                 },
             }
         }
@@ -125,9 +141,13 @@ async fn run<R: Runtime>(h: AppHandle<R>, c: Claim) {
                 }
                 o
             }
-            Err(e) => Outcome::Failed { error: format!("{e:#}") },
+            Err(e) => Outcome::Failed {
+                error: format!("{e:#}"),
+            },
         },
-        other => Outcome::Failed { error: format!("unknown action \"{other}\"") },
+        other => Outcome::Failed {
+            error: format!("unknown action \"{other}\""),
+        },
     };
     let failed = matches!(outcome, Outcome::Failed { .. });
     let dir = a.dir.clone();
@@ -136,7 +156,10 @@ async fn run<R: Runtime>(h: AppHandle<R>, c: Claim) {
         Ok(Ok(Some(job))) if failed && job.status == "off" => notify(
             &h,
             "AIfred stopped a job",
-            &format!("\"{}\" failed {} times in a row. Open AIfred's jobs to see the error and start it again.", job.title, job.failures),
+            &format!(
+                "\"{}\" failed {} times in a row. Open AIfred's jobs to see the error and start it again.",
+                job.title, job.failures
+            ),
         ),
         Ok(Ok(_)) => {}
         Ok(Err(e)) => eprintln!("aifred: cannot save the job run: {e:#}"),
