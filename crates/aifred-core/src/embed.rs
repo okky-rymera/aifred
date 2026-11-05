@@ -392,10 +392,7 @@ pub fn fill_missing(dir: &Path) -> anyhow::Result<usize> {
             for k in &KINDS {
                 tx.execute(&format!("DELETE FROM {}", k.vec), [])?;
             }
-            tx.execute(
-                "INSERT INTO meta (key, value) VALUES ('embed_model', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                [MODEL],
-            )?;
+            db::set_meta(tx, "embed_model", MODEL)?;
         }
         Ok(())
     })?;

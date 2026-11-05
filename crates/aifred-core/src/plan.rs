@@ -20,6 +20,9 @@ pub struct PlanItem {
     /// Why the item is at this place, when AIfred placed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// The id of the goal that the item serves (goals.rs), when AIfred knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,6 +102,8 @@ pub fn get(dir: &Path, day: &str) -> anyhow::Result<Option<DayPlan>> {
 /// `strict`: a new key of an item that is not open is an error, with the bad
 /// keys in the text, so the AI can fix its call. Without `strict` (the
 /// window), such keys are dropped: an item can close while the plan is open.
+/// A goal id that does not exist is an error with `strict`. Without
+/// `strict`, it is dropped: the user can remove a goal while the plan is open.
 pub fn set(
     dir: &Path,
     day: &str,
@@ -125,6 +130,7 @@ pub fn set(
         let mut seen = HashSet::new();
         let mut keep = Vec::new();
         let mut bad = Vec::new();
+        let mut bad_goals = Vec::new();
         for mut i in items {
             i.key = i.key.trim().to_string();
             i.why = i
@@ -133,6 +139,12 @@ pub fn set(
                 .filter(|w| !w.is_empty());
             if !seen.insert(i.key.clone()) {
                 continue;
+            }
+            if let Some(g) = i.goal
+                && !crate::goals::exists(tx, g)?
+            {
+                bad_goals.push(g.to_string());
+                i.goal = None;
             }
             if old.contains(&i.key) || items::is_open(tx, &i.key).unwrap_or(false) {
                 keep.push(i);
@@ -144,6 +156,12 @@ pub fn set(
             bail!(
                 "these keys are not open items: {}. Take the keys from the overview tool",
                 bad.join(", ")
+            );
+        }
+        if strict && !bad_goals.is_empty() {
+            bail!(
+                "these goal ids do not exist: {}. Take the goal ids from the overview tool",
+                bad_goals.join(", ")
             );
         }
         let plan = DayPlan {
@@ -250,7 +268,27 @@ mod tests {
         PlanItem {
             key: key.into(),
             why: None,
+            goal: None,
         }
+    }
+
+    #[test]
+    fn a_plan_item_keeps_a_goal_that_exists() {
+        let d = temp("goal");
+        let s = TaskStore::new(&d);
+        let a = format!("task:{}", s.add("A", "", "you").unwrap().id);
+        let g = crate::goals::add(&d, "Ship 2.0", 1).unwrap();
+        let with = |goal| PlanItem {
+            goal: Some(goal),
+            ..item(&a)
+        };
+        let p = set(&d, "2026-11-04", "ai", vec![with(g.id)], true).unwrap();
+        assert_eq!(p.items[0].goal, Some(g.id));
+        let e = set(&d, "2026-11-04", "ai", vec![with(g.id + 1)], true).unwrap_err();
+        assert!(format!("{e}").contains("goal ids"), "{e}");
+        let p = set(&d, "2026-11-04", "self", vec![with(g.id + 1)], false).unwrap();
+        assert_eq!(p.items[0].goal, None, "the window drops a removed goal");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

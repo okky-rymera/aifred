@@ -5,6 +5,7 @@
 import { useEffect, useRef } from "react";
 import { Composer, ICON, Messages } from "./Chat";
 import { useApp } from "./ctx";
+import { GoalTag } from "./Goals";
 import { DEFAULT_MINUTES, byPlan, dur, fmtTime, shortDay, type Item } from "./items";
 import { Check, DueChip, PriPill, SrcLine } from "./Home";
 
@@ -278,7 +279,7 @@ function useDrag(tl: React.RefObject<HTMLDivElement | null>) {
 }
 
 function Timeline() {
-  const { plan, planItems, sched, byKey, items, today, sel, open, removeFromPlan, addToPlan, planChat, settings, savePlan } = useApp();
+  const { plan, planItems, sched, byKey, items, today, sel, open, removeFromPlan, addToPlan, planChat, sendPlan, settings, savePlan, goalText } = useApp();
   const tl = useRef<HTMLDivElement>(null);
   useDrag(tl);
   const making = planChat.busy && !planItems.length;
@@ -327,6 +328,44 @@ function Timeline() {
           </div>
         </div>,
       );
+    } else if (b.meeting) {
+      const m = b.meeting;
+      const who = m.attendees.slice(0, 3).join(", ") + (m.attendees.length > 3 || m.more_attendees ? ` +${m.attendees.length - 3 + m.more_attendees}` : "");
+      const time = `${fmtTime(b.start)}–${fmtTime(b.end)}`;
+      blocks.push(
+        <div className="slot meeting" key={b.key}>
+          <span className="tm">{fmtTime(b.start)}</span>
+          <div className="blk fixed meet" style={{ minHeight: h }}>
+            <span />
+            <div className="t-main" style={{ cursor: "default" }}>
+              <span className="t-title">
+                {m.url ? <a href={m.url}>{m.title}</a> : m.title}
+              </span>
+              <div className="meta">
+                <span className="src cal">Calendar</span>
+                <span>{time}</span>
+                {who && <span>{who}</span>}
+                {m.response && m.response !== "accepted" && <span className="pill">{m.response === "tentative" ? "Maybe" : "Not answered"}</span>}
+              </div>
+            </div>
+            <span className="ctl">
+              <button
+                className="x"
+                title="AIfred writes a short note: who attends, what it is for, and your linked items"
+                aria-label={`Prepare for: ${m.title}`}
+                disabled={planChat.busy}
+                onClick={() =>
+                  // The title is not in the message: the invite sender wrote it, and
+                  // this message goes to the AI as the user's own words.
+                  sendPlan(`Prepare me for my calendar event today at ${time} (event id ${m.id}): who attends, what it is for, and which of my open items and goals link to it.`)
+                }
+              >
+                Prep
+              </button>
+            </span>
+          </div>
+        </div>,
+      );
     } else {
       const i = byKey.get(b.key)!;
       blocks.push(
@@ -343,9 +382,18 @@ function Timeline() {
                 </span>
                 <PriPill p={i.priority} />
               </div>
-              {(plan?.items.find((p) => p.key === i.key)?.why ?? i.why) && !i.done && (
-                <span className="why">{plan?.items.find((p) => p.key === i.key)?.why ?? i.why}</span>
-              )}
+              {(() => {
+                const p = plan?.items.find((p) => p.key === i.key);
+                const why = p?.why ?? i.why;
+                if (!why || i.done) return null;
+                // The goal that AIfred gave in the plan, else the goal from the brief.
+                const goal = goalText(p?.goal) ?? (p?.why ? undefined : i.goal);
+                return (
+                  <span className="why">
+                    {why} <GoalTag goal={goal} ranked />
+                  </span>
+                );
+              })()}
             </div>
             <span className="ctl">
               <Minutes item={i} />

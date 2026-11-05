@@ -185,10 +185,24 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 /** One item of a day plan. `key` names the item (items.rs). */
-export type PlanItem = { key: string; why?: string };
+export type PlanItem = { key: string; why?: string; goal?: number };
 export type DayPlan = { day: string; mode: "ai" | "self"; items: PlanItem[]; updated: number };
 export type Estimate = { minutes: number; by: "you" | "aifred" };
-export type Brief = { day: string; written: number; text: string; why: Record<string, string> };
+/** `goal`: the id of the goal that an item serves, by item key. */
+export type Brief = { day: string; written: number; text: string; why: Record<string, string>; goal?: Record<string, number> };
+
+/** One of the user's goals (goals.rs). */
+export type Goal = { id: number; text: string; created: number; updated: number };
+/** `stale`: the user has not changed or checked the goals for 30 days. */
+export type Goals = { goals: Goal[]; checked: number; stale: boolean };
+/** At most this many goals (goals.rs). */
+export const MAX_GOALS = 5;
+export const goals = () => invoke<Goals>("goals");
+export const addGoal = (text: string) => invoke<Goals>("add_goal", { text });
+export const editGoal = (id: number, text: string) => invoke<Goals>("edit_goal", { id, text });
+export const removeGoal = (id: number) => invoke<Goals>("remove_goal", { id });
+/** The user says that the goals are still right. */
+export const confirmGoals = () => invoke<Goals>("confirm_goals");
 export type ItemMeta = { key: string; first_seen: number; new: boolean; summary?: string };
 export type ItemDetails = { key: string; details: string; summary?: string };
 
@@ -301,6 +315,31 @@ export const addTask = (title: string, notes = "") => invoke<Task>("add_task", {
 export const createTask = (fields: TaskChanges & { title: string }) => invoke<Task>("add_task", { task: fields });
 export const setTaskDone = (id: string, done: boolean) => invoke<Task>("set_task_done", { id, done });
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
+/** One event of the user's Google Calendar (calendar.rs). Times in Unix seconds. */
+export type CalEvent = {
+  id: string;
+  title: string;
+  start: number;
+  end: number;
+  all_day: boolean;
+  /** It takes the user's time: the plan goes around it. */
+  busy: boolean;
+  attendees: string[];
+  more_attendees: number;
+  response: string | null;
+  url: string;
+  description: string;
+};
+export type CalendarList = { fetched_at: number; events: CalEvent[]; warning?: string };
+/** null: Google is not connected, so there is no calendar. */
+export const calendarEvents = (force: boolean) => invoke<CalendarList | null>("calendar_events", { force });
+/** The Google connection (google.rs). `features`: each feature, and true when the login allows it. */
+export type GoogleStatus = { client_id: string; secret_set: boolean; connected: boolean; email: string | null; features: [string, boolean][] };
+export const googleStatus = () => invoke<GoogleStatus>("google_status");
+export const setGoogleClient = (clientId: string, clientSecret: string) => invoke<GoogleStatus>("set_google_client", { clientId, clientSecret });
+/** Opens Google's login page and waits until the user is back. */
+export const connectGoogle = () => invoke<GoogleStatus>("connect_google");
+export const disconnectGoogle = () => invoke<GoogleStatus>("disconnect_google");
 /** force: ask GitHub now, and do not use the saved list. */
 export const githubItems = (force: boolean) => invoke<GithubList>("github_items", { force });
 /** force: ask ClickUp now, and do not use the saved list. */

@@ -6,11 +6,15 @@ import { DEFAULT_SETTINGS } from "../api";
 import type {
   Answer,
   Brief,
+  CalEvent,
+  CalendarList,
   ClickupItem,
   DayPlan,
   Estimate,
   Fact,
   FileRef,
+  Goals,
+  GoogleStatus,
   GithubItem,
   ItemDetails,
   Job,
@@ -36,8 +40,14 @@ export type Fake = {
   /** Runs after the list is made and before it is returned. Return a
    * promise to hold the answer, like a slow GitHub. */
   onGithubItems?: (force: boolean) => Promise<void> | void;
+  /** Runs after edit_goal changes the goal and before it answers. A test
+   * can hold the answer with it, so the answer comes after a later change. */
+  onEditGoal?: () => Promise<void> | void;
   /** Runs before day_plan answers. A test can hold the plan load with it. */
   onDayPlan?: (day: string) => Promise<void> | void;
+  /** Runs before connect_google answers, like a user in the browser. A
+   * rejected promise is a login that stopped. */
+  onConnectGoogle?: () => Promise<void> | void;
   /** How many times the window asked GitHub (not the saved list). */
   githubFetches: number;
   /** The ClickUp token, or "" when ClickUp is not connected. */
@@ -62,6 +72,13 @@ export type Fake = {
   history: Turn[];
   /** All facts, also the forgotten ones. */
   memory: Fact[];
+  /** The calendar. null: Google is not connected, so no calendar. */
+  calendar: CalendarList | null;
+  calendarError?: string;
+  /** The Google connection. connect_google connects as me@x.com and allows all features. */
+  google: GoogleStatus;
+  /** The user's goals, like goals.rs. */
+  goals: Goals;
   /** Commands that fail, with the error text. Example: { tasks: "cannot read tasks.json" }. */
   fail: Record<string, string>;
   /** Every command the window called, in order. */
@@ -191,6 +208,17 @@ export function clickupItem(id: string, title = `Task ${id}`, extra: Partial<Cli
   };
 }
 
+/** A busy meeting today from `from` to `to` ("HH:MM", local time). */
+export function meeting(id: string, title: string, from: string, to: string, extra: Partial<CalEvent> = {}): CalEvent {
+  const at = (hhmm: string) => {
+    const [h, m] = hhmm.split(":").map(Number);
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    return Math.floor(d.getTime() / 1000);
+  };
+  return { id, title, start: at(from), end: at(to), all_day: false, busy: true, attendees: ["Josh", "Ana"], more_attendees: 0, response: "accepted", url: `https://calendar.google.com/e/${id}`, description: "", ...extra };
+}
+
 export function answer(text: string, extra: Partial<Answer> = {}): Answer {
   return withInfo({ text, stats: { startup_ms: 10, total_ms: 1500, tool_calls: [] }, model_ms: 1000, cost_usd: 0.005, memory: [], model: null, info: "", ...extra });
 }
@@ -221,6 +249,9 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     chatModel: null,
     history: [],
     memory: [],
+    goals: { goals: [], checked: 0, stale: false },
+    calendar: null,
+    google: { client_id: "", secret_set: false, connected: false, email: null, features: [["Calendar", false]] },
     fail: {},
     calls: [],
     onAsk: (p) => answer(`You said: ${p}`),
@@ -284,6 +315,33 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
           ...fake.memory.filter((f) => f.forgotten === null),
           ...fake.memory.filter((f) => f.forgotten !== null).sort((a, b) => b.forgotten! - a.forgotten!),
         ]);
+      case "goals":
+        return structuredClone(fake.goals);
+      case "add_goal": {
+        const t = String(args.text).split(/\s+/).filter(Boolean).join(" ");
+        if (!t) throw "the goal is empty";
+        if (fake.goals.goals.length >= 5) throw "the user has 5 goals, the most that AIfred keeps. Change or remove a goal first";
+        fake.goals.goals.push({ id: nextId++, text: t, created: nowSecs(), updated: nowSecs() });
+        fake.goals = { ...fake.goals, checked: nowSecs(), stale: false };
+        return structuredClone(fake.goals);
+      }
+      case "edit_goal": {
+        const g = fake.goals.goals.find((g) => g.id === args.id);
+        if (!g) throw `no goal with id ${args.id}`;
+        g.text = String(args.text).trim();
+        fake.goals = { ...fake.goals, checked: nowSecs(), stale: false };
+        const answer = structuredClone(fake.goals);
+        await fake.onEditGoal?.();
+        return answer;
+      }
+      case "remove_goal": {
+        if (!fake.goals.goals.some((g) => g.id === args.id)) throw `no goal with id ${args.id}`;
+        fake.goals = { goals: fake.goals.goals.filter((g) => g.id !== args.id), checked: nowSecs(), stale: false };
+        return structuredClone(fake.goals);
+      }
+      case "confirm_goals":
+        fake.goals = { ...fake.goals, checked: nowSecs(), stale: false };
+        return structuredClone(fake.goals);
       case "add_fact": {
         const f = fact(factText(args.text));
         fake.memory.push(f);
@@ -347,6 +405,25 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         find(args.id);
         fake.tasks = fake.tasks.filter((t) => t.id !== args.id);
         return null;
+      case "google_status":
+        return structuredClone(fake.google);
+      case "set_google_client":
+        if (!String(args.clientId).trim().endsWith(".apps.googleusercontent.com")) throw "this does not look like a Google client ID. It ends with .apps.googleusercontent.com";
+        fake.google = { ...fake.google, client_id: String(args.clientId).trim(), secret_set: true };
+        return structuredClone(fake.google);
+      case "connect_google":
+        await fake.onConnectGoogle?.();
+        if (!fake.google.secret_set) throw "add the client ID and the client secret of your Google registration first";
+        fake.google = { ...fake.google, connected: true, email: "me@x.com", features: [["Calendar", true]] };
+        fake.calendar = fake.calendar ?? { fetched_at: nowSecs(), events: [] };
+        return structuredClone(fake.google);
+      case "disconnect_google":
+        fake.google = { ...fake.google, connected: false, email: null, features: [["Calendar", false]] };
+        fake.calendar = null;
+        return structuredClone(fake.google);
+      case "calendar_events":
+        if (fake.calendarError) throw fake.calendarError;
+        return structuredClone(fake.calendar);
       case "github_items": {
         // The real app uses a saved list when force is false. The fake
         // counts only the real GitHub calls, so tests can see the difference.

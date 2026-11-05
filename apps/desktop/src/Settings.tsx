@@ -1,5 +1,6 @@
 import { useState } from "react";
 import * as api from "./api";
+import { GoogleSection } from "./Google";
 
 const REFRESH_CHOICES = [
   { minutes: 5, label: "Every 5 minutes" },
@@ -184,6 +185,8 @@ export function SettingsPage(props: {
   info?: api.Info | null;
   clickupToken?: api.ClickupTokenStatus | null;
   onClickupTokenChanged?: () => void;
+  /** The Google connection changed: the calendar must load again. */
+  onGoogleChanged?: () => void;
   update?: api.UpdateStatus | null;
   onUpdateChanged?: (s: api.UpdateStatus) => void;
   busy?: boolean;
@@ -285,6 +288,7 @@ export function SettingsPage(props: {
       </div>
 
       <ClickupSection status={props.clickupToken ?? null} onChanged={() => props.onClickupTokenChanged?.()} />
+      <GoogleSection onChanged={() => props.onGoogleChanged?.()} />
 
       <UpdateSection status={props.update ?? null} onChanged={(s) => props.onUpdateChanged?.(s)} busy={props.busy} />
 

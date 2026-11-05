@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 10;
+const VERSION: i64 = 11;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -439,6 +439,21 @@ VALUES ('brief-on-task-done', 'Update the brief when you finish a task', 'brief'
         CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER));
 ";
 
+/// The user's goals (goals.rs), and the goal of each item in the brief.
+/// A removed goal's id is never used again (AUTOINCREMENT). The brief and
+/// the plan keep goal ids: an old id must not point at a new goal. The
+/// list is in id order.
+const SCHEMA_11: &str = "
+CREATE TABLE goal (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  text    TEXT NOT NULL,
+  created INTEGER NOT NULL,
+  updated INTEGER NOT NULL
+);
+
+ALTER TABLE brief ADD COLUMN goal TEXT NOT NULL DEFAULT '{}'; -- {\"<item key>\": <goal id>}
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -540,6 +555,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     if version < 10 {
         tx.execute_batch(SCHEMA_10)?;
     }
+    if version < 11 {
+        tx.execute_batch(SCHEMA_11)?;
+    }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     // The data is in the database now. Only then move the old files away.
@@ -577,6 +595,15 @@ pub(crate) fn meta(c: &Connection, key: &str) -> anyhow::Result<Option<String>> 
         c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?,
     )
+}
+
+/// Sets a value in the meta table. Use it in a db::write transaction.
+pub(crate) fn set_meta(c: &Connection, key: &str, value: &str) -> anyhow::Result<()> {
+    c.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [key, value],
+    )?;
+    Ok(())
 }
 
 /// How many results each search method gives to the merge.

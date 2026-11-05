@@ -19,6 +19,12 @@ export type AppCtx = {
   planItems: Item[];
   sched: Schedule;
   brief: api.Brief | null;
+  /** null until the goals are loaded. */
+  goals: api.Goals | null;
+  /** The text of a goal by its id. */
+  goalText: (id: number | undefined) => string | undefined;
+  /** Runs one goal change and shows the new goals. False when it failed. */
+  changeGoals: (change: () => Promise<api.Goals>) => Promise<boolean>;
   /** "idle", "writing", or the error of the last try. */
   briefState: string;
   githubState: ListState;

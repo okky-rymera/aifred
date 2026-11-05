@@ -4,7 +4,8 @@ import { useState } from "react";
 import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
-import { SRC_NAME, dueInfo, dur, fmtTime, groupItems, isPlanRequest, longDay, parseTask, shortDay, type Item } from "./items";
+import { GoalTag, GoalsCard } from "./Goals";
+import { SRC_NAME, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, longDay, parseTask, shortDay, type Item } from "./items";
 
 export function Check(props: { item: Item }) {
   const { toggleDone } = useApp();
@@ -92,7 +93,11 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
       >
         <span className="t-title">{i.title}</span>
         <SrcLine item={i} extra={sub && <span>{sub}</span>} />
-        {props.why && i.why && !i.done && <span className="why">{i.why}</span>}
+        {props.why && i.why && !i.done && (
+          <span className="why">
+            {i.why} <GoalTag goal={i.goal} ranked />
+          </span>
+        )}
       </div>
       <span className={`r-side${acts ? " has-acts" : ""}`}>
         <span className="r-info">
@@ -165,8 +170,14 @@ function PlanStrip() {
       </div>
     );
   }
-  const next = sched.all.find((b) => !b.lunch && !byKey.get(b.key)?.done);
-  const span = Math.max(1, (sched.end ?? 0) - (sched.all[0]?.start ?? 0));
+  const next = sched.all.find((b) => isItemBlock(b) && !byKey.get(b.key)?.done);
+  // The bar shows the time from the first block to the end of the planned
+  // work. Each block has its own place on that time line, so meetings that
+  // overlap each other or lunch do not push the later blocks.
+  const from = sched.all[0]?.start ?? 0;
+  const to = sched.end ?? from;
+  const span = Math.max(1, to - from);
+  const pct = (m: number) => `${((m / span) * 100).toFixed(1)}%`;
   return (
     <div className="strip">
       <span className="ic">{ICON.cal}</span>
@@ -185,11 +196,16 @@ function PlanStrip() {
           {sched.free < 0 ? `${dur(-sched.free)} too much` : `${dur(sched.free)} free`}
         </small>
         <span className="bar" aria-hidden>
-          {sched.all.map((b) => (
+          {sched.all.filter((b) => b.start < to).map((b) => (
             <i
               key={b.key}
-              className={!b.lunch && byKey.get(b.key)?.done ? "d" : ""}
-              style={{ width: `${(((b.end - b.start) / span) * 100).toFixed(1)}%`, background: b.lunch ? "var(--line)" : `var(--src-${byKey.get(b.key)?.src ?? "me"})` }}
+              className={isItemBlock(b) && byKey.get(b.key)?.done ? "d" : ""}
+              title={b.meeting?.title}
+              style={{
+                left: pct(b.start - from),
+                width: pct(Math.min(b.end, to) - b.start),
+                background: b.lunch ? "var(--line)" : b.meeting ? "var(--muted)" : `var(--src-${byKey.get(b.key)?.src ?? "me"})`,
+              }}
             />
           ))}
         </span>
@@ -327,6 +343,7 @@ export function Home() {
           <h2 className="hello">
             {hello} <span>{longDay(today)}</span>
           </h2>
+          <GoalsCard />
           <BriefCard needYou={g.now.length + g.today.length} />
           {tasksError && <div className="note-line err">Cannot load your tasks: {tasksError}</div>}
           {githubState === "loading" && <div className="note-line">Loading GitHub items…</div>}

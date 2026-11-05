@@ -5,7 +5,7 @@ import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
 import { Ctx, useApp, type AppCtx, type ChatState, type ListState } from "./ctx";
 import { Detail } from "./Detail";
 import { Home } from "./Home";
-import { addDays, buildItems, dayOf, schedule, type Item } from "./items";
+import { addDays, buildItems, dayOf, meetingsOn, schedule, type Item } from "./items";
 import { JobsPage } from "./Jobs";
 import { MemoryList } from "./Memory";
 import { PlanChat, PlanView } from "./Plan";
@@ -76,6 +76,8 @@ export default function App() {
   const [githubState, setGithubState] = useState<ListState>("loading");
   const [clickup, setClickup] = useState<api.ClickupList>({ items: [], fetched_at: 0 });
   const [clickupState, setClickupState] = useState<ListState>("loading");
+  const [calendar, setCalendar] = useState<api.CalendarList>({ events: [], fetched_at: 0 });
+  const [calendarState, setCalendarState] = useState<ListState>("loading");
   const [clickupToken, setClickupToken] = useState<api.ClickupTokenStatus | null>(null);
   const [settings, setSettings] = useState<api.Settings | null>(null);
   const [update, setUpdate] = useState<api.UpdateStatus | null>(null);
@@ -83,6 +85,7 @@ export default function App() {
   const [meta, setMeta] = useState<api.ItemMeta[]>([]);
   const [est, setEst] = useState<Record<string, api.Estimate>>({});
   const [brief, setBrief] = useState<api.Brief | null>(null);
+  const [goals, setGoals] = useState<api.Goals | null>(null);
   const [briefLoaded, setBriefLoaded] = useState("");
   const [briefState, setBriefState] = useState("idle");
   // The mode of the home box stays when you go to another page.
@@ -164,6 +167,21 @@ export default function App() {
     [loadMeta],
   );
 
+  const calendarLoad = useRef(0);
+  const loadCalendar = useCallback((force: boolean) => {
+    const n = ++calendarLoad.current;
+    setCalendarState("loading");
+    api
+      .calendarEvents(force)
+      .then((list) => {
+        if (n !== calendarLoad.current) return;
+        // null: Google is not connected. Then there is no calendar, and no error.
+        setCalendar(list ?? { events: [], fetched_at: 0 });
+        setCalendarState(list ? "ok" : "off");
+      })
+      .catch((e) => n === calendarLoad.current && setCalendarState(String(e)));
+  }, []);
+
   const loadClickup = useCallback(
     (force: boolean, connected: boolean) => {
       const n = ++clickupLoad.current;
@@ -222,11 +240,13 @@ export default function App() {
         setModels((all) => ({ ...all, main: m }));
       })
       .catch(failed("the chat model"));
+    api.goals().then(setGoals).catch(failed("your goals"));
     loadTasks();
     loadMeta();
     loadGithub(false);
+    loadCalendar(false);
     checkClickup(false);
-  }, [loadTasks, loadMeta, loadGithub, checkClickup]);
+  }, [loadTasks, loadMeta, loadGithub, loadCalendar, checkClickup]);
 
   // The plan, the brief, and the plan chat belong to one day. A new day loads them again.
   useEffect(() => {
@@ -279,9 +299,10 @@ export default function App() {
     const timer = setInterval(() => {
       loadGithub(true);
       loadClickup(true, clickupOn);
+      loadCalendar(true);
     }, refreshMinutes * 60_000);
     return () => clearInterval(timer);
-  }, [refreshMinutes, loadGithub, loadClickup, clickupOn]);
+  }, [refreshMinutes, loadGithub, loadClickup, loadCalendar, clickupOn]);
 
   // The first start downloads the meaning search model. Check again until it is ready.
   const meaningStarting = info?.meaning_search === "starting";
@@ -322,14 +343,22 @@ export default function App() {
 
   // ---------- Items ----------
 
-  const items = useMemo(
-    () => buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}),
-    [tasks, github.items, clickup.items, meta, est, brief],
-  );
+  const goalText = useCallback((id: number | undefined) => goals?.goals.find((g) => g.id === id)?.text, [goals]);
+  const items = useMemo(() => {
+    // The goal of each item that the brief ranked. A goal that the user removed since then is left out.
+    const goalOf: Record<string, string> = {};
+    for (const [key, id] of Object.entries(brief?.goal ?? {})) {
+      const t = goalText(id);
+      if (t) goalOf[key] = t;
+    }
+    return buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}, goalOf);
+  }, [tasks, github.items, clickup.items, meta, est, brief, goalText]);
+
   const byKey = useMemo(() => new Map(items.map((i) => [i.key, i])), [items]);
   const planItems = useMemo(() => (plan?.items ?? []).map((p) => byKey.get(p.key)).filter((i): i is Item => !!i), [plan, byKey]);
   const cfg = settings ?? api.DEFAULT_SETTINGS;
-  const sched = useMemo(() => schedule(planItems, cfg), [planItems, cfg]);
+  const meetings = useMemo(() => meetingsOn(calendar.events, today), [calendar.events, today]);
+  const sched = useMemo(() => schedule(planItems, cfg, meetings), [planItems, cfg, meetings]);
 
   // An item that left the list (closed in ClickUp, deleted) closes its panel.
   useEffect(() => {
@@ -358,6 +387,20 @@ export default function App() {
       }
     },
     [toast],
+  );
+
+  // Goal changes run one at a time, in the order the user made them. A
+  // click on ✕ first ends the edit in the box (blur), so an edit and a
+  // remove start together. Without the queue, the edit's answer can come
+  // last and show the removed goal again.
+  const goalQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const changeGoals = useCallback(
+    (change: () => Promise<api.Goals>) => {
+      const p = goalQueue.current.catch(() => undefined).then(change);
+      goalQueue.current = p;
+      return run(p, setGoals);
+    },
+    [run],
   );
 
   // ---------- Actions on items ----------
@@ -471,8 +514,12 @@ export default function App() {
         else if (n < keys.length) merged.push(keys[n++]);
       }
       merged.push(...keys.slice(n));
-      const why = new Map((plan?.items ?? []).map((p) => [p.key, p.why]));
-      const next: api.PlanItem[] = merged.map((key) => (why.get(key) ? { key, why: why.get(key) } : { key }));
+      // A moved item keeps the reason and the goal that AIfred gave it.
+      const old_ = new Map((plan?.items ?? []).map((p) => [p.key, p]));
+      const next: api.PlanItem[] = merged.map((key) => {
+        const p = old_.get(key);
+        return { key, ...(p?.why ? { why: p.why } : {}), ...(p?.goal !== undefined ? { goal: p.goal } : {}) };
+      });
       const mode = plan?.mode ?? "self";
       setPlan({ day, mode, items: next, updated: Date.now() / 1000 });
       api
@@ -542,6 +589,11 @@ export default function App() {
     loadTasks();
     loadMeta();
     api.memoryFacts().then(setFacts).catch(() => {});
+    // In the goal queue: a reload that ends after a later goal change must
+    // not show the old goals again.
+    const goals = goalQueue.current.catch(() => undefined).then(() => api.goals());
+    goalQueue.current = goals;
+    goals.then(setGoals).catch(() => {});
     api.dayPlan(today).then((p) => putPlan(today, p)).catch(() => {});
   }, [loadTasks, loadMeta, today, putPlan]);
 
@@ -826,6 +878,9 @@ export default function App() {
     planItems,
     sched,
     brief,
+    goals,
+    goalText,
+    changeGoals,
     briefState,
     githubState,
     clickupState,
@@ -887,10 +942,12 @@ export default function App() {
     };
     one("GitHub", githubState, github.fetched_at, github.warning);
     one("ClickUp", clickupState, clickup.fetched_at, clickup.warning);
+    one("Calendar", calendarState, calendar.fetched_at, calendar.warning);
     return parts;
   })();
-  const loading = githubState === "loading" || clickupState === "loading";
-  const bad = (!["loading", "ok", "off"].includes(githubState)) || (!["loading", "ok", "off"].includes(clickupState));
+  const states = [githubState, clickupState, calendarState];
+  const loading = states.includes("loading");
+  const bad = states.some((s) => !["loading", "ok", "off"].includes(s));
 
   const rail = (k: Page | "chat", icon: React.ReactNode, label: string, onClick: () => void, on: boolean, dot?: boolean) => (
     <button key={k} className={on ? "on" : ""} title={label} aria-label={label} aria-pressed={on} onClick={onClick}>
@@ -927,6 +984,7 @@ export default function App() {
                 loadTasks();
                 loadGithub(true);
                 loadClickup(true, clickupOn);
+                loadCalendar(true);
               }}
             >
               ↻
@@ -970,6 +1028,7 @@ export default function App() {
                   info={info}
                   clickupToken={clickupToken}
                   onClickupTokenChanged={() => checkClickup(true)}
+                  onGoogleChanged={() => loadCalendar(true)}
                   update={update}
                   onUpdateChanged={setUpdate}
                   busy={anyBusy}

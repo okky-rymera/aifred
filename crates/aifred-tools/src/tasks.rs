@@ -5,9 +5,14 @@
 //!
 //! The overview tool also reads the saved GitHub and ClickUp lists in the same
 //! database. It downloads a new list first when the saved one is too old.
+//!
+//! The goal tools change the user's goals (goals.rs) in the same database.
 
 use aifred_core::tasks::{StepFields, Task, TaskFields, TaskStore, clean_tag};
-use aifred_core::{clickup, default_data_dir, github_list::GithubStore, overview, plan, settings};
+use aifred_core::{
+    clickup, default_data_dir, files::now, github_list::GithubStore, goals, overview, plan,
+    settings,
+};
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, model::*, tool,
     tool_handler, tool_router, transport::stdio,
@@ -101,6 +106,28 @@ struct PlanItemArg {
     minutes: Option<u32>,
     /// Why the item is at this place, at most 15 words.
     why: Option<String>,
+    /// The id of the user's goal that the item serves, from the goals in overview. Leave out when it serves no goal.
+    goal: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GoalTextArgs {
+    /// The goal in one short line, with a date when the user gives one. Example: "Ship StoreAgent 2.0 by 30 Nov".
+    text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GoalEditArgs {
+    /// The goal id, from the goals in overview.
+    id: i64,
+    /// The new text of the goal, in one short line.
+    text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GoalIdArgs {
+    /// The goal id, from the goals in overview.
+    id: i64,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -151,25 +178,23 @@ impl TaskTools {
             .map(|p| &p.items[..])
             .unwrap_or_default()
             .iter()
-            .map(|i| serde_json::json!({ "key": i.key, "why": i.why, "minutes": guesses.get(&i.key).map(|g| g.minutes) }))
+            .map(|i| serde_json::json!({ "key": i.key, "why": i.why, "goal": i.goal, "minutes": guesses.get(&i.key).map(|g| g.minutes) }))
             .collect();
         let planned: u32 = items
             .iter()
             .map(|i| i["minutes"].as_u64().unwrap_or(30) as u32)
             .sum();
-        let (start, end) = (
-            settings::minutes_of(&s.work_start).unwrap_or(540),
-            settings::minutes_of(&s.work_end).unwrap_or(1050),
-        );
-        let work = end.saturating_sub(start).saturating_sub(s.lunch_minutes);
+        let cal = aifred_core::calendar::day_for_ai(&self.dir, day, &s)?;
         Ok(serde_json::json!({
             "day": day,
             "work_day": settings::day_text(&s),
             "made_by": p.as_ref().map(|p| if p.mode == "ai" { "AIfred" } else { "the user" }),
             "items": items,
             "planned_minutes": planned,
-            "work_minutes": work,
-            "note": "An item with no minutes counts as 30 minutes."
+            "work_minutes": cal["free_minutes"],
+            "meetings": cal["meetings"],
+            "calendar": cal["calendar"],
+            "note": "An item with no minutes counts as 30 minutes. work_minutes is the work day less lunch and the meetings. The app places the items between the meetings."
         }))
     }
 }
@@ -177,18 +202,19 @@ impl TaskTools {
 #[tool_router]
 impl TaskTools {
     #[tool(
-        description = "Everything on the user's plate in one call: the open local to-do tasks, the open GitHub items (assigned issues, review requests, and the user's own pull requests), and the open ClickUp tasks. Each item has a short summary of its description. Use this first when the user asks what to do, what is open, or for a plan. Then use item_details or task_details only for the few items that need a closer look. fetched_at is when each list came from GitHub or ClickUp (Unix seconds)."
+        description = "Everything on the user's plate in one call: the user's goals, the open local to-do tasks, the open GitHub items (assigned issues, review requests, and the user's own pull requests), the open ClickUp tasks, and the calendar events of the next 7 days when the calendar is connected. Each item has a short summary of its description. Use this first when the user asks what to do, what is open, or for a plan. Then use item_details or task_details only for the few items that need a closer look. The goals (at most 5) say what matters most to the user now: an item that serves a goal is more important. fetched_at is when each list came from GitHub or ClickUp (Unix seconds)."
     )]
     async fn overview(&self) -> Result<CallToolResult, ErrorData> {
         // Both downloads at the same time: each can take some seconds.
         let gh = GithubStore::new(&self.dir);
-        let (gh_note, cu_note) = tokio::join!(
+        let (gh_note, cu_note, cal_note) = tokio::join!(
             gh.refresh_if_old(),
-            aifred_core::clickup_list::refresh_if_old(&self.dir)
+            aifred_core::clickup_list::refresh_if_old(&self.dir),
+            aifred_core::calendar::refresh_if_old(&self.dir)
         );
         let account = clickup::token(&self.dir).map(|t| clickup::account_key(&t));
         let mut out = overview::build(&self.dir, account.as_deref()).map_err(fail)?;
-        let notes: Vec<String> = [gh_note, cu_note].into_iter().flatten().collect();
+        let notes: Vec<String> = [gh_note, cu_note, cal_note].into_iter().flatten().collect();
         if !notes.is_empty() {
             out["notes"] = notes.into();
         }
@@ -287,18 +313,24 @@ impl TaskTools {
     }
 
     #[tool(
-        description = "The user's day plan: the items they want to do on one day, in order, with a time guess for each. Also the work day, the planned minutes, and the minutes of work time. The app places the items on the day around lunch. Use overview for the titles of the items."
+        description = "The user's day plan: the items they want to do on one day, in order, with a time guess for each. Also the work day, the meetings of the day, the planned minutes, and the minutes of work time that are free after lunch and the meetings. The app places the items on the day around lunch. Use overview for the titles of the items."
     )]
     async fn day_plan(
         &self,
         Parameters(a): Parameters<DayArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let day = a.day.unwrap_or_else(default_day);
-        json(&self.plan_view(&day).map_err(fail)?)
+        // The meetings come from the saved events: get new ones when they are old.
+        let note = aifred_core::calendar::refresh_if_old(&self.dir).await;
+        let mut out = self.plan_view(&day).map_err(fail)?;
+        if let Some(n) = note {
+            out["notes"] = vec![n].into();
+        }
+        json(&out)
     }
 
     #[tool(
-        description = "Save the user's day plan: all items in the order of the day, first item first. It replaces the old plan. Use it only when the user asks you to plan the day or to change the plan. Take the keys from overview. Put urgent and overdue work first, and do not plan more minutes than the work day has. Do not plan a local task whose start day is after the day. Give minutes and a short why for each item."
+        description = "Save the user's day plan: all items in the order of the day, first item first. It replaces the old plan. Use it only when the user asks you to plan the day or to change the plan. Take the keys from overview. Put urgent and overdue work first, and do not plan more minutes than work_minutes in day_plan (the work day less lunch and meetings). Do not plan a local task whose start day is after the day. Give minutes and a short why for each item. Give the goal id when the item serves one of the user's goals. When two items are equally urgent, put the item that serves a goal first."
     )]
     async fn set_day_plan(
         &self,
@@ -312,6 +344,7 @@ impl TaskTools {
             .map(|i| plan::PlanItem {
                 key: i.key.trim().to_string(),
                 why: i.why.clone(),
+                goal: i.goal,
             })
             .collect();
         plan::set(&self.dir, &day, "ai", items, true).map_err(fail)?;
@@ -321,6 +354,37 @@ impl TaskTools {
             }
         }
         json(&self.plan_view(&day).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Add one of the user's goals: what matters most to them now, in one short line. The user keeps at most 5 goals. Use it only when the user tells you a goal or asks you to add one."
+    )]
+    async fn add_goal(
+        &self,
+        Parameters(a): Parameters<GoalTextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        json(&goals::add(&self.dir, &a.text, now()).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Change the text of one of the user's goals. Use it only when the user asks for the change."
+    )]
+    async fn edit_goal(
+        &self,
+        Parameters(a): Parameters<GoalEditArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        json(&goals::edit(&self.dir, a.id, &a.text, now()).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Remove one of the user's goals, for example when it is reached or no longer matters. Use it only when the user asks for it."
+    )]
+    async fn remove_goal(
+        &self,
+        Parameters(a): Parameters<GoalIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        goals::remove(&self.dir, a.id, now()).map_err(fail)?;
+        json(&goals::list(&self.dir).map_err(fail)?)
     }
 
     #[tool(
@@ -641,10 +705,12 @@ mod tests {
             empty["work_minutes"], 465,
             "09:00 to 17:30 less 45 minutes of lunch"
         );
+        let g = goals::add(&t.dir, "Ship 2.0", 1).unwrap();
         let item = PlanItemArg {
             key: key.clone(),
             minutes: Some(20),
             why: Some("Due today.".into()),
+            goal: Some(g.id),
         };
         let saved = body(
             t.set_day_plan(Parameters(SetPlanArgs {
@@ -656,11 +722,13 @@ mod tests {
         );
         assert_eq!(saved["items"][0]["minutes"], 20);
         assert_eq!(saved["items"][0]["why"], "Due today.");
+        assert_eq!(saved["items"][0]["goal"], g.id);
         assert_eq!(saved["made_by"], "AIfred");
         let bad = PlanItemArg {
             key: "github:none#1".into(),
             minutes: None,
             why: None,
+            goal: None,
         };
         let e = t
             .set_day_plan(Parameters(SetPlanArgs {
@@ -670,6 +738,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.message.contains("github:none#1"), "{}", e.message);
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_ai_changes_goals_that_the_overview_shows() {
+        let t = tools("goals");
+        let g = body(
+            t.add_goal(Parameters(GoalTextArgs {
+                text: "Ship 2.0".into(),
+            }))
+            .await
+            .unwrap(),
+        );
+        let id = g["id"].as_i64().unwrap();
+        t.edit_goal(Parameters(GoalEditArgs {
+            id,
+            text: "Ship 2.0 by 30 Nov".into(),
+        }))
+        .await
+        .unwrap();
+        // The overview tool would download GitHub first. Its data comes from build.
+        let o = overview::build(&t.dir, None).unwrap();
+        assert_eq!(o["goals"][0]["text"], "Ship 2.0 by 30 Nov");
+        let left = body(t.remove_goal(Parameters(GoalIdArgs { id })).await.unwrap());
+        assert_eq!(left, serde_json::json!([]));
+        assert!(t.remove_goal(Parameters(GoalIdArgs { id })).await.is_err());
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 }

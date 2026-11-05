@@ -18,11 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use aifred_core::assistant::AskOptions;
 use aifred_core::backend::{Event, claude::ClaudeBackend};
 use aifred_core::brief::Brief;
+use aifred_core::calendar::{self, CalendarList};
 use aifred_core::clickup::{self, TokenStatus};
 use aifred_core::clickup_list::{ClickupList, ClickupStore};
 use aifred_core::files::now;
 use aifred_core::github;
 use aifred_core::github_list::{GithubList, GithubStore};
+use aifred_core::goals::Goals;
+use aifred_core::google::{self, GoogleStatus};
 use aifred_core::history::Turn;
 use aifred_core::items::{ItemDetails, ItemMeta};
 use aifred_core::jobs::{Job, JobChange, Run};
@@ -214,6 +217,11 @@ struct App {
     /// What the sidebar says about meaning search.
     meaning: Arc<std::sync::Mutex<String>>,
     update: Arc<Updater>,
+    /// The number of the newest Google login. A new login or a disconnect
+    /// adds 1, and that stops the login that waits for the browser. A
+    /// number, not a signal: a login started before the change sees it
+    /// also when it was not waiting yet.
+    google_login: tokio::sync::watch::Sender<u64>,
 }
 
 impl App {
@@ -224,6 +232,7 @@ impl App {
             assistant,
             busy: Mutex::new(()),
             side_busy: Arc::default(),
+            google_login: tokio::sync::watch::Sender::new(0),
             brief_busy: Mutex::new(()),
             background,
             meaning,
@@ -450,6 +459,49 @@ async fn restore_fact(app: State<'_, App>, id: i64) -> CmdResult<Fact> {
     blocking(&app, move |a| a.memory().restore(id)).await
 }
 
+/// The user's goals and whether the app must ask the user to check them (goals.rs).
+#[tauri::command]
+async fn goals(app: State<'_, App>) -> CmdResult<Goals> {
+    blocking(&app, |a| aifred_core::goals::status(&a.dir, now())).await
+}
+
+#[tauri::command]
+async fn add_goal(app: State<'_, App>, text: String) -> CmdResult<Goals> {
+    blocking(&app, move |a| {
+        aifred_core::goals::add(&a.dir, &text, now())?;
+        aifred_core::goals::status(&a.dir, now())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn edit_goal(app: State<'_, App>, id: i64, text: String) -> CmdResult<Goals> {
+    blocking(&app, move |a| {
+        aifred_core::goals::edit(&a.dir, id, &text, now())?;
+        aifred_core::goals::status(&a.dir, now())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn remove_goal(app: State<'_, App>, id: i64) -> CmdResult<Goals> {
+    blocking(&app, move |a| {
+        aifred_core::goals::remove(&a.dir, id, now())?;
+        aifred_core::goals::status(&a.dir, now())
+    })
+    .await
+}
+
+/// The user says that the goals are still right.
+#[tauri::command]
+async fn confirm_goals(app: State<'_, App>) -> CmdResult<Goals> {
+    blocking(&app, |a| {
+        aifred_core::goals::confirm(&a.dir, now())?;
+        aifred_core::goals::status(&a.dir, now())
+    })
+    .await
+}
+
 #[tauri::command]
 async fn new_conversation(app: State<'_, App>) -> CmdResult<()> {
     let Ok(_guard) = app.busy.try_lock() else {
@@ -561,6 +613,127 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
             }
         }
     }
+}
+
+/// The calendar events of the next 7 days (calendar.rs), from the saved
+/// list while it is new enough and has today, else from Google. None: Google is not
+/// connected, so the app has no calendar. When Google cannot be asked,
+/// it shows the saved list at any age, with a warning.
+#[tauri::command]
+async fn calendar_events(app: State<'_, App>, force: bool) -> CmdResult<Option<CalendarList>> {
+    let dir = app.assistant.dir.clone();
+    if !force {
+        let d = dir.clone();
+        let saved = blocking(&app, move |_| {
+            calendar::cached_for_today(&d, max_age(&d), now())
+        })
+        .await?;
+        if saved.is_some() {
+            return Ok(saved);
+        }
+    }
+    match download_calendar(&app, &dir).await {
+        Ok(list) => Ok(list),
+        Err(e) => {
+            let e = err(e);
+            let saved = blocking(&app, move |_| calendar::cached(&dir, u64::MAX, now())).await;
+            match saved {
+                Ok(Some(mut list)) => {
+                    list.warning = Some(format!(
+                        "Cannot download from Google Calendar, so this is the saved list. {e}"
+                    ));
+                    Ok(Some(list))
+                }
+                _ => Err(e),
+            }
+        }
+    }
+}
+
+/// Downloads and saves the calendar. None: Google is not connected. When
+/// the login changes during the download, save() drops the events of the
+/// old login: then this downloads once more, with the new login.
+async fn download_calendar(
+    app: &State<'_, App>,
+    dir: &std::path::Path,
+) -> anyhow::Result<Option<CalendarList>> {
+    for _ in 0..2 {
+        let Some(d) = calendar::download(dir).await? else {
+            return Ok(None);
+        };
+        let d2 = dir.to_path_buf();
+        let saved = blocking(app, move |_| calendar::save(&d2, d, now()))
+            .await
+            .map_err(anyhow::Error::msg)?;
+        if saved.is_some() {
+            return Ok(saved);
+        }
+    }
+    anyhow::bail!("the Google login changed during the download. Click reload")
+}
+
+/// The Google connection (google.rs): the registration, the account, and the
+/// features that the login allows. Never a secret or a token.
+#[tauri::command]
+async fn google_status(app: State<'_, App>) -> CmdResult<GoogleStatus> {
+    blocking(&app, |a| google::status(&a.dir)).await
+}
+
+/// Saves the client ID and secret of the user's own Google registration.
+#[tauri::command]
+async fn set_google_client(
+    app: State<'_, App>,
+    client_id: String,
+    client_secret: String,
+) -> CmdResult<GoogleStatus> {
+    blocking(&app, move |a| {
+        google::set_client(&a.dir, &client_id, &client_secret)
+    })
+    .await
+}
+
+/// Opens Google's login page in the browser and waits until the user is
+/// back (at most 5 minutes). A second click stops the first wait.
+#[tauri::command]
+async fn connect_google(app: State<'_, App>) -> CmdResult<GoogleStatus> {
+    let dir = app.assistant.dir.clone();
+    let mine = new_google_login(&app);
+    let mut changes = app.google_login.subscribe();
+    let stop = async move {
+        // An error: the app stops. Then the login stops too.
+        let _ = changes.wait_for(|n| *n != mine).await;
+    };
+    let login = async {
+        let login = google::begin(&dir, google::Endpoints::default()).await?;
+        tauri_plugin_opener::open_url(&login.url, None::<&str>)?;
+        google::finish(&dir, login, std::future::pending()).await
+    };
+    // `stop` also covers begin() and open_url, not only the wait for the browser.
+    tokio::select! {
+        r = login => r.map_err(err),
+        () = stop => Err("the login stopped, because a new login started or Google was disconnected".into()),
+    }
+}
+
+/// Adds 1 to the login number, and gives the new number.
+fn new_google_login(app: &App) -> u64 {
+    let mut mine = 0;
+    app.google_login.send_modify(|n| {
+        *n += 1;
+        mine = *n;
+    });
+    mine
+}
+
+/// Also stops a login that waits for the browser: else it connects the
+/// account again when the user finishes the old Google page.
+#[tauri::command]
+async fn disconnect_google(app: State<'_, App>) -> CmdResult<GoogleStatus> {
+    let dir = app.assistant.dir.clone();
+    new_google_login(&app);
+    google::disconnect(&dir, &google::Endpoints::default())
+        .await
+        .map_err(err)
 }
 
 /// The saved list may be used while it is younger than the refresh time in the settings.
@@ -1013,6 +1186,16 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         history,
         memory_facts,
         add_fact,
+        calendar_events,
+        google_status,
+        set_google_client,
+        connect_google,
+        disconnect_google,
+        goals,
+        add_goal,
+        edit_goal,
+        remove_goal,
+        confirm_goals,
         edit_fact,
         set_fact_core,
         forget_fact,
@@ -1543,6 +1726,59 @@ mod tests {
         assert!(e.as_str().unwrap().contains("empty"), "got {e}");
         let e = call(&win, "delete_task", json!({ "id": "nope" })).unwrap_err();
         assert!(e.as_str().unwrap().contains("no task"), "got {e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn google_commands_save_the_registration_but_never_show_the_secret() {
+        let (_app, win, dir) = window("google");
+        let st = call(&win, "google_status", json!({})).unwrap();
+        assert_eq!(
+            (st["client_id"].clone(), st["connected"].clone()),
+            (json!(""), json!(false))
+        );
+        assert!(
+            call(
+                &win,
+                "set_google_client",
+                json!({ "clientId": "x", "clientSecret": "s" })
+            )
+            .is_err()
+        );
+        let st = call(
+            &win,
+            "set_google_client",
+            json!({ "clientId": "1-a.apps.googleusercontent.com", "clientSecret": "hidden-secret" }),
+        )
+        .unwrap();
+        assert_eq!(st["secret_set"], true);
+        assert!(!st.to_string().contains("hidden-secret"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn goal_commands_give_the_new_list() {
+        let (_app, win, dir) = window("goals");
+        assert_eq!(call(&win, "goals", json!({})).unwrap()["goals"], json!([]));
+        let g = call(&win, "add_goal", json!({ "text": "Ship 2.0" })).unwrap();
+        let id = g["goals"][0]["id"].clone();
+        let g = call(
+            &win,
+            "edit_goal",
+            json!({ "id": id, "text": "Ship 2.0 now" }),
+        )
+        .unwrap();
+        assert_eq!(g["goals"][0]["text"], "Ship 2.0 now");
+        assert_eq!(g["stale"], false);
+        assert!(
+            call(&win, "confirm_goals", json!({})).unwrap()["checked"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        let g = call(&win, "remove_goal", json!({ "id": id })).unwrap();
+        assert_eq!(g["goals"], json!([]));
+        assert!(call(&win, "add_goal", json!({ "text": " " })).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

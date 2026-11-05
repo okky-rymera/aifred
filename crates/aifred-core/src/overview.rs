@@ -3,6 +3,10 @@
 //! summary (summaries.rs). The overview tool of the tasks tool server sends
 //! it. One tool call replaces five list calls, and the AI reads summaries
 //! and not full descriptions. Each item has its item key (items.rs).
+//!
+//! The overview also has the user's goals (goals.rs), so the AI can rank
+//! the items by what matters to the user, not only by dates. When the
+//! calendar is connected, it has the events of the next days (calendar.rs).
 
 use std::path::Path;
 
@@ -17,6 +21,9 @@ use crate::tasks::{ChecklistItem, json_column};
 /// The overview. `clickup_account` is the account of the ClickUp token
 /// (clickup::account_key), or None when ClickUp is not connected.
 pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value> {
+    // A Google connection file that AIfred cannot read must not stop the
+    // overview: the other lists still go to the AI, with a note.
+    let google_account = crate::google::account(dir);
     db::read(dir, |c| {
         let mut q = c.prepare(
             "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM task WHERE done = 0 ORDER BY created DESC",
@@ -65,10 +72,28 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             })
             .collect::<anyhow::Result<_>>()?;
 
+        let goals: Vec<Value> = crate::goals::list_in(c)?
+            .into_iter()
+            .map(|g| json!({ "id": g.id, "text": g.text }))
+            .collect();
         let mut out = json!({
+            "goals": goals,
             "local_tasks": tasks,
             "github": { "fetched_at": fetched_at(c, "github", None)?, "items": github },
         });
+
+        match &google_account {
+            Ok(account) => {
+                if let Some(cal) = crate::calendar::saved_in(c, account.as_deref())? {
+                    out["calendar"] = crate::calendar::for_ai(&cal, crate::files::now());
+                }
+            }
+            Err(e) => {
+                out["calendar"] = json!({
+                    "error": format!("Cannot read the Google connection, so the calendar is not known. Connect Google again in Settings. {e:#}")
+                });
+            }
+        }
 
         if let Some(account) = clickup_account {
             let mut items: Vec<(ClickupItem, Option<String>)> = rows(c, "clickup", Some(account))?
@@ -161,6 +186,28 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_google_file_does_not_stop_the_overview() {
+        let d = std::env::temp_dir().join(format!("aifred-overview-google-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        TaskStore::new(&d).add("Call Sam", "", "you").unwrap();
+        std::fs::write(d.join("google.json"), "not json").unwrap();
+        let out = build(&d, None).unwrap();
+        assert_eq!(out["local_tasks"].as_array().unwrap().len(), 1);
+        assert!(
+            out["calendar"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Connect Google again"),
+            "{out}"
+        );
+        // The day plan still works, without the meetings.
+        let cal = crate::calendar::day_for_ai(&d, "2026-11-05", &Default::default()).unwrap();
+        assert!(cal["calendar"].as_str().unwrap().contains("not connected"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn the_overview_has_all_open_items_with_their_summaries() {
         let d = std::env::temp_dir().join(format!("aifred-overview-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -217,7 +264,9 @@ mod tests {
             )
             .unwrap();
 
+        let g = crate::goals::add(&d, "Ship 2.0", 1).unwrap();
         let o = build(&d, Some("acct")).unwrap();
+        assert_eq!(o["goals"], json!([{ "id": g.id, "text": "Ship 2.0" }]));
         assert_eq!(
             o["local_tasks"].as_array().unwrap().len(),
             1,

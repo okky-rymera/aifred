@@ -3,6 +3,7 @@
 pub mod assistant;
 pub mod backend;
 pub mod brief;
+pub mod calendar;
 pub mod clickup;
 pub mod clickup_list;
 pub mod db;
@@ -10,6 +11,8 @@ pub mod embed;
 pub mod files;
 pub mod github;
 pub mod github_list;
+pub mod goals;
+pub mod google;
 pub mod history;
 mod import;
 pub mod items;

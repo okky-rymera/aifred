@@ -1,7 +1,8 @@
 // The item logic with no window: day labels, groups, the quick add, and the schedule.
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "./api";
-import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, parseTask, schedule, shortDay, type Item } from "./items";
+import type * as api from "./api";
+import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, meetingsOn, parseTask, schedule, shortDay, type Item } from "./items";
 import { clickupItem, githubItem, task } from "./test/fakeBackend";
 
 // Wednesday 4 November 2026.
@@ -112,6 +113,54 @@ describe("schedule", () => {
     expect(fmtTime(s.end!)).toBe("14:15");
     expect(s.work).toBe(270);
     expect(s.free).toBe(465 - 270);
+  });
+
+  it("places items between meetings, and the meetings take free time once", () => {
+    const ev = (id: string) => ({ id, title: id }) as api.CalEvent;
+    // 10:00-11:00 and 10:30-11:30 overlap. 18:00 is after the work day.
+    const meetings = [
+      { start: 600, end: 660, event: ev("m1") },
+      { start: 630, end: 690, event: ev("m2") },
+      { start: 1080, end: 1140, event: ev("late") },
+    ];
+    const s = schedule([item("a", 30), item("b", 60), item("c", 30)], DEFAULT_SETTINGS, meetings);
+    // a: 09:00-09:30. b does not fit before 10:00, so it starts at 11:30. c would overlap lunch, so it starts at 13:15.
+    expect(s.at).toEqual({ a: 540, b: 690, c: 795 });
+    expect(s.all.map((b) => b.key)).toEqual(["a", "event:m1", "event:m2", "b", "lunch", "c"]);
+    expect(s.all[1].meeting?.title).toBe("m1");
+    expect(s.free).toBe(465 - 90 - 120);
+    expect(meetingsOn([], "2026-11-05")).toEqual([]);
+    // Clock times, and cut at midnight.
+    const at = (h: number, m: number) => new Date(2026, 10, 5, h, m).getTime() / 1000;
+    const late = { ...ev("late"), busy: true, start: at(23, 0), end: at(23, 0) + 7200 };
+    const on = meetingsOn([{ ...ev("m1"), busy: true, start: at(9, 30), end: at(10, 15) }, late], "2026-11-05");
+    expect(on.map((m) => [m.start, m.end])).toEqual([[570, 615], [1380, 1440]]);
+  });
+
+  it("ends with the last item, not with a meeting after it", () => {
+    const ev = (id: string) => ({ id, title: id }) as api.CalEvent;
+    const s = schedule([item("a", 30)], DEFAULT_SETTINGS, [{ start: 960, end: 1020, event: ev("m") }]);
+    expect(fmtTime(s.end!)).toBe("9:30");
+    expect(s.all.map((b) => b.key)).toEqual(["a", "lunch", "event:m"]);
+  });
+
+  it("shows a meeting from an earlier day from the work-day start, not from midnight", () => {
+    const ev = (id: string) => ({ id, title: id }) as api.CalEvent;
+    // An overnight event to 09:30: meetingsOn gives it the start 0.
+    const s = schedule([item("a", 30)], DEFAULT_SETTINGS, [{ start: 0, end: 570, event: ev("flight") }]);
+    expect(s.all[0]).toMatchObject({ key: "event:flight", start: 540, end: 570 });
+    expect(s.at).toEqual({ a: 570 });
+  });
+
+  // The same cases as free_minutes_take_out_lunch_and_meetings_once in
+  // crates/aifred-core/src/calendar.rs. The AI plans with the Rust number,
+  // and the Plan page shows this one: they must stay the same.
+  it("counts free time like the backend", () => {
+    const ev = (id: string) => ({ id, title: id }) as api.CalEvent;
+    const m = (start: number, end: number) => ({ start, end, event: ev(`${start}`) });
+    expect(schedule([], DEFAULT_SETTINGS).free).toBe(465);
+    expect(schedule([], DEFAULT_SETTINGS, [m(600, 660), m(630, 690), m(720, 780), m(1080, 1140)]).free).toBe(510 - 90 - 75);
+    expect(schedule([], DEFAULT_SETTINGS, [m(0, 1440)]).free).toBe(0);
   });
 
   it("says how much is too much, and has no lunch for an empty plan", () => {

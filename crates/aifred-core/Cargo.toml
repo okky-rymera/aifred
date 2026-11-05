@@ -9,13 +9,16 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 semver = "1.0.28"
 sha2 = "0.10.9"
+# The Google login (google.rs): random codes, and base64url for PKCE and the id token.
+getrandom = "0.3"
+base64 = "0.22"
 rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
-reqwest = { version = "0.13", features = ["json", "query"] }
+reqwest = { version = "0.13", features = ["json", "query", "form"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Before 1.0: pinned. Vectors can be made again from the text.
 sqlite-vec = "=0.1.9"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "net"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "net", "sync"] }
 rrule = "0.14"
 iana-time-zone = "0.1"
 chrono-tz = "0.10"

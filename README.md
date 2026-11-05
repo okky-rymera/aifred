@@ -30,7 +30,7 @@ The source code:
 ## Data
 
 - AIfred keeps memory, chat history, local tasks, and the saved GitHub and ClickUp lists in one SQLite file: `aifred.db` in the data folder (`~/.aifred`, or `$AIFRED_HOME`).
-- The settings and the ClickUp token stay in their own files.
+- The settings, the ClickUp token, and the Google connection (`google.json`) stay in their own files.
 - On the first start after the update, AIfred moves the old files into the database: `memory.md`, `history.jsonl`, `history-<time>.jsonl`, and `tasks.json`. Each old file gets the name `<name>.imported`. AIfred does not delete it.
 - If an old file cannot be read, AIfred stops and shows the error. It saves nothing until you repair the file.
 - "New conversation" keeps the old messages in the database. AIfred can search them.
@@ -218,6 +218,18 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - Tick a ClickUp task to close it in ClickUp. AIfred moves the task to the "closed" status of its list, like the ClickUp "mark complete" button. An Undo puts the old status back.
 - This tick is the only change AIfred makes in ClickUp. The chat can only read ClickUp.
 - The token never goes into the tool settings file that Claude reads. The ClickUp tool server reads the token itself.
+
+## Google (calendar)
+
+- AIfred connects to Google itself. Each user makes their own Google registration once:
+  1. In Google Cloud Console, make a project.
+  2. Turn on the Google Calendar API.
+  3. Set up Google Auth Platform. Pick the audience "Internal" for a company Google Workspace. Else pick "External" and publish the app: in "Testing", Google ends the login every 7 days.
+  4. Create a client of the type "Desktop app".
+- Paste the client ID and the client secret on the Settings page, then click "Connect Google". Google's login page opens in the browser.
+- AIfred keeps the registration and the login key in `google.json` in the data folder. Only you can read that file.
+- AIfred reads the next 7 days of the primary calendar. It cannot change the calendar. The day plan goes around busy events, and the brief and the chats see the meetings.
+- One connection serves all Google features. When a new feature needs more access, Settings asks you to connect again (`crates/aifred-core/src/google.rs`).
 
 ## Check the app without a window on your screen
 

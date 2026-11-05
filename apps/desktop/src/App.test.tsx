@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { DEFAULT_SETTINGS, type Answer } from "./api";
 import { addDays, dayOf } from "./items";
-import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, task } from "./test/fakeBackend";
+import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, meeting, task } from "./test/fakeBackend";
 
 // The panel stays in the page, hidden, behind the task tab. A role query skips a hidden element.
 const panel = () => document.querySelector<HTMLElement>('aside[aria-label="Conversation"]');
@@ -107,6 +107,86 @@ describe("home", () => {
     await waitFor(() => expect(fake.tasks[0].due).toBe(addDays(today(), 1)));
     await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(fake.tasks[0].due).toBe(today()));
+  });
+});
+
+describe("goals", () => {
+  it("adds, changes, and removes goals on the home screen", async () => {
+    const fake = await startApp();
+    const card = screen.getByRole("region", { name: "Goals" });
+    expect(within(card).getByText(/Add 3 to 5 goals/)).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Add goals" }));
+    await userEvent.type(within(card).getByRole("textbox", { name: "New goal" }), "Ship 2.0{Enter}");
+    await userEvent.type(within(card).getByRole("textbox", { name: "New goal" }), "Hire a designer{Enter}");
+    const first = await within(card).findByRole("textbox", { name: "Goal: Ship 2.0" });
+    await userEvent.clear(first);
+    await userEvent.type(first, "Ship 2.0 by 30 Nov{Enter}");
+    await waitFor(() => expect(fake.goals.goals[0].text).toBe("Ship 2.0 by 30 Nov"));
+    // An empty box does not remove the goal, so the box shows it again.
+    const box = await within(card).findByRole("textbox", { name: "Goal: Ship 2.0 by 30 Nov" });
+    await userEvent.clear(box);
+    await userEvent.tab();
+    expect(box).toHaveValue("Ship 2.0 by 30 Nov");
+    expect(fake.goals.goals[0].text).toBe("Ship 2.0 by 30 Nov");
+    await userEvent.click(within(card).getByRole("button", { name: "Remove goal: Hire a designer" }));
+    await userEvent.click(within(card).getByRole("button", { name: "Done" }));
+    expect(within(card).getByText("Ship 2.0 by 30 Nov")).toBeInTheDocument();
+    expect(fake.goals.goals.map((g) => g.text)).toEqual(["Ship 2.0 by 30 Nov"]);
+  });
+
+  it("a goal removed during its edit stays removed", async () => {
+    const goals = [{ id: 970, text: "Ship 2.0", created: 1, updated: 1 }];
+    const fake = await startApp({ goals: { goals, checked: 1, stale: false } });
+    const slowEdit = deferred<void>();
+    fake.onEditGoal = () => slowEdit.promise;
+    const card = screen.getByRole("region", { name: "Goals" });
+    await userEvent.click(within(card).getByRole("button", { name: "Edit" }));
+    await userEvent.type(within(card).getByRole("textbox", { name: "Goal: Ship 2.0" }), " now");
+    // The click on ✕ ends the edit first (blur). The edit's answer is slow.
+    await userEvent.click(within(card).getByRole("button", { name: "Remove goal: Ship 2.0" }));
+    slowEdit.resolve();
+    await waitFor(() => expect(fake.calls.some((c) => c.cmd === "remove_goal")).toBe(true));
+    await waitFor(() => expect(within(card).queryByRole("textbox", { name: /^Goal:/ })).not.toBeInTheDocument());
+    expect(fake.goals.goals).toEqual([]);
+  });
+
+  it("stops at 5 goals", async () => {
+    const goals = [1, 2, 3, 4, 5].map((id) => ({ id: 900 + id, text: `Goal ${id}`, created: 1, updated: 1 }));
+    await startApp({ goals: { goals, checked: 1, stale: false } });
+    await userEvent.click(within(screen.getByRole("region", { name: "Goals" })).getByRole("button", { name: "Edit" }));
+    expect(screen.queryByRole("textbox", { name: "New goal" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Remove one to add another/)).toBeInTheDocument();
+  });
+
+  it("asks to check old goals, and Still right stops the question", async () => {
+    const old = Math.floor(Date.now() / 1000) - 40 * 86400;
+    const fake = await startApp({ goals: { goals: [{ id: 950, text: "Ship 2.0", created: old, updated: old }], checked: old, stale: true } });
+    expect(screen.getByText(/You set these goals 40 days ago/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Still right" }));
+    await waitFor(() => expect(screen.queryByText(/You set these goals/)).not.toBeInTheDocument());
+    expect(fake.calls.some((c) => c.cmd === "confirm_goals")).toBe(true);
+  });
+
+  it("shows the goal of each item that the brief ranked, or No goal", async () => {
+    await startApp({
+      goals: { goals: [{ id: 960, text: "Ship 2.0", created: 1, updated: 1 }], checked: Math.floor(Date.now() / 1000), stale: false },
+      github: [githubItem(9, "review_requested", "Bulk edit"), githubItem(10, "review_requested", "Fix typo")],
+      newKeys: ["github:acme/shop#9", "github:acme/shop#10"],
+      briefs: {
+        [today()]: {
+          day: today(),
+          written: 1,
+          text: "Two reviews.",
+          why: { "github:acme/shop#9": "It blocks the release.", "github:acme/shop#10": "It waits 3 days." },
+          goal: { "github:acme/shop#9": 960 },
+        },
+      },
+    });
+    const list = await screen.findByRole("list", { name: "New" });
+    const bulk = within(list).getByText("Bulk edit").closest("li")!;
+    expect(within(bulk).getByText("◎ Ship 2.0")).toBeInTheDocument();
+    const typo = within(list).getByText("Fix typo").closest("li")!;
+    expect(within(typo).getByText("No goal")).toBeInTheDocument();
   });
 });
 
@@ -450,6 +530,28 @@ describe("day plan", () => {
     await waitFor(() => expect(fake.plans[today()].items).toEqual([]));
   });
 
+  it("puts plan items after a meeting, and Prep asks AIfred about the meeting", async () => {
+    const t = task("Pay rent");
+    const fake = await startApp({
+      tasks: [t],
+      plans: { [today()]: { day: today(), mode: "self", items: [{ key: `task:${t.id}` }], updated: 1 } },
+      calendar: { fetched_at: Math.floor(Date.now() / 1000), events: [meeting("m1", "Weekly sync", "09:00", "10:00")] },
+    });
+    expect(await screen.findByText(/Calendar/, { selector: ".sync span" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    expect(await screen.findByText("Weekly sync")).toBeInTheDocument();
+    expect(screen.getByText("Josh, Ana")).toBeInTheDocument();
+    // The task does not go over the meeting: it starts when the meeting ends.
+    expect(screen.getByText("10:00–10:30")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Prepare for: Weekly sync" }));
+    await waitFor(() => expect(fake.calls.find((c) => c.cmd === "ask_side")?.args.prompt).toMatch(/Prepare me for my calendar event today at 9:00–10:00 \(event id [^)]+\)/));
+  });
+
+  it("shows a calendar error in the top bar", async () => {
+    await startApp({ calendarError: "gws failed: not logged in" });
+    expect(await screen.findByTitle("gws failed: not logged in")).toHaveTextContent("Calendar: error");
+  });
+
   it("Plan it for me asks AIfred in the plan chat, and shows the plan it saved", async () => {
     const fake = await startApp({ tasks: [task("Pay rent", { priority: "urgent" })] });
     const key = `task:${fake.tasks[0].id}`;
@@ -601,6 +703,59 @@ describe("ClickUp", () => {
     expect(fake.clickupToken).toBe("pk_123");
     await userEvent.click(screen.getByRole("button", { name: "Home" }));
     expect(await screen.findByText("Write notes")).toBeInTheDocument();
+  });
+});
+
+describe("Google", () => {
+  it("saves the registration, connects, loads the calendar, and disconnects", async () => {
+    const fake = await startApp();
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const g = screen.getByRole("region", { name: "Google" });
+    await userEvent.type(within(g).getByLabelText("Client ID"), "bad");
+    await userEvent.type(within(g).getByLabelText("Client secret"), "s");
+    await userEvent.click(within(g).getByRole("button", { name: "Save registration" }));
+    expect(await within(g).findByText(/does not look like a Google client ID/)).toBeInTheDocument();
+    await userEvent.clear(within(g).getByLabelText("Client ID"));
+    await userEvent.type(within(g).getByLabelText("Client ID"), "1-a.apps.googleusercontent.com");
+    await userEvent.click(within(g).getByRole("button", { name: "Save registration" }));
+    const loads = () => fake.calls.filter((c) => c.cmd === "calendar_events").length;
+    const before = loads();
+    await userEvent.click(await within(g).findByRole("button", { name: "Connect Google" }));
+    expect(await within(g).findByText("me@x.com")).toBeInTheDocument();
+    expect(within(g).getByText("Calendar: allowed")).toBeInTheDocument();
+    await waitFor(() => expect(loads()).toBeGreaterThan(before));
+    expect(await screen.findByText(/Calendar/, { selector: ".sync span" })).toBeInTheDocument();
+    await userEvent.click(within(g).getByRole("button", { name: "Disconnect" }));
+    expect(await within(g).findByRole("button", { name: "Connect Google" })).toBeInTheDocument();
+    expect(fake.google.connected).toBe(false);
+  });
+
+  it("lets the user start the login again while one waits", async () => {
+    const first = deferred<void>();
+    let logins = 0;
+    await startApp({
+      google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: false, email: null, features: [["Calendar", false]] },
+      onConnectGoogle: () => (++logins === 1 ? first.promise : undefined),
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const g = screen.getByRole("region", { name: "Google" });
+    await userEvent.click(await within(g).findByRole("button", { name: "Connect Google" }));
+    // The user closed the browser tab: the button still works.
+    const waiting = await within(g).findByRole("button", { name: "Finish the login in your browser…" });
+    expect(waiting).toBeEnabled();
+    await userEvent.click(waiting);
+    expect(await within(g).findByText("me@x.com")).toBeInTheDocument();
+    // The first login stops. Its error does not hide the new result.
+    first.reject("the login stopped, because a new login started");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(within(g).queryByText(/login stopped/)).not.toBeInTheDocument();
+    expect(within(g).getByText("Connected as me@x.com.")).toBeInTheDocument();
+  });
+
+  it("asks to connect again when the login does not allow the calendar", async () => {
+    await startApp({ google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", false]] } });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText(/Google needs more access for Calendar/)).toBeInTheDocument();
   });
 });
 

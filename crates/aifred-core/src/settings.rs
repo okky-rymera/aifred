@@ -150,9 +150,11 @@ pub fn set_chat_model(dir: &Path, model: Option<&str>) -> anyhow::Result<()> {
     }
     crate::db::write(dir, |tx| {
         match model {
-            Some(m) => tx.execute("INSERT INTO meta (key, value) VALUES ('chat_model', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1", [m])?,
-            None => tx.execute("DELETE FROM meta WHERE key = 'chat_model'", [])?,
-        };
+            Some(m) => crate::db::set_meta(tx, "chat_model", m)?,
+            None => {
+                tx.execute("DELETE FROM meta WHERE key = 'chat_model'", [])?;
+            }
+        }
         Ok(())
     })
 }

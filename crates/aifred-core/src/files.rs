@@ -28,12 +28,30 @@ pub fn now() -> u64 {
 
 /// Writes to a temporary file first, so a crash never leaves half a file.
 /// The data is on the disk before the rename, so a power cut cannot leave an
-/// empty file. The temporary name includes the process id, so two programs
-/// never share it. If a step fails, the temporary file is removed.
+/// empty file. The temporary name includes the process id and a counter, so
+/// two programs, or two saves in one program, never share it. If a step
+/// fails, the temporary file is removed.
 pub fn save<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    write_file(path, value, None)
+}
+
+/// Like `save`, but only the user can read the file (mode 600 on Unix).
+/// For files with secrets, for example the Google connection (google.rs).
+pub fn save_private<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
+    write_file(path, value, Some(0o600))
+}
+
+/// The steps of `save`. `mode` sets the Unix permissions of the new file.
+fn write_file<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+    mode: Option<u32>,
+) -> anyhow::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value)?;
-    let result = write_synced(&tmp, &bytes)
+    let result = write_synced(&tmp, &bytes, mode)
         .with_context(|| format!("cannot write {}", tmp.display()))
         .and_then(|()| {
             std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
@@ -50,9 +68,22 @@ pub fn save<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()>
     Ok(())
 }
 
-fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_synced(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    if let Some(_m) = mode {
+        // An old temp file can have other permissions. The mode applies only
+        // to a new file, so the old file goes first.
+        let _ = std::fs::remove_file(path);
+        opts.create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(_m);
+        }
+    }
+    let mut f = opts.open(path)?;
     f.write_all(bytes)?;
     f.sync_all()
 }
@@ -81,6 +112,17 @@ pub fn replace<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<
 pub fn locked<R>(path: &Path, f: impl FnOnce() -> anyhow::Result<R>) -> anyhow::Result<R> {
     let _lock = lock(path)?;
     f()
+}
+
+/// Runs the file and database work of `f` on a thread for blocking work,
+/// not on a thread of the async runtime. A wait for a file lock or a slow
+/// disk then does not stop the other async work of the program.
+pub async fn off_thread<T: Send + 'static>(
+    dir: &Path,
+    f: impl FnOnce(&Path) -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || f(&dir)).await?
 }
 
 /// Read, change, and save, with the file locked for the whole step.
