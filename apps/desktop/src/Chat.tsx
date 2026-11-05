@@ -15,6 +15,7 @@ export const ICON = {
   spark: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"><path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z" /></svg>,
   clip: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9" /></svg>,
   task: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M8.5 12l2.5 2.5 4.5-5" /></svg>,
+  clock: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>,
   hand: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>,
 };
 
@@ -168,14 +169,22 @@ export function ModelPicker(props: { model: string | null; onChange: (model: str
 export function Composer(props: {
   id: string;
   placeholder: string;
+  /** The name of the text box for screen readers. Default: the placeholder. */
+  label?: string;
+  /** Tab in the box calls this, and does not move the focus. Shift+Tab
+   * still moves it, and so does Tab right after Esc. */
+  onTab?: () => void;
   sendLabel?: string;
   /** True turns Send off. A function decides from the text, for example
    * to let the home box add a task while AIfred answers a question. */
   busy?: boolean | ((text: string, files: api.FileRef[]) => boolean);
   /** Returns false to keep the text and files, for example when the send failed. */
   onSend: (text: string, files: api.FileRef[]) => Promise<boolean | void> | boolean | void;
-  model: string | null;
-  onModel: (model: string | null) => void;
+  /** The model picker. Leave out onModel for a box with no picker. */
+  model?: string | null;
+  onModel?: (model: string | null) => void;
+  /** "task": the box adds a task. It gets a green border. */
+  tone?: "task";
   suggestions?: string[];
   hint?: (text: string, files: api.FileRef[]) => React.ReactNode;
   autoFocus?: boolean;
@@ -189,6 +198,8 @@ export function Composer(props: {
   const [drop, setDrop] = useState(false);
   const [error, setError] = useState("");
   const box = useRef<HTMLTextAreaElement>(null);
+  /** True right after Esc: the next Tab moves the focus (see onTab). */
+  const tabFree = useRef(false);
   const busy = typeof props.busy === "function" ? props.busy(text, files) : !!props.busy;
 
   useEffect(() => {
@@ -236,9 +247,12 @@ export function Composer(props: {
     if (busy || uploading.length || (!text.trim() && !files.length)) return;
     const sent = text;
     const sentFiles = files;
-    // Clear at once, so a fast second Enter does not send twice.
+    // Clear at once, so a fast second Enter does not send twice. Clear the
+    // saved draft too: a send can change the page ("plan my day") before the
+    // box saves its empty text.
     setText("");
     setFiles([]);
+    drafts.set(props.id, { text: "", files: [] });
     const ok = await props.onSend(sent, sentFiles);
     if (ok === false) {
       setText((t) => t || sent);
@@ -258,7 +272,7 @@ export function Composer(props: {
         </div>
       )}
       <div
-        className={`composer${drop ? " drop" : ""}`}
+        className={`composer${drop ? " drop" : ""}${props.tone ? ` ${props.tone}` : ""}`}
         onDragOver={(e) => {
           if (![...e.dataTransfer.types].includes("Files")) return;
           e.preventDefault();
@@ -281,7 +295,7 @@ export function Composer(props: {
           rows={1}
           value={text}
           autoFocus={props.autoFocus}
-          aria-label={props.placeholder}
+          aria-label={props.label ?? props.placeholder}
           placeholder={props.placeholder}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
@@ -290,7 +304,17 @@ export function Composer(props: {
               add(e.clipboardData.files);
             }
           }}
+          aria-keyshortcuts={props.onTab ? "Tab" : undefined}
+          aria-description={props.onTab ? "Tab changes the mode. Press Escape, then Tab, to go to the next control." : undefined}
           onKeyDown={(e) => {
+            // Esc frees the next Tab: keyboard users can leave the box forward.
+            const free = tabFree.current;
+            tabFree.current = e.key === "Escape";
+            if (e.key === "Tab" && props.onTab && !free && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+              e.preventDefault();
+              props.onTab();
+              return;
+            }
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               send();
@@ -311,7 +335,7 @@ export function Composer(props: {
             />
           </label>
           <div className="parse">{props.hint?.(text, files)}</div>
-          <ModelPicker model={props.model} onChange={props.onModel} disabled={busy} />
+          {props.onModel && <ModelPicker model={props.model ?? null} onChange={props.onModel} disabled={busy} />}
           <button className="send" onClick={send} disabled={busy || uploading.length > 0 || (!text.trim() && !files.length)}>
             {props.sendLabel ?? "Send"}
           </button>

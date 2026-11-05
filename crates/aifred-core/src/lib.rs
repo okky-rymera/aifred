@@ -13,6 +13,7 @@ pub mod github_list;
 pub mod history;
 mod import;
 pub mod items;
+pub mod jobs;
 pub mod memory;
 pub mod overview;
 pub mod plan;

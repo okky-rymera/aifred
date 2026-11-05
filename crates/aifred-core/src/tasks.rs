@@ -389,12 +389,19 @@ impl TaskStore {
     pub fn set_done(&self, id: &str, done: bool) -> anyhow::Result<Task> {
         db::write(&self.dir, |tx| {
             let done_at = done.then(|| now() as i64);
-            if tx.execute(
+            let was_done: Option<bool> = tx
+                .query_row("SELECT done FROM task WHERE id = ?1", [id], |r| r.get(0))
+                .optional()?;
+            let Some(was_done) = was_done else {
+                bail!("no task with id {id}");
+            };
+            tx.execute(
                 "UPDATE task SET done = ?1, done_at = ?2 WHERE id = ?3",
                 rusqlite::params![done, done_at, id],
-            )? == 0
-            {
-                bail!("no task with id {id}");
+            )?;
+            // A task that is done now starts the jobs that wait for it (jobs.rs).
+            if done && !was_done {
+                crate::jobs::record_event(tx, crate::jobs::TASK_DONE)?;
             }
             Ok(tx.query_row(
                 &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),

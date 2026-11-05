@@ -4,7 +4,7 @@ import { useState } from "react";
 import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
-import { SRC_NAME, dueInfo, dur, fmtTime, groupItems, longDay, parseQuick, shortDay, type Item } from "./items";
+import { SRC_NAME, dueInfo, dur, fmtTime, groupItems, isPlanRequest, longDay, parseTask, shortDay, type Item } from "./items";
 
 export function Check(props: { item: Item }) {
   const { toggleDone } = useApp();
@@ -245,40 +245,43 @@ function BriefCard(props: { needYou: number }) {
   );
 }
 
-/** The home box: a new task, or a question to AIfred. The chip shows which, and a click on it changes it. */
+/** The home box. Tab switches the mode:
+ * - "Ask AIfred": the message goes to AIfred. AIfred answers, adds a task
+ *   ("pay rent friday high #home"), or makes a job ("remind me every Monday").
+ *   Only "plan my day" opens the Day plan, where AIfred fills the plan.
+ * - "Add task": the line is a new task at once, with no AI call. The day, the
+ *   priority, and the #tags come from the words. */
 function HomeBox() {
-  const { today, main, sendMain, addTask, models, setModel, startPlan } = useApp();
-  const [force, setForce] = useState<"ask" | "task" | null>(null);
-
-  function read(text: string) {
-    const p = parseQuick(text, today);
-    if (!p || !force) return p;
-    if (force === "ask") return { ask: true as const, text: text.trim(), plan: false };
-    if (p.ask) return { ask: false as const, title: text.trim(), due: null, priority: null, tags: [] };
-    return p;
-  }
+  const { today, main, sendMain, addTask, models, setModel, startPlan, homeMode: mode, setHomeMode: setMode } = useApp();
+  const flip = () => setMode(mode === "ask" ? "task" : "ask");
+  const ask = mode === "ask";
 
   return (
     <Composer
       id="main-home"
-      placeholder="Add a task or ask AIfred"
-      sendLabel="Send"
-      // Adding a task needs no AI call, so only a question waits for the last answer.
-      busy={(text, files) => main.busy && (read(text) ?? { ask: files.length > 0 }).ask}
+      label="Add a task or ask AIfred"
+      placeholder={ask ? "Ask AIfred" : "Add a task"}
+      sendLabel={ask ? "Send" : "Add"}
+      tone={ask ? undefined : "task"}
+      // Adding a task needs no AI call, so it does not wait for an answer.
+      // A task needs a name: files alone do not make a task, so Add stays off.
+      busy={(text) => (ask ? main.busy : !parseTask(text, today))}
+      // A new task uses no model, so the task mode has no model picker.
       model={models.main}
-      onModel={(m) => setModel("main", m)}
+      onModel={ask ? (m) => setModel("main", m) : undefined}
+      onTab={flip}
       hint={(text, files) => {
-        const p = read(text);
-        if (!p) return null;
-        const flip = (
-          <button className={`chip${p.ask ? " ask" : ""}`} title="Click to change" onClick={() => setForce(p.ask ? "task" : "ask")}>
-            {p.ask ? (p.plan ? "Plan my day" : "Ask AIfred") : "Add task"}
+        const chip = (
+          <button className={`chip ${ask ? "ask" : "task"}`} title="Click or press Tab to change. To leave the box, press Esc, then Tab." onClick={flip}>
+            {ask ? "Ask AIfred" : "Add task"}
           </button>
         );
-        if (p.ask) return <>{flip}<span>{p.plan ? "Opens Day plan" : "AIfred answers"}</span></>;
+        if (ask) return isPlanRequest(text) ? <>{chip}<span>Opens Day plan</span></> : chip;
+        const p = parseTask(text, today);
+        if (!p) return files.length ? <>{chip}<span>Type a task name to add the files to it</span></> : chip;
         return (
           <>
-            {flip}
+            {chip}
             <b>{p.title}</b>
             {p.due && <span className="chip">{dueInfo(p.due, today).text}</span>}
             {p.priority && <span className="chip">{p.priority[0].toUpperCase() + p.priority.slice(1)}</span>}
@@ -292,15 +295,18 @@ function HomeBox() {
         );
       }}
       onSend={async (text, files) => {
-        const p = read(text) ?? (files.length ? { ask: true as const, text: "Look at these files.", plan: false } : null);
-        setForce(null);
-        if (!p) return false;
-        if (p.ask && p.plan) {
+        if (!ask) {
+          const p = parseTask(text, today);
+          if (!p) return false;
+          return addTask({ title: p.title, due: p.due ?? undefined, priority: p.priority ?? undefined, tags: p.tags, files: files.map((f) => f.id) });
+        }
+        const t = text.trim() || (files.length ? "Look at these files." : "");
+        if (!t) return false;
+        if (files.length === 0 && isPlanRequest(t)) {
           startPlan("ai");
           return true;
         }
-        if (p.ask) return sendMain(p.text, files);
-        return addTask({ title: p.title, due: p.due ?? undefined, priority: p.priority ?? undefined, tags: p.tags, files: files.map((f) => f.id) });
+        return sendMain(t, files);
       }}
     />
   );

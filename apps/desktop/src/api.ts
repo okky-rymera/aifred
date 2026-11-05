@@ -234,6 +234,55 @@ export const brief = (day: string) => invoke<Brief | null>("brief", { day });
 /** One AI call. */
 export const writeBrief = (day: string) => invoke<Brief>("write_brief", { day });
 export const itemMeta = () => invoke<ItemMeta[]>("item_meta");
+
+/** When a job runs. Times are local, "YYYY-MM-DDTHH:MM". */
+export type Trigger =
+  | { kind: "once"; at: string }
+  | { kind: "repeat"; start: string; rule: string }
+  | { kind: "event"; event: string; wait_secs: number };
+
+/** One of AIfred's own jobs: a reminder, an AI run, or the brief update. */
+export type Job = {
+  id: string;
+  title: string;
+  action: "remind" | "agent" | "brief";
+  /** The reminder text, or the instructions for the AI. */
+  message: string;
+  trigger: Trigger;
+  tz: string;
+  status: "active" | "paused" | "done" | "off";
+  /** Unix seconds, or null. */
+  next_run: number | null;
+  created_by: string;
+  created: number;
+  updated: number;
+  /** Failed runs in a row. */
+  failures: number;
+  /** The trigger in plain words. */
+  when: string;
+  /** True when Start can work: the job is not active, and it has a time to run. */
+  can_start: boolean;
+};
+
+export type JobRun = {
+  id: number;
+  job: string;
+  planned: number;
+  started: number | null;
+  finished: number | null;
+  state: "running" | "ok" | "quiet" | "skipped" | "failed";
+  late: boolean;
+  note: string;
+  output: string;
+  cost_usd: number | null;
+};
+
+/** all false: only the active and paused jobs. */
+export const jobs = (all: boolean) => invoke<Job[]>("jobs", { all });
+/** Newest first. id null: the runs of all jobs. */
+export const jobRuns = (id: string | null, limit: number, skipped: boolean) => invoke<JobRun[]>("job_runs", { id, limit, skipped });
+export const setJobStatus = (id: string, status: "active" | "paused") => invoke<Job>("set_job_status", { id, status });
+export const deleteJob = (id: string) => invoke<void>("delete_job", { id });
 export const itemDetails = (key: string) => invoke<ItemDetails>("item_details", { key });
 
 export const history = () => invoke<Turn[]>("history");

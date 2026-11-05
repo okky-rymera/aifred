@@ -140,12 +140,15 @@ body { background: var(--win); color: var(--ink); font-family: var(--f-body); fo
 .composer { border: 1px solid var(--line); background: var(--raise); border-radius: 14px; padding: 12px 10px 10px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
 .composer:focus-within { border-color: var(--amber); }
 .composer.drop { border-color: var(--amber); background: var(--amber-soft); }
+/* The home box in "Add task" mode: green, so the mode shows at a glance. */
+.composer.task, .composer.task:focus-within { border-color: var(--green); }
 .c-in { display: block; width: 100%; min-height: 24px; max-height: 168px; resize: none; overflow-y: hidden; border: 0; outline: 0; background: transparent; padding: 0 4px 0 0; font-size: 14.5px; line-height: 1.55; scrollbar-width: thin; }
 .c-in.full { overflow-y: auto; }
 .app .c-in:focus-visible { outline: 0; }
-.c-foot { display: flex; gap: 8px; align-items: center; }
+/* A fixed height, so the box keeps its size when the model picker is hidden ("Add task" mode). */
+.c-foot { display: flex; gap: 8px; align-items: center; min-height: 30px; }
 .c-foot .parse { flex: 1; min-width: 0; }
-.c-foot select { border: 1px solid var(--line); background: var(--pane); border-radius: 8px; font-size: 12px; padding: 4px 6px; color: var(--muted); }
+.c-foot select { box-sizing: border-box; height: 30px; border: 1px solid var(--line); background: var(--pane); border-radius: 8px; font-size: 12px; padding: 0 6px; color: var(--muted); }
 .attach { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--muted); cursor: pointer; flex: none; margin-left: -4px; position: relative; }
 .attach:hover, .attach:focus-within { background: var(--pane); color: var(--ink); }
 .attach input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
@@ -168,6 +171,7 @@ button.att:hover { background: var(--line); }
 .parse b { font-weight: 500; color: var(--ink); }
 .chip { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; background: var(--amber-soft); color: var(--amber-ink); border: 0; }
 .chip.ask { background: var(--navy); color: var(--on-navy); }
+.chip.task { background: var(--green-soft); color: var(--green); font-weight: 500; }
 button.chip:hover { filter: brightness(.95); }
 .sugs { display: flex; flex-wrap: wrap; gap: 6px; }
 .cmp-wrap .sugs { padding: 0 2px; }

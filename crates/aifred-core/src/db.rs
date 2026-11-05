@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 9;
+const VERSION: i64 = 10;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -389,6 +389,56 @@ ALTER TABLE turn ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE task ADD COLUMN files TEXT NOT NULL DEFAULT '[]';
 ";
 
+/// AIfred's own jobs (jobs.rs), their runs, and the events that start them.
+const SCHEMA_10: &str = "
+CREATE TABLE job (
+  id         TEXT PRIMARY KEY,
+  title      TEXT NOT NULL,
+  action     TEXT NOT NULL,              -- 'remind', 'agent', or 'brief'
+  message    TEXT NOT NULL DEFAULT '',   -- the reminder text, or the instructions for the AI
+  trigger    TEXT NOT NULL,              -- {\"kind\": \"once\" | \"repeat\" | \"event\", ...}
+  tz         TEXT NOT NULL,              -- IANA time zone, for example 'Asia/Jakarta'
+  status     TEXT NOT NULL,              -- 'active', 'paused', 'done', or 'off'
+  next_run   INTEGER,                    -- Unix seconds, or NULL
+  created_by TEXT NOT NULL,              -- 'you' or 'aifred'
+  created    INTEGER NOT NULL,
+  updated    INTEGER NOT NULL,
+  failures   INTEGER NOT NULL DEFAULT 0, -- failed runs in a row
+  cursor     INTEGER NOT NULL DEFAULT 0  -- event jobs: the last job_event id that they used
+);
+CREATE INDEX job_by_next ON job(status, next_run);
+
+-- One row for each run, also for a time that was skipped. A time runs at most once.
+CREATE TABLE job_run (
+  id       INTEGER PRIMARY KEY,
+  job      TEXT NOT NULL REFERENCES job(id) ON DELETE CASCADE,
+  planned  INTEGER NOT NULL,
+  started  INTEGER,
+  finished INTEGER,
+  state    TEXT NOT NULL,                -- 'running', 'ok', 'quiet', 'skipped', or 'failed'
+  late     INTEGER NOT NULL DEFAULT 0,
+  note     TEXT NOT NULL DEFAULT '',     -- why it was skipped, or the error
+  output   TEXT NOT NULL DEFAULT '',
+  cost_usd REAL,
+  UNIQUE (job, planned)
+);
+CREATE INDEX job_run_by_job ON job_run(job, id);
+
+-- Events from all AIfred programs, for example 'task_done'.
+CREATE TABLE job_event (
+  id   INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  ts   INTEGER NOT NULL
+);
+CREATE INDEX job_event_by_name ON job_event(name, id);
+
+-- AIfred writes the brief again when the user finishes tasks.
+INSERT INTO job (id, title, action, message, trigger, tz, status, created_by, created, updated)
+VALUES ('brief-on-task-done', 'Update the brief when you finish a task', 'brief', '',
+        '{\"kind\":\"event\",\"event\":\"task_done\",\"wait_secs\":90}', 'UTC', 'active', 'aifred',
+        CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER));
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -486,6 +536,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 9 {
         tx.execute_batch(SCHEMA_9)?;
+    }
+    if version < 10 {
+        tx.execute_batch(SCHEMA_10)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

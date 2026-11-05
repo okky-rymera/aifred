@@ -23,6 +23,7 @@ The source code:
   - `github`: reads GitHub with your `gh` login.
   - `clickup`: reads ClickUp with the token in the data folder.
   - `tasks`: adds, lists, searches, and finishes local tasks. It can only change the tasks in the data folder.
+  - `jobs`: makes, lists, changes, and stops AIfred's own jobs.
   - `memory`: searches, adds, and forgets facts about you, and searches old chats.
 - `crates/aifred-embed`: the meaning search helper. It is the only part that loads the meaning search model.
 
@@ -61,12 +62,46 @@ The source code:
   - a checklist of steps. You can tick a step in the list without opening the task.
 - Open tasks show the nearest due day first. Tasks with the same due day show the highest priority first.
 - AIfred can set these fields when you give them in the chat, for example "remind me to pay rent by Friday, high priority".
+- The box on the home page has two modes. Press Tab in the box, or click the chip under it, to change the mode. Shift+Tab still moves the focus out of the box. The mode stays when you go to another page.
+  - "Ask AIfred" (the start mode): the message goes to AIfred. AIfred decides what to do:
+    - a short to-do line, for example "pay rent friday high #home", becomes a task with its due day, priority, and tags,
+    - a question gets an answer,
+    - "remind me…" or "check … later" becomes one of AIfred's jobs,
+    - only "plan my day" works with no AI decision: it opens the Day plan.
+    Each message is one AI call, also a new task. It takes some seconds.
+  - "Add task": the box has a green border and no model picker. The line becomes a task at once, with no AI call. AIfred reads the due day ("friday", "tomorrow", "2027-02-01"), the priority at the end ("high", "urgent", "low"), and the tags ("#home") from the words. The line under the box shows what it read. An "Added" message has an Undo. This works while AIfred answers, and with no network.
+- A file that you send with a new task stays on the task, in both modes.
 - A long description (more than 300 characters) gets a short summary. A shorter description is its own summary.
   - The fast model (Haiku) writes the summaries in the background, 15 items in one AI call on your Claude login.
   - It runs after a list download, after an answer, and after you add or change a task. It only writes the summaries that are missing.
   - A summary is made again when its title or description changes.
 - When you ask what to do or what is open, the AI calls one overview tool. It gets all open tasks and items with their summaries, and it opens the full details only of the items that need it.
 - `aifred index` makes the missing meaning search data and item summaries now, for example after a first start with no network.
+
+## AIfred's jobs
+
+AIfred keeps its own list of jobs, apart from your to-do list. It does them by itself while it runs, also when the window is closed to the tray.
+
+- Ask in the chat. Examples:
+  - "Remind me every Monday at 9 to send my timesheet."
+  - "Remind me on the 3rd and 17th to pay the invoices."
+  - "In 2 hours, check if PR #123 is merged and tell me."
+- AIfred says the time back with the next run dates. Check them.
+- A job is one of these:
+  - a reminder: a desktop notification, with no AI call,
+  - an AI job: AIfred runs at that time, looks things up, and sends a notification with the result. If it has nothing to tell, it sends nothing.
+- An AI job can only read. It cannot change tasks, the plan, memory, GitHub, or ClickUp. It cannot make new jobs.
+- Each AI job run is one more AI call on your Claude login (Sonnet).
+- A job runs once, at a time and repeat (for example "every other Thursday", "the last Friday of the month"), or after an event. The repeat rule is an RRULE (RFC 5545). The time zone is the zone of your computer when you make the job.
+- AIfred has one job from the start: "Update the brief when you finish a task". It waits 90 seconds for more finished tasks, so many tasks give one update (at most 10 minutes after the first one). It only updates a brief that already exists for today.
+- "AIfred's jobs" (the clock in the left bar) shows the jobs, the next run, and the latest runs. You can pause, start, and delete a job there. To change a job, ask in the chat.
+- At most 20 jobs that are active or paused. A job can repeat at most once an hour.
+- If AIfred was not running at a job time (closed, or the computer was asleep):
+  - a one-time job runs late, and the notification says the planned time,
+  - a repeating job runs one time for the newest missed time, if it is at most 12 hours old. Older times are skipped.
+- A job that fails tries again after 1, 2, 4, and 8 minutes. After 5 failures in a row it turns off, and AIfred shows a notification.
+- A run that was busy when AIfred stopped does not run again.
+- See `docs/research-agent-jobs.md` for the research and the next steps.
 
 ## Chat model
 
@@ -195,3 +230,10 @@ This starts the app on a hidden screen (Xvfb). It waits up to 300 seconds until 
 - It uses a different web port, so it works while your copy runs.
 - It does not read or write your saved window size. The setting `AIFRED_NO_WINDOW_STATE=1` turns that off.
 - It uses a temporary copy of your data folder.
+- It uses its own message bus (`dbus-run-session`), so its notifications do not show on your desktop.
+
+To let AIfred's jobs run in the hidden copy, keep it running longer, and save its database to read the runs:
+
+```bash
+AIFRED_HOLD_SECONDS=150 AIFRED_KEEP_DB=/tmp/after.db scripts/run-hidden.sh 300 /tmp/app.png
+```

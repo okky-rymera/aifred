@@ -13,6 +13,8 @@ import type {
   FileRef,
   GithubItem,
   ItemDetails,
+  Job,
+  JobRun,
   ProgressEvent,
   Settings,
   SideTurn,
@@ -71,6 +73,9 @@ export type Fake = {
   plans: Record<string, DayPlan>;
   estimates: Record<string, Estimate>;
   briefs: Record<string, Brief>;
+  /** AIfred's own jobs, and their runs (newest first). */
+  jobs: Job[];
+  jobRuns: JobRun[];
   /** What write_brief makes. Throw to fail it. */
   onWriteBrief: (day: string) => Promise<Brief> | Brief;
   side: Record<string, SideTurn[]>;
@@ -223,6 +228,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     plans: {},
     estimates: {},
     briefs: {},
+    jobs: [],
+    jobRuns: [],
     onWriteBrief: (day) => ({ day, written: nowSecs(), text: "Nothing urgent today.", why: {} }),
     side: {},
     newKeys: [],
@@ -459,6 +466,23 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         fake.briefs[args.day] = b;
         return structuredClone(b);
       }
+      case "jobs":
+        return structuredClone(fake.jobs.filter((j) => args.all || j.status === "active" || j.status === "paused"));
+      case "job_runs":
+        return structuredClone(
+          fake.jobRuns.filter((r) => (args.id == null || r.job === args.id) && (args.skipped || r.state !== "skipped")).slice(0, args.limit),
+        );
+      case "set_job_status": {
+        const j = fake.jobs.find((x) => x.id === args.id);
+        if (!j) throw `no job with id ${args.id}`;
+        j.status = args.status;
+        j.can_start = j.status !== "active";
+        return structuredClone(j);
+      }
+      case "delete_job":
+        fake.jobs = fake.jobs.filter((j) => j.id !== args.id);
+        fake.jobRuns = fake.jobRuns.filter((r) => r.job !== args.id);
+        return null;
       case "item_meta":
         return [
           ...fake.tasks.filter((t) => !t.done).map((t) => ({ key: `task:${t.id}`, first_seen: t.created, new: false })),
@@ -497,4 +521,25 @@ export function deferred<T>() {
     reject = b;
   });
   return { promise, resolve, reject };
+}
+
+/** One of AIfred's jobs for a test: a weekly reminder unless `extra` says else. */
+export function job(id: string, title: string, extra: Partial<Job> = {}): Job {
+  return {
+    id,
+    title,
+    action: "remind",
+    message: "Submit the timesheet.",
+    trigger: { kind: "repeat", start: "2030-11-04T09:00", rule: "FREQ=WEEKLY;BYDAY=MO" },
+    tz: "Asia/Jakarta",
+    status: "active",
+    next_run: nowSecs() + 3600,
+    created_by: "aifred",
+    created: nowSecs(),
+    updated: nowSecs(),
+    failures: 0,
+    when: "Every Monday at 09:00 (Asia/Jakarta)",
+    can_start: (extra.status ?? "active") !== "active",
+    ...extra,
+  };
 }

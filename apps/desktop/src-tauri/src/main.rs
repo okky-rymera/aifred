@@ -3,11 +3,13 @@
 //!
 //! The same file also holds the other parts (see aifred_core::program):
 //! the terminal commands (cli.rs), the AI tool servers (aifred-tools), and
-//! the meaning search helper (aifred-embed).
+//! the meaning search helper (aifred-embed). The scheduler of AIfred's own
+//! jobs is in scheduler.rs.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cli;
+mod scheduler;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -23,6 +25,7 @@ use aifred_core::github;
 use aifred_core::github_list::{GithubList, GithubStore};
 use aifred_core::history::Turn;
 use aifred_core::items::{ItemDetails, ItemMeta};
+use aifred_core::jobs::{Job, JobChange, Run};
 use aifred_core::memory::Fact;
 use aifred_core::plan::{DayPlan, Estimate, PlanItem};
 use aifred_core::settings::{self, Settings};
@@ -928,6 +931,33 @@ async fn set_estimate(app: State<'_, App>, key: String, minutes: Option<u32>) ->
     .await
 }
 
+/// AIfred's own jobs. `all` false: only the active and paused jobs.
+#[tauri::command]
+async fn jobs(app: State<'_, App>, all: bool) -> CmdResult<Vec<Job>> {
+    blocking(&app, move |a| aifred_core::jobs::list(&a.dir, all)).await
+}
+
+/// The latest runs of one job, or of all jobs, newest first. No skipped runs
+/// unless `skipped` is true.
+#[tauri::command]
+async fn job_runs(app: State<'_, App>, id: Option<String>, limit: u32, skipped: bool) -> CmdResult<Vec<Run>> {
+    blocking(&app, move |a| aifred_core::jobs::runs(&a.dir, id.as_deref(), limit, skipped)).await
+}
+
+/// Pauses a job ("paused") or starts it again ("active").
+#[tauri::command]
+async fn set_job_status(app: State<'_, App>, id: String, status: String) -> CmdResult<Job> {
+    blocking(&app, move |a| {
+        aifred_core::jobs::update(&a.dir, &id, JobChange { status: Some(status), ..Default::default() })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_job(app: State<'_, App>, id: String) -> CmdResult<()> {
+    blocking(&app, move |a| aifred_core::jobs::delete(&a.dir, &id)).await
+}
+
 #[tauri::command]
 async fn brief(app: State<'_, App>, day: String) -> CmdResult<Option<Brief>> {
     blocking(&app, move |a| aifred_core::brief::get(&a.dir, &day)).await
@@ -936,9 +966,18 @@ async fn brief(app: State<'_, App>, day: String) -> CmdResult<Option<Brief>> {
 /// Writes the brief of `day` now. It is one AI call (brief.rs).
 #[tauri::command]
 async fn write_brief(app: State<'_, App>, day: String) -> CmdResult<Brief> {
-    let Ok(_guard) = app.brief_busy.try_lock() else {
-        return Err("AIfred is already writing the brief.".into());
-    };
+    let asked = now();
+    // A brief job of the scheduler can write the brief now. Wait for it, and
+    // use its brief when it is newer than this request: no second AI call.
+    let _guard = app.brief_busy.lock().await;
+    let d = day.clone();
+    // Brief::written is when that brief read the tasks. Only a read after
+    // this request knows the changes that the user made before the click.
+    if let Some(b) = blocking(&app, move |a| aifred_core::brief::get(&a.dir, &d)).await?
+        && b.written > asked
+    {
+        return Ok(b);
+    }
     app.assistant.write_brief(&day).await.map_err(err)
 }
 
@@ -994,6 +1033,10 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         set_estimate,
         brief,
         write_brief,
+        jobs,
+        job_runs,
+        set_job_status,
+        delete_job,
         item_meta,
         item_details,
         update_status,
@@ -1075,7 +1118,8 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
         with_commands(tauri::Builder::default(), app),
         keep_window_state,
     )
-    .plugin(tauri_plugin_opener::init());
+    .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_notification::init());
     if keep_window_state {
         // Saves the window size and maximized state when the app closes, and
         // puts them back on the next start. On X11 it also restores the
@@ -1100,6 +1144,8 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
             // The plugin does not save or restore "visible", so this is the
             // only place that shows the window.
             show_main(app.handle());
+            // AIfred's own jobs run while the app runs, also in the tray.
+            scheduler::start(app.handle().clone());
             // Check for updates after the start, then on each interval.
             let update = app.state::<App>().update.clone();
             if update.program.is_some() {

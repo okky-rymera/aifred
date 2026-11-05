@@ -197,30 +197,19 @@ export function groupItems(items: Item[], today: string): Groups {
   return { now, today: todayList, isNew, soon, later, done };
 }
 
-// ---------- Quick add: one line gives a task with a day, a priority, and tags ----------
-
-export type Parsed =
-  | { ask: true; text: string; plan: boolean }
-  | { ask: false; title: string; due: string | null; priority: api.Priority | null; tags: string[] };
-
-// Words that start a question or a request to AIfred. Task verbs like
-// "review" or "find" are not here: "Review the contract" is a task.
-// "do", "is", "will" and the like are a question only before a word like
-// "I", "we", or "there": "Do I have meetings" asks, "Do the taxes" is a task.
-const QUESTION = new RegExp(
-  "^(" +
-    [
-      "what|how|why|when|which|who|where",
-      "(do|does|did) (i|you|we|they|it|there|anything|aifred)",
-      "(is|are|was|were|will|can|could|should|would) (i|you|we|they|it|there|this|that|my|our|the|anything|aifred)",
-      "brief me|summari[sz]e|tell me|explain|help me",
-    ].join("|") +
-    ")\\b",
-  "i",
-);
+// ---------- The home box ----------
 
 // A request to plan the day is the whole line: "Plan the day trip to Bali" is a task.
-const PLAN = /^plan (my |the )?(day|today|week)( for me)?( please)?[\s.!]*$/i;
+const PLAN = /^plan (my |the )?(day|today)( for me)?( please)?[\s.!]*$/i;
+
+/** True when the line asks to plan today: the home box opens the Day plan.
+ * All other lines go to AIfred, which answers or adds a task. */
+export function isPlanRequest(text: string): boolean {
+  return PLAN.test(text.trim());
+}
+
+/** A new task from one line, with no AI call (the "Add task" mode of the home box). */
+export type QuickTask = { title: string; due: string | null; priority: api.Priority | null; tags: string[] };
 
 /** The day of the next weekday `wd` (0 is Sunday) after today. */
 function nextWeekday(today: string, wd: number): string {
@@ -228,13 +217,11 @@ function nextWeekday(today: string, wd: number): string {
   return addDays(today, ((wd - d + 7) % 7) || 7);
 }
 
-/** Reads one line. A question goes to AIfred. Other text is a new task:
- * "pay rent friday high #home" is "Pay rent", due on Friday, high priority, tag "home". */
-export function parseQuick(text: string, today: string): Parsed | null {
+/** Reads one line as a new task: "pay rent friday high #home" is "Pay rent",
+ * due on Friday, high priority, tag "home". None for an empty line. */
+export function parseTask(text: string, today: string): QuickTask | null {
   const raw = text.trim();
   if (!raw) return null;
-  if (PLAN.test(raw)) return { ask: true, text: raw, plan: !/\bweek\b/i.test(raw) };
-  if (/\?\s*$/.test(raw) || QUESTION.test(raw)) return { ask: true, text: raw, plan: false };
   const tags: string[] = [];
   let title = raw.replace(/(^|\s)#([\p{L}\p{N}_-]+)/gu, (_, sp: string, g: string) => {
     tags.push(g);
@@ -274,7 +261,7 @@ export function parseQuick(text: string, today: string): Parsed | null {
   }
   title = title.replace(/\s{2,}/g, " ").replace(/[,\s]+$/, "").trim();
   title = title.charAt(0).toUpperCase() + title.slice(1);
-  return { ask: false, title: title || raw, due, priority, tags };
+  return { title: title || raw, due, priority, tags };
 }
 
 // ---------- The day plan on the work day ----------

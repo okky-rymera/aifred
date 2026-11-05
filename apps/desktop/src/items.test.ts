@@ -1,7 +1,7 @@
 // The item logic with no window: day labels, groups, the quick add, and the schedule.
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "./api";
-import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, parseQuick, schedule, shortDay, type Item } from "./items";
+import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, parseTask, schedule, shortDay, type Item } from "./items";
 import { clickupItem, githubItem, task } from "./test/fakeBackend";
 
 // Wednesday 4 November 2026.
@@ -19,45 +19,49 @@ describe("days", () => {
   });
 });
 
-describe("parseQuick", () => {
+describe("isPlanRequest", () => {
+  it("is only a whole line that asks to plan today", () => {
+    expect(isPlanRequest("Plan my day")).toBe(true);
+    expect(isPlanRequest("plan the day please.")).toBe(true);
+    expect(isPlanRequest("  plan today ")).toBe(true);
+    expect(isPlanRequest("Plan the day trip to Bali")).toBe(false);
+    expect(isPlanRequest("Plan my week")).toBe(false);
+    expect(isPlanRequest("what is due today?")).toBe(false);
+  });
+});
+
+describe("parseTask", () => {
   it("reads the day, the priority, and the tags of a new task", () => {
-    expect(parseQuick("pay rent friday high #home", TODAY)).toEqual({ ask: false, title: "Pay rent", due: "2026-11-06", priority: "high", tags: ["home"] });
-    expect(parseQuick("call Sam tomorrow", TODAY)).toMatchObject({ title: "Call Sam", due: "2026-11-05" });
-    expect(parseQuick("send report next week, urgent", TODAY)).toMatchObject({ title: "Send report", due: "2026-11-09", priority: "urgent" });
-    expect(parseQuick("renew passport due 2027-02-01", TODAY)).toMatchObject({ title: "Renew passport", due: "2027-02-01" });
+    expect(parseTask("pay rent friday high #home", TODAY)).toEqual({ title: "Pay rent", due: "2026-11-06", priority: "high", tags: ["home"] });
+    expect(parseTask("call Sam tomorrow", TODAY)).toMatchObject({ title: "Call Sam", due: "2026-11-05" });
+    expect(parseTask("send report next week, urgent", TODAY)).toMatchObject({ title: "Send report", due: "2026-11-09", priority: "urgent" });
+    expect(parseTask("renew passport due 2027-02-01", TODAY)).toMatchObject({ title: "Renew passport", due: "2027-02-01" });
     // The same weekday as today is next week, not today.
-    expect(parseQuick("water plants wednesday", TODAY)).toMatchObject({ due: "2026-11-11" });
+    expect(parseTask("water plants wednesday", TODAY)).toMatchObject({ due: "2026-11-11" });
   });
 
-  it("sends questions to AIfred, and keeps task verbs as tasks", () => {
-    expect(parseQuick("what is due today?", TODAY)).toEqual({ ask: true, text: "what is due today?", plan: false });
-    expect(parseQuick("Plan my day", TODAY)).toEqual({ ask: true, text: "Plan my day", plan: true });
-    expect(parseQuick("Review the contract", TODAY)).toMatchObject({ ask: false, title: "Review the contract" });
-    expect(parseQuick("Find a plumber", TODAY)).toMatchObject({ ask: false });
-    expect(parseQuick("   ", TODAY)).toBeNull();
-    expect(parseQuick("Do I have meetings today", TODAY)).toMatchObject({ ask: true });
-    expect(parseQuick("Is the build green", TODAY)).toMatchObject({ ask: true });
-    expect(parseQuick("Do the taxes friday", TODAY)).toMatchObject({ ask: false, title: "Do the taxes", due: "2026-11-06" });
-    expect(parseQuick("Plan the team offsite #work", TODAY)).toMatchObject({ ask: false, title: "Plan the team offsite", tags: ["work"] });
-    expect(parseQuick("Plan the day", TODAY)).toEqual({ ask: true, text: "Plan the day", plan: true });
-    expect(parseQuick("plan my day please.", TODAY)).toMatchObject({ ask: true, plan: true });
-    expect(parseQuick("Plan my week", TODAY)).toMatchObject({ ask: true, plan: false });
-    expect(parseQuick("Plan the day trip to Bali", TODAY)).toMatchObject({ ask: false, title: "Plan the day trip to Bali", due: null });
+  it("keeps the words of a task, and reads nothing from an empty line", () => {
+    expect(parseTask("Review the contract", TODAY)).toMatchObject({ title: "Review the contract" });
+    expect(parseTask("Find a plumber", TODAY)).toMatchObject({ title: "Find a plumber", due: null });
+    expect(parseTask("   ", TODAY)).toBeNull();
+    expect(parseTask("Do the taxes friday", TODAY)).toMatchObject({ title: "Do the taxes", due: "2026-11-06" });
+    expect(parseTask("Plan the team offsite #work", TODAY)).toMatchObject({ title: "Plan the team offsite", tags: ["work"] });
+    expect(parseTask("Plan the day trip to Bali", TODAY)).toMatchObject({ title: "Plan the day trip to Bali", due: null });
   });
 
   it("does not read a day inside another word", () => {
-    expect(parseQuick("Review today's PR", TODAY)).toMatchObject({ title: "Review today's PR", due: null });
-    expect(parseQuick("Prepare tomorrow’s slides", TODAY)).toMatchObject({ title: "Prepare tomorrow’s slides", due: null });
-    expect(parseQuick("Buy sun cream", TODAY)).toMatchObject({ title: "Buy sun cream", due: null });
-    expect(parseQuick("Sat exam prep", TODAY)).toMatchObject({ due: null });
-    expect(parseQuick("water plants on wed", TODAY)).toMatchObject({ title: "Water plants", due: "2026-11-11" });
-    expect(parseQuick("call mum fri", TODAY)).toMatchObject({ title: "Call mum", due: "2026-11-06" });
+    expect(parseTask("Review today's PR", TODAY)).toMatchObject({ title: "Review today's PR", due: null });
+    expect(parseTask("Prepare tomorrow’s slides", TODAY)).toMatchObject({ title: "Prepare tomorrow’s slides", due: null });
+    expect(parseTask("Buy sun cream", TODAY)).toMatchObject({ title: "Buy sun cream", due: null });
+    expect(parseTask("Sat exam prep", TODAY)).toMatchObject({ due: null });
+    expect(parseTask("water plants on wed", TODAY)).toMatchObject({ title: "Water plants", due: "2026-11-11" });
+    expect(parseTask("call mum fri", TODAY)).toMatchObject({ title: "Call mum", due: "2026-11-06" });
   });
 
   it("reads a priority word only at the end", () => {
-    expect(parseQuick("Review high-level design", TODAY)).toMatchObject({ title: "Review high-level design", priority: null });
-    expect(parseQuick("Fix low battery warning", TODAY)).toMatchObject({ title: "Fix low battery warning", priority: null });
-    expect(parseQuick("Fix the login, high priority", TODAY)).toMatchObject({ title: "Fix the login", priority: "high" });
+    expect(parseTask("Review high-level design", TODAY)).toMatchObject({ title: "Review high-level design", priority: null });
+    expect(parseTask("Fix low battery warning", TODAY)).toMatchObject({ title: "Fix low battery warning", priority: null });
+    expect(parseTask("Fix the login, high priority", TODAY)).toMatchObject({ title: "Fix the login", priority: "high" });
   });
 });
 

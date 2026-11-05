@@ -7,9 +7,11 @@
 //! - `memory`: the facts about the user and the old chats.
 //! - `github`: read-only GitHub search, with the user's `gh` login.
 //! - `clickup`: read-only ClickUp tasks, with the saved ClickUp token.
+//! - `jobs`: AIfred's own jobs (reminders and agent jobs).
 
 pub mod clickup;
 pub mod github;
+pub mod jobs;
 pub mod memory;
 pub mod tasks;
 
@@ -24,6 +26,7 @@ pub fn run(name: &str) -> anyhow::Result<()> {
             "memory" => memory::serve().await,
             "github" => github::serve().await,
             "clickup" => clickup::serve().await,
+            "jobs" => jobs::serve().await,
             _ => anyhow::bail!("unknown tool server: {name}"),
         }
     })

@@ -38,7 +38,9 @@ You are aifred, the user's personal assistant.
 - You can add tasks to the user's local to-do list, change them, and mark them done.
 - A local task can have a due day, a start day, a priority, tags, and a checklist. Set them only when the user gives them.
 - A task with a start day after today waits. Do not put it in the plan for today.
-- Add a task only when the user asks you to track, note, or remember to do something.
+- Add a task when the user asks you to track, note, or remember to do something.
+- A message that is only a short to-do line, with no question, is a new task for the user. Examples: \"pay rent friday high #home\", \"call Sam tomorrow\", \"review the contract\". Add it with add_task at once, with no lookups first. Take the due day, the priority (urgent, high, low), and the #tags from the words, and leave them out of the title. Then answer in one line, for example \"Added: Pay rent, due Fri 6 Nov, high priority, #home.\"
+- When the user attached files to a new task, give their ids (from the file note) in the files field of add_task.
 - GitHub is read-only. If the user asks for a change there, say what you would change.
 - ClickUp is read-only for you. The user marks ClickUp tasks done in the AIfred to-do list.
 - Search memory before you say that you do not know something about the user.
@@ -47,7 +49,14 @@ You are aifred, the user's personal assistant.
 - When the user asks what to do, what is open, or for a plan, call overview first. It has all open items with a short summary each. Open the details of an item only when its summary is not enough.
 - When the user asks about a topic, use search_tasks, search_my_items, or search_my_tasks.
 - When you name an item from the overview, link it to its key, for example [the PayPal bug](item:github:acme/shop#7). The app opens the item from this link. Give the web link too when the user may want it.
-- The day plan is the user's order of work for one day. Read it with day_plan. Change it with set_day_plan only when the user asks you to plan the day or to change the plan.";
+- The day plan is the user's order of work for one day. Read it with day_plan. Change it with set_day_plan only when the user asks you to plan the day or to change the plan.
+- You have your own job list, apart from the user's to-do list. A job is a reminder (a notification at a time) or an agent job (you run later with read-only tools and tell the user what you found).
+- When the user asks you to remind them at a time, or to check or do something later or again and again, use schedule_job. Use add_task only for work that the user must do.
+- Give job times in the user's local time. Work them out from [Now: ...]. When the user gives no time of day, use 09:00. After schedule_job, tell the user the `when` text and the first `next_runs` from the tool answer, so they can check the time.
+- When the user asks to change or stop a job, use list_jobs, then update_job or cancel_job. If more than one job matches, ask which one.";
+
+/// The model of a job run: careful enough to judge what matters, and fast.
+const JOB_MODEL: &str = "sonnet";
 
 /// Memory up to this size goes into the AI instructions in full. Above it,
 /// only the core facts go there, and each message gets the facts that match it.
@@ -77,6 +86,16 @@ You write a summary of a conversation between a user and AIfred, the user's pers
 - If there is an earlier summary, keep its points that still matter, and add the new points.
 - Write at most 250 words, as short bullet points in plain English.
 - Do not add facts that are not in the text. Write only the summary.";
+
+/// The instructions for a job run (jobs.rs), after the base rules.
+const JOB_RULES: &str = "\
+# This is a job run
+You run by yourself now, for one of your own jobs. The user does not see this run. They see only your answer, as a notification and in the job list.
+- You can only read. You cannot change tasks, the plan, memory, GitHub, or ClickUp. If a change is needed, say what to change.
+- Do what the job says. Use the tools to look up facts.
+- Answer with a short message for the user: at most 3 sentences, plain words, no greeting.
+- If nothing needs the user now, answer only NOTHING.
+- If the job has reached its goal and must not run again (for example, the pull request it watches is merged), start the answer with DONE: and then the message.";
 
 /// What the backend reported for one message.
 #[derive(Debug, Clone, Serialize)]
@@ -415,6 +434,12 @@ impl<B: Backend> Assistant<B> {
     /// The tool servers, or a notice when the AIfred program is missing.
     /// A missing program must not stop the whole chat.
     fn tool_servers(&self) -> (Vec<ToolServer>, Vec<String>) {
+        self.tool_servers_for(false)
+    }
+
+    /// The tool servers. `read_only`: only the tools that read, and no job
+    /// tools, for a job run that nobody watches (run_job).
+    fn tool_servers_for(&self, read_only: bool) -> (Vec<ToolServer>, Vec<String>) {
         if !self.program.is_file() {
             let notice = format!(
                 "The AI tools are off: the AIfred program {} is missing.",
@@ -447,26 +472,34 @@ impl<B: Backend> Assistant<B> {
             server(
                 "tasks",
                 home_with_owners(),
-                &[
-                    "overview",
-                    "list_tasks",
-                    "search_tasks",
-                    "add_task",
-                    "update_task",
-                    "complete_task",
-                    "day_plan",
-                    "set_day_plan",
-                ],
+                if read_only {
+                    &["overview", "list_tasks", "search_tasks", "day_plan"]
+                } else {
+                    &[
+                        "overview",
+                        "list_tasks",
+                        "search_tasks",
+                        "add_task",
+                        "update_task",
+                        "complete_task",
+                        "day_plan",
+                        "set_day_plan",
+                    ]
+                },
             ),
             server(
                 "memory",
                 home(),
-                &[
-                    "search_memory",
-                    "add_memory",
-                    "forget_memory",
-                    "search_history",
-                ],
+                if read_only {
+                    &["search_memory", "search_history"]
+                } else {
+                    &[
+                        "search_memory",
+                        "add_memory",
+                        "forget_memory",
+                        "search_history",
+                    ]
+                },
             ),
             // The server searches the saved GitHub list in the data folder.
             server(
@@ -489,6 +522,14 @@ impl<B: Backend> Assistant<B> {
                 "clickup",
                 home(),
                 &["my_tasks", "search_my_tasks", "task_details"],
+            ));
+        }
+        // A job run cannot make or change jobs: a job must not make more jobs.
+        if !read_only {
+            servers.push(server(
+                "jobs",
+                home(),
+                &["schedule_job", "list_jobs", "update_job", "cancel_job", "job_runs"],
             ));
         }
         (servers, vec![])
@@ -759,9 +800,51 @@ impl<B: Backend> Assistant<B> {
         Ok(answer)
     }
 
+    /// Runs an agent job (jobs.rs) with read-only tools. `planned` is the
+    /// planned time of the run, in Unix seconds. It gives the answer and the cost.
+    pub async fn run_job(&self, job: &crate::jobs::Job, planned: i64) -> anyhow::Result<(String, Option<f64>)> {
+        let (system, facts_small) = self
+            .off_thread(|dir| {
+                let small = memory_is_small(dir)?;
+                Ok((system_prompt(dir, small)?, small))
+            })
+            .await?;
+        let (tools, missing) = self.tool_servers_for(true);
+        if let Some(m) = missing.first() {
+            anyhow::bail!("{m}");
+        }
+        let facts = self
+            .matching_facts(&job.message, facts_small)
+            .await
+            .unwrap_or_default();
+        let text = format!(
+            "[Job: {}. Trigger: {}. Planned for {}. The job says:]\n{}",
+            job.title,
+            job.when,
+            crate::jobs::show(planned, &job.tz),
+            job.message
+        );
+        let req = AskRequest {
+            system: format!("{system}\n\n{JOB_RULES}"),
+            history: vec![],
+            summary: None,
+            prompt: Self::message(&Self::now(), &facts, &text),
+            tools,
+            session: None,
+            model: Some(JOB_MODEL.into()),
+            files: vec![],
+            // No saved session, and its own folder.
+            side: true,
+        };
+        let res = self.backend.ask(&req, &mut |_| {}).await?;
+        Ok((res.text, res.stats.cost_usd))
+    }
+
     /// Writes the brief of `day` (brief.rs) in one AI call, and saves it with
     /// the time guesses for the open items that have none.
     pub async fn write_brief(&self, day: &str) -> anyhow::Result<crate::brief::Brief> {
+        // Before the read: a change after this time can be missing from the brief.
+        let read_at = crate::files::now();
         let d = day.to_string();
         let (prompt, known) = self
             .off_thread(move |dir| {
@@ -791,7 +874,7 @@ impl<B: Backend> Assistant<B> {
         let (text, why, minutes) = crate::brief::parse(&answer, &known)?;
         let brief = crate::brief::Brief {
             day: day.into(),
-            written: crate::files::now(),
+            written: read_at,
             text,
             why,
         };
@@ -1240,7 +1323,7 @@ mod tests {
             .map(|s| s.name.as_str())
             .filter(|n| *n != "clickup")
             .collect();
-        assert_eq!(names, ["tasks", "memory", "github"]);
+        assert_eq!(names, ["tasks", "memory", "github", "jobs"]);
         let tasks = &servers[0];
         assert_eq!(tasks.command, dir.join("aifred"));
         assert_eq!(tasks.args, ["tool", "tasks"]);
@@ -1252,6 +1335,24 @@ mod tests {
             servers[1].env,
             vec![("AIFRED_HOME".to_string(), a.dir.display().to_string())]
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_job_run_gets_only_tools_that_read() {
+        let dir = temp("job-tools");
+        std::fs::write(dir.join("aifred"), "").unwrap();
+        let a = assistant(dir.clone(), dir.join("aifred"));
+        let (servers, _) = a.tool_servers_for(true);
+        assert!(servers.iter().all(|s| s.name != "jobs"), "a job must not make jobs");
+        let tools: Vec<&str> = servers
+            .iter()
+            .flat_map(|s| s.allowed_tools.iter().map(String::as_str))
+            .collect();
+        for write in ["add_task", "update_task", "complete_task", "set_day_plan", "add_memory", "forget_memory"] {
+            assert!(!tools.contains(&write), "{write} must not be in a job run");
+        }
+        assert!(tools.contains(&"overview") && tools.contains(&"search_memory"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

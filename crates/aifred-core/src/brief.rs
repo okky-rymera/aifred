@@ -37,7 +37,8 @@ Answer with only a JSON object: {\"text\": \"...\", \"why\": {\"<key>\": \"...\"
 pub struct Brief {
     /// "YYYY-MM-DD".
     pub day: String,
-    /// When AIfred wrote it, in Unix seconds.
+    /// When AIfred read the tasks and items for it, in Unix seconds. A change
+    /// after this time can be missing from the brief.
     pub written: u64,
     /// Markdown. Links to "item:<key>" name items.
     pub text: String,

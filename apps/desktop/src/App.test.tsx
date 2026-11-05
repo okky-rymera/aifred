@@ -6,12 +6,14 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { DEFAULT_SETTINGS, type Answer } from "./api";
 import { addDays, dayOf } from "./items";
-import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, task } from "./test/fakeBackend";
+import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, task } from "./test/fakeBackend";
 
 // The panel stays in the page, hidden, behind the task tab. A role query skips a hidden element.
 const panel = () => document.querySelector<HTMLElement>('aside[aria-label="Conversation"]');
 const details = () => screen.getByRole("dialog", { name: "Task details" });
 const homeBox = () => screen.getByRole("textbox", { name: "Add a task or ask AIfred" });
+/** The frame of the home box, with its buttons. */
+const homeForm = () => homeBox().closest(".composer") as HTMLElement;
 const today = () => dayOf(new Date());
 
 /** Starts the window. The brief does not write itself, unless the test sets auto_brief. */
@@ -109,39 +111,107 @@ describe("home", () => {
 });
 
 describe("the home box", () => {
-  it("adds a task with a day, a priority, and tags from one line, with an undo", async () => {
+  it("sends a to-do line to AIfred, which adds the task", async () => {
+    const fake = await startApp({
+      onAsk: (p) => {
+        // AIfred adds the task with its add_task tool while it answers.
+        fake.tasks.push(task("Pay rent", { due: addDays(today(), 1), priority: "high", tags: ["home"] }));
+        return answer(`Added: Pay rent (${p})`);
+      },
+    });
+    await userEvent.type(homeBox(), "pay rent tomorrow high #home{Enter}");
+    expect(await within(panel()!).findByText("Added: Pay rent (pay rent tomorrow high #home)")).toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "add_task"), "the window adds no task itself").toBe(false);
+    // The list loads again after the answer, so the new task shows.
+    expect(await screen.findByText("Pay rent")).toBeInTheDocument();
+    expect(homeBox()).toHaveValue("");
+  });
+
+  it("Tab switches to Add task: the line is a task at once, with no AI call, and with an undo", async () => {
     const fake = await startApp();
-    await userEvent.type(homeBox(), "pay rent tomorrow high #home");
+    await userEvent.click(homeBox());
+    expect(screen.getByRole("button", { name: "Ask AIfred" })).toBeInTheDocument();
+    await userEvent.keyboard("{Tab}");
+    expect(homeBox()).toHaveFocus();
     expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
+    // A new task uses no model: no model picker, a green box, and plain words.
+    expect(within(homeForm()).queryByRole("combobox")).not.toBeInTheDocument();
+    expect(homeForm()).toHaveClass("task");
+    expect(homeBox()).toHaveAttribute("placeholder", "Add a task");
+    await userEvent.keyboard("pay rent tomorrow high #home");
     expect(screen.getByText("Pay rent", { selector: "b" })).toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
     expect(await screen.findByText("Added: Pay rent")).toBeInTheDocument();
     expect(fake.tasks.map((t) => [t.title, t.due, t.priority, t.tags])).toEqual([["Pay rent", addDays(today(), 1), "high", ["home"]]]);
+    expect(fake.calls.some((c) => c.cmd === "ask")).toBe(false);
     expect(homeBox()).toHaveValue("");
     await userEvent.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(fake.tasks).toEqual([]));
+    // Tab again: back to Ask AIfred.
+    await userEvent.click(homeBox());
+    await userEvent.keyboard("{Tab}");
+    expect(screen.getByRole("button", { name: "Ask AIfred" })).toBeInTheDocument();
+    expect(within(homeForm()).getByRole("combobox")).toBeInTheDocument();
+    expect(homeForm()).not.toHaveClass("task");
+    expect(homeBox()).toHaveAttribute("placeholder", "Ask AIfred");
+  });
+
+  it("the chip also switches the mode, the mode stays on other pages, and Shift+Tab leaves the box", async () => {
+    await startApp();
+    await userEvent.click(screen.getByRole("button", { name: "Ask AIfred" }));
+    expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "AIfred's jobs" }));
+    await userEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
+    await userEvent.click(homeBox());
+    await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(homeBox()).not.toHaveFocus();
+    expect(screen.getByRole("button", { name: "Add task" }), "Shift+Tab does not switch").toBeInTheDocument();
+    // Esc, then Tab: the focus moves forward, and the mode stays.
+    await userEvent.click(homeBox());
+    await userEvent.keyboard("{Escape}{Tab}");
+    expect(homeBox()).not.toHaveFocus();
+    expect(screen.getByRole("button", { name: "Add task" }), "Tab after Esc does not switch").toBeInTheDocument();
+  });
+
+  it("a task can be added while AIfred answers", async () => {
+    const hold = deferred<Answer>();
+    const fake = await startApp({ onAsk: () => hold.promise });
+    await userEvent.type(homeBox(), "what is due?{Enter}");
+    await userEvent.click(homeBox());
+    await userEvent.keyboard("{Tab}call Sam{Enter}");
+    await waitFor(() => expect(fake.tasks.map((t) => t.title)).toEqual(["Call Sam"]));
+    hold.resolve(answer("Nothing."));
+  });
+
+  it("a file on a new task stays on the task", async () => {
+    const fake = await startApp({ uploadName: "receipt.pdf" });
+    await userEvent.upload(screen.getAllByLabelText("Attach files")[0], new File(["%PDF"], "receipt.pdf"));
+    await screen.findByText("receipt.pdf");
+    await userEvent.click(homeBox());
+    await userEvent.keyboard("{Tab}file the receipt{Enter}");
+    await waitFor(() => expect(fake.tasks[0]?.files.map((f) => f.name)).toEqual(["receipt.pdf"]));
+  });
+
+  it("plan my day opens the Day plan", async () => {
+    const fake = await startApp();
+    await userEvent.type(homeBox(), "Plan my day");
+    expect(screen.getByText("Opens Day plan")).toBeInTheDocument();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(fake.calls.some((c) => c.cmd === "ask_side")).toBe(true));
+    // Back on Home, the box is empty.
+    await userEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(homeBox()).toHaveValue("");
   });
 
   it("sends a question to AIfred and opens the conversation on the right", async () => {
     const fake = await startApp({ tasks: [task("Call Sam")], onAsk: (p) => answer(`Answer to: ${p}`) });
-    await userEvent.type(homeBox(), "what is due today?");
-    expect(screen.getByRole("button", { name: "Ask AIfred" })).toBeInTheDocument();
-    await userEvent.keyboard("{Enter}");
+    await userEvent.type(homeBox(), "what is due today?{Enter}");
     const side = panel()!;
     expect(await within(side).findByText("Answer to: what is due today?")).toBeInTheDocument();
     expect(within(side).getByText("what is due today?")).toBeInTheDocument();
     expect(screen.getByText("Call Sam")).toBeInTheDocument();
     expect(fake.calls.find((c) => c.cmd === "ask")!.args).toMatchObject({ prompt: "what is due today?", model: "default", files: [] });
-  });
-
-  it("the chip changes a question into a task", async () => {
-    const fake = await startApp();
-    await userEvent.type(homeBox(), "Can I renew the passport online");
-    await userEvent.click(screen.getByRole("button", { name: "Ask AIfred" }));
-    expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
-    await userEvent.type(homeBox(), "{Enter}");
-    await waitFor(() => expect(fake.tasks.map((t) => t.title)).toEqual(["Can I renew the passport online"]));
-    expect(fake.calls.some((c) => c.cmd === "ask")).toBe(false);
   });
 
   it("Shift+Enter makes a new line and does not send", async () => {
@@ -162,15 +232,15 @@ describe("the home box", () => {
     expect(within(panel()!).getByText("notes.txt")).toBeInTheDocument();
   });
 
-  it("a file on a new task stays on the task", async () => {
+  it("a file sent with a to-do line goes to AIfred with the line", async () => {
     const fake = await startApp({ uploadName: "receipt.pdf" });
     await userEvent.upload(screen.getAllByLabelText("Attach files")[0], new File(["%PDF"], "receipt.pdf"));
     await screen.findByText("receipt.pdf");
     await userEvent.type(homeBox(), "file the receipt{Enter}");
-    await waitFor(() => expect(fake.tasks[0]?.files.map((f) => f.name)).toEqual(["receipt.pdf"]));
-    await openItem("File the receipt");
-    expect(within(details()).getByRole("button", { name: /Open receipt.pdf/ })).toBeInTheDocument();
+    await within(panel()!).findByText(/You said/);
+    expect(fake.calls.find((c) => c.cmd === "ask")!.args).toMatchObject({ prompt: "file the receipt", files: [fake.uploads[0].id] });
   });
+
 });
 
 describe("the conversation", () => {
@@ -585,6 +655,70 @@ describe("memory page", () => {
     await userEvent.type(screen.getByPlaceholderText("Add a fact and press Enter"), "Note{Enter}");
     expect(await screen.findByText("Not saved: database is locked")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Add a fact and press Enter")).toHaveValue("Note");
+  });
+});
+
+describe("AIfred's jobs page", () => {
+  const openJobs = () => userEvent.click(screen.getByRole("button", { name: "AIfred's jobs" }));
+
+  it("shows the jobs and the latest runs, and pauses and deletes a job", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const fake = await startApp({
+      jobs: [
+        job("j1", "Timesheet reminder"),
+        job("j2", "Watch PR #123", { action: "agent", message: "Tell me when PR #123 is merged.", status: "done", can_start: false }),
+        job("j3", "Daily check", { action: "agent", status: "off" }),
+      ],
+      jobRuns: [
+        { id: 2, job: "j2", planned: now - 60, started: now - 60, finished: now - 50, state: "ok", late: true, note: "", output: "PR #123 is merged.", cost_usd: 0.02 },
+        { id: 1, job: "j1", planned: now - 99, started: null, finished: null, state: "skipped", late: false, note: "AIfred was not running at this time.", output: "", cost_usd: null },
+      ],
+    });
+    await openJobs();
+    expect(await screen.findByText("Timesheet reminder")).toBeInTheDocument();
+    expect(screen.getByText(/Every Monday at 09:00/)).toBeInTheDocument();
+    // A job that ended waits under "Ended". Its run shows with its answer.
+    expect(screen.queryByRole("button", { name: "Start: Watch PR #123" })).not.toBeInTheDocument();
+    expect(screen.getByText("PR #123 is merged.")).toBeInTheDocument();
+    expect(screen.getByText(/late, planned/)).toBeInTheDocument();
+    expect(screen.queryByText("AIfred was not running at this time."), "skipped runs are hidden").not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Ended (2)" }));
+    // A job with no more times has no Start: it needs a new time first.
+    expect(screen.queryByRole("button", { name: "Start: Watch PR #123" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start: Daily check" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Pause: Timesheet reminder" }));
+    await waitFor(() => expect(fake.jobs[0].status).toBe("paused"));
+    expect(await screen.findByRole("button", { name: "Start: Timesheet reminder" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Delete: Timesheet reminder" }));
+    await waitFor(() => expect(screen.queryByText("Timesheet reminder")).not.toBeInTheDocument());
+    expect(fake.jobs.map((j) => j.id)).toEqual(["j2", "j3"]);
+  });
+
+  it("says when there are no jobs", async () => {
+    await startApp();
+    await openJobs();
+    expect(await screen.findByText("AIfred has no jobs now.")).toBeInTheDocument();
+  });
+
+  it("a load error goes away when the next load works", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fake = await startApp({ fail: { jobs: "database is locked" } });
+      await openJobs();
+      expect(await screen.findByText("Cannot load the jobs: database is locked")).toBeInTheDocument();
+      delete fake.fail.jobs;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => expect(screen.queryByText(/Cannot load the jobs/)).not.toBeInTheDocument());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows why the jobs cannot load", async () => {
+    await startApp({ fail: { jobs: "database is locked" } });
+    await openJobs();
+    expect(await screen.findByText("Cannot load the jobs: database is locked")).toBeInTheDocument();
   });
 });
 

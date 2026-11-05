@@ -130,9 +130,10 @@ pub fn note(files: &[(FileRef, PathBuf)]) -> String {
     let mut s = String::from("[The user attached these files. Read them with the Read tool:\n");
     for (f, p) in files {
         s.push_str(&format!(
-            "- {} ({} bytes): {}\n",
+            "- {} ({} bytes, id {}): {}\n",
             f.name,
             f.size,
+            f.id,
             p.display()
         ));
     }

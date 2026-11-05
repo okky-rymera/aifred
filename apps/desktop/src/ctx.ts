@@ -47,6 +47,9 @@ export type AppCtx = {
 
   toggleDone: (i: Item) => void;
   addTask: (fields: api.TaskChanges & { title: string }) => Promise<boolean>;
+  /** The mode of the home box: a message to AIfred, or a new task with no AI call. */
+  homeMode: "ask" | "task";
+  setHomeMode: (m: "ask" | "task") => void;
   editTask: (id: string, changes: api.TaskChanges) => Promise<boolean>;
   tickStep: (id: string, index: number) => void;
   deleteTask: (i: Item) => void;

@@ -16,6 +16,11 @@
 # - It uses a free web port (1430 or higher). Your copy uses 1420.
 # - It does not read or write the saved window size (AIFRED_NO_WINDOW_STATE).
 # - It uses a temporary copy of your data folder, which is deleted at the end.
+# - It uses its own message bus (dbus-run-session), so its notifications do
+#   not show on your desktop.
+#
+# AIFRED_HOLD_SECONDS: keep the app running this many more seconds after it
+# shows, for example to let AIfred's jobs run. Default: 0.
 set -euo pipefail
 
 MAX_SECONDS="${1:-300}"
@@ -72,6 +77,11 @@ PORT=1430
 while [ -n "$(ss -Hltn "sport = :$PORT")" ]; do PORT=$((PORT + 1)); done
 CONFIG="{\"build\":{\"devUrl\":\"http://localhost:$PORT\",\"beforeDevCommand\":\"npm run dev -- --port $PORT\"}}"
 
+# A private message bus when the tool is there. Without it, notifications
+# from the hidden copy show on your desktop.
+BUS=""
+command -v dbus-run-session >/dev/null && BUS="dbus-run-session --"
+
 # Start the app in its own process group. The inner shell writes its PID,
 # which is the group ID, and then becomes tauri. Remove every link to the
 # real screen, so GTK uses the hidden X screen.
@@ -81,7 +91,7 @@ setsid bash -c 'echo $$ >"$1"; shift; exec "$@"' _ "$WORK/pgid" \
   DISPLAY="$DISP" GDK_BACKEND=x11 \
   WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 \
   AIFRED_HOME="$WORK/data" AIFRED_NO_WINDOW_STATE=1 \
-  npx tauri dev --config "$CONFIG" >"$LOG" 2>&1 &
+  $BUS npx tauri dev --config "$CONFIG" >"$LOG" 2>&1 &
 for _ in $(seq 1 50); do
   [ -s "$WORK/pgid" ] && break
   sleep 0.1
@@ -120,6 +130,16 @@ if [ -z "$shown" ]; then
 fi
 
 sleep "$SETTLE"
+HOLD="${AIFRED_HOLD_SECONDS:-0}"
+if [ "$HOLD" -gt 0 ]; then
+  echo "Holding the app for $HOLD more seconds."
+  sleep "$HOLD"
+  # AIFRED_KEEP_DB: save a copy of the database here (it needs sqlite3).
+  if [ -n "${AIFRED_KEEP_DB:-}" ]; then
+    sqlite3 "$WORK/data/aifred.db" ".backup '$AIFRED_KEEP_DB'" && echo "Copied the database to $AIFRED_KEEP_DB"
+  fi
+  grep -i "aifred:" "$LOG" | tail -20 || true
+fi
 echo "The app is shown on the hidden screen $DISP (web port $PORT)."
 if [ -n "$SHOT" ]; then
   magick import -display "$DISP" -window root "$SHOT"

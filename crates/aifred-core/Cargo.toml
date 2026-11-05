@@ -16,6 +16,9 @@ serde_json = "1.0.154"
 # Before 1.0: pinned. Vectors can be made again from the text.
 sqlite-vec = "=0.1.9"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "net"] }
+rrule = "0.14"
+iana-time-zone = "0.1"
+chrono-tz = "0.10"
 
 [dev-dependencies]
 # The tests run the meaning search helper in a thread (embed.rs).

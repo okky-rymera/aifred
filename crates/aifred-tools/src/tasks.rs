@@ -54,6 +54,8 @@ struct AddArgs {
     tags: Option<Vec<String>>,
     /// The steps of the task, one text for each step. Example: ["Pick dates", "Pay"].
     checklist: Option<Vec<String>>,
+    /// Ids of files that the user attached to this message, to keep on the task. The ids are in the file note of the message.
+    files: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -252,7 +254,7 @@ impl TaskTools {
                     })
                     .collect()
             }),
-            files: None,
+            files: a.files,
         };
         json(&self.store().create(fields, "aifred").map_err(fail)?)
     }
@@ -369,6 +371,7 @@ mod tests {
             priority: None,
             tags: None,
             checklist: None,
+            files: None,
         }
     }
 

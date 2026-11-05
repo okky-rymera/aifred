@@ -6,11 +6,12 @@ import { Ctx, useApp, type AppCtx, type ChatState, type ListState } from "./ctx"
 import { Detail } from "./Detail";
 import { Home } from "./Home";
 import { addDays, buildItems, dayOf, schedule, type Item } from "./items";
+import { JobsPage } from "./Jobs";
 import { MemoryList } from "./Memory";
 import { PlanChat, PlanView } from "./Plan";
 import { RestartButton, SettingsPage } from "./Settings";
 
-type Page = "home" | "plan" | "memory" | "settings";
+type Page = "home" | "plan" | "memory" | "jobs" | "settings";
 type Toast = { text: string; undo?: () => void; error?: boolean };
 /** A task that was just closed in ClickUp. The window keeps each one with
  * its own undo: a second close must not lose the undo of the first. */
@@ -84,6 +85,8 @@ export default function App() {
   const [brief, setBrief] = useState<api.Brief | null>(null);
   const [briefLoaded, setBriefLoaded] = useState("");
   const [briefState, setBriefState] = useState("idle");
+  // The mode of the home box stays when you go to another page.
+  const [homeMode, setHomeMode] = useState<"ask" | "task">("ask");
   const [plan, setPlan] = useState<api.DayPlan | null>(null);
   // The day whose plan is loaded. Until today's plan loads, a change must
   // not save: it would use the plan of the day before.
@@ -255,6 +258,19 @@ export default function App() {
       live = false;
     };
   }, [today]);
+
+  // AIfred's jobs can write the brief in the background (for example when you
+  // finish a task). Check for a newer brief each minute.
+  useEffect(() => {
+    if (briefState === "writing") return;
+    const timer = setInterval(() => {
+      api
+        .brief(today)
+        .then((b) => b && setBrief((old) => (old && old.written >= b.written && old.day === b.day ? old : b)))
+        .catch(() => {});
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [today, briefState]);
 
   // Reload the GitHub and ClickUp lists on the timer from the settings. 0 means never.
   const refreshMinutes = settings?.refresh_minutes ?? 0;
@@ -835,6 +851,8 @@ export default function App() {
     setModel: pickModel,
     toggleDone,
     addTask,
+    homeMode,
+    setHomeMode,
     editTask,
     tickStep,
     deleteTask,
@@ -921,6 +939,7 @@ export default function App() {
             {rail("plan", ICON.cal, "Day plan", goPlan, onPlan)}
             {rail("chat", ICON.chat, "Conversation", ctx.openMain, page === "home" && mainOpen)}
             {rail("memory", ICON.mem, "What AIfred knows about you", () => (setPage("memory"), setSel(null)), page === "memory")}
+            {rail("jobs", ICON.clock, "AIfred's jobs", () => (setPage("jobs"), setSel(null)), page === "jobs")}
             <span className="sp" />
             {rail("settings", ICON.gear, "Settings", () => (setPage("settings"), setSel(null)), page === "settings", update?.state === "ready")}
           </nav>
@@ -955,6 +974,13 @@ export default function App() {
                   onUpdateChanged={setUpdate}
                   busy={anyBusy}
                 />
+              </div>
+            </div>
+          )}
+          {page === "jobs" && (
+            <div className="scroll page-main page">
+              <div className="page-inner">
+                <JobsPage />
               </div>
             </div>
           )}
