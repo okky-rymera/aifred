@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { Composer, Files, Md, Messages } from "./Chat";
 import { useApp } from "./ctx";
-import { SRC_NAME, dueInfo, fmtTime, shortDay, type Item } from "./items";
+import { SRC_NAME, dayOfSecs, dueInfo, fmtTime, shortDay, type Item } from "./items";
 import { Minutes } from "./Plan";
 import { PriPill } from "./Home";
 
@@ -234,7 +234,7 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
           <div className="d-status">
             {i.src !== "gh" ? (
               <button className={`statusbtn${i.done ? " isdone" : ""}`} onClick={() => toggleDone(i)}>
-                {i.done ? "✓ Finished" : i.src === "cu" ? "Close in ClickUp" : "Mark as finished"}
+                {i.done ? "✓ Finished" : i.src === "cu" ? "Close in ClickUp" : i.src === "gm" ? "No answer needed" : "Mark as finished"}
               </button>
             ) : (
               <span className="hintx">GitHub is read-only. The item leaves the list when it closes there.</span>
@@ -255,8 +255,20 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
             <LocalFields item={i} />
           ) : (
             <>
-              <dt>Due</dt>
-              <dd className="ro">{i.due ? `${shortDay(i.due, today)} · ${dueInfo(i.due, today).text}` : "No due day"}</dd>
+              {i.mail ? (
+                <>
+                  <dt>Waits since</dt>
+                  <dd className="ro">
+                    {dayOfSecs(i.mail.since, today)} · {i.mail.messages} message{i.mail.messages > 1 ? "s" : ""}
+                    {i.mail.direct ? "" : " · you are in Cc"}
+                  </dd>
+                </>
+              ) : (
+                <>
+                  <dt>Due</dt>
+                  <dd className="ro">{i.due ? `${shortDay(i.due, today)} · ${dueInfo(i.due, today).text}` : "No due day"}</dd>
+                </>
+              )}
               {i.cu && (
                 <>
                   <dt>Status</dt>

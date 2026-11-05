@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 11;
+const VERSION: i64 = 13;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -454,6 +454,39 @@ CREATE TABLE goal (
 ALTER TABLE brief ADD COLUMN goal TEXT NOT NULL DEFAULT '{}'; -- {\"<item key>\": <goal id>}
 ";
 
+/// The "waiting for" list (waiting.rs), and the email threads that the
+/// user hid (gmail.rs).
+const SCHEMA_12: &str = "
+CREATE TABLE waiting (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  what      TEXT NOT NULL,
+  who       TEXT NOT NULL,
+  since     TEXT NOT NULL,              -- YYYY-MM-DD
+  follow_up TEXT,                       -- YYYY-MM-DD: tell the user on this day when there is no answer
+  told      INTEGER NOT NULL DEFAULT 0, -- 1 after the notification of follow_up
+  thread    TEXT,                       -- the Gmail thread, when the item came from an email
+  sent_at   INTEGER,                    -- the user's email in the thread, Unix seconds
+  url       TEXT,
+  done      INTEGER NOT NULL DEFAULT 0,
+  done_why  TEXT NOT NULL DEFAULT '',
+  created   INTEGER NOT NULL,
+  updated   INTEGER NOT NULL
+);
+CREATE INDEX waiting_by_thread ON waiting(thread);
+
+-- A hidden thread stays hidden until a message newer than last_at comes.
+CREATE TABLE mail_hidden (
+  thread    TEXT PRIMARY KEY,
+  last_at   INTEGER NOT NULL,
+  hidden_at INTEGER NOT NULL
+);
+";
+
+/// The people that an email item waits for.
+const SCHEMA_13: &str = "
+ALTER TABLE waiting ADD COLUMN wait_for TEXT NOT NULL DEFAULT ''; -- ,ana@x.com,bo@y.com, or '': anyone
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -557,6 +590,12 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 11 {
         tx.execute_batch(SCHEMA_11)?;
+    }
+    if version < 12 {
+        tx.execute_batch(SCHEMA_12)?;
+    }
+    if version < 13 {
+        tx.execute_batch(SCHEMA_13)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

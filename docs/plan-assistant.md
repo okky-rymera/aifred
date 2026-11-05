@@ -58,11 +58,17 @@ Done: AIfred reads the primary calendar for the next 7 days through its own Goog
 
 Why: email is one of the largest sources of tasks. Superhuman and Copilot find threads with no reply ([Superhuman](https://help.superhuman.com/hc/en-us/articles/45270478397203-Reminders-on-Autopilot), [Thurrott](https://www.thurrott.com/cloud/335438/copilot-in-outlook-can-now-proactively-manage-your-inbox-and-calendar)).
 
-- [ ] Find emails that wait for the user's reply.
-- [ ] Find emails where the user waits for a reply from another person.
-- [ ] Add a "waiting for" list: the item, the person, and the date.
-- [ ] Follow-up jobs: "tell me if Ana has not replied by Friday" (step 2 in `docs/research-agent-jobs.md`).
+- [x] Find emails that wait for the user's reply.
+- [x] Find emails where the user waits for a reply from another person.
+- [x] Add a "waiting for" list: the item, the person, and the date.
+- [x] Follow-up jobs: "tell me if Ana has not replied by Friday" (step 2 in `docs/research-agent-jobs.md`).
 - [ ] Later: Slack mentions and meeting next steps.
+
+Done: AIfred reads the last 14 days of Gmail through the same Google connection, with read-only access (`crates/aifred-core/src/gmail.rs`). It reads only the headers and Google's short preview. Emails that wait for the user's answer are items with the key `gmail:<thread>`, so the brief and the plan rank them. Emails that the user sent with no answer are suggestions for the "waiting for" list (`crates/aifred-core/src/waiting.rs`). An email item closes when the person answers. A check day sends a notification with no AI call. It is not a general job: the scheduler checks the list on each tick. Not done yet:
+- Check with real use that the rules find the right emails (people, not machines; not too many).
+- The rules see only the headers and the preview. An email that says "no need to answer" still counts.
+- Only the newest 100 inbox threads and 50 sent threads of the last 14 days.
+- The user must connect Google again once to allow Gmail.
 
 ### 4. Learn from the user's corrections
 

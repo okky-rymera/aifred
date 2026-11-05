@@ -60,6 +60,9 @@ const pickArg = (m: string | null) => m ?? "default";
 /** A message with files and no text asks AIfred to look at the files. */
 const withFiles = (text: string, files: unknown[]) => (text.trim() || !files.length ? text : "Look at these files.");
 
+/** Puts an email back in its list, newest first (for Undo). */
+const putBack = (list: api.Mail[], m: api.Mail) => [m, ...list.filter((x) => x.id !== m.id)].sort((a, b) => b.last_at - a.last_at);
+
 const turnMsgs = (turns: (api.Turn | api.SideTurn)[]): ChatMsg[] =>
   turns.map((t) => ({ role: t.role, text: t.text, files: t.files, info: "info" in t ? t.info : undefined }));
 
@@ -78,6 +81,10 @@ export default function App() {
   const [clickupState, setClickupState] = useState<ListState>("loading");
   const [calendar, setCalendar] = useState<api.CalendarList>({ events: [], fetched_at: 0 });
   const [calendarState, setCalendarState] = useState<ListState>("loading");
+  const [mail, setMail] = useState<api.MailList>({ reply: [], sent: [], fetched_at: 0 });
+  const [mailState, setMailState] = useState<ListState>("loading");
+  const [waiting, setWaiting] = useState<api.Waiting[]>([]);
+  const [waitingError, setWaitingError] = useState("");
   const [clickupToken, setClickupToken] = useState<api.ClickupTokenStatus | null>(null);
   const [settings, setSettings] = useState<api.Settings | null>(null);
   const [update, setUpdate] = useState<api.UpdateStatus | null>(null);
@@ -120,6 +127,9 @@ export default function App() {
   const [closed, setClosed] = useState<Closed[]>([]);
   /** The ClickUp tasks that are closing now. A second click on one does nothing. */
   const closing = useRef(new Set<string>());
+  // The email threads that are on their way to hidden or to the "waiting for"
+  // list. A double click (or Hide and Track together) changes a thread once.
+  const mailBusy = useRef(new Set<string>());
   const [sideW, setSideW] = useState<number | null>(() => {
     const w = Number(stored("aifred-side-w"));
     return w >= 300 ? w : null;
@@ -181,6 +191,59 @@ export default function App() {
       })
       .catch((e) => n === calendarLoad.current && setCalendarState(String(e)));
   }, []);
+
+  // A change on the screen (close, add, delete) adds 1 to an "edits"
+  // counter. A load that started before the change can bring the list from
+  // before it. Then the load does not show its answer: it asks again.
+  const waitingLoad = useRef(0);
+  const waitingEdits = useRef(0);
+  const loadWaiting = useCallback(() => {
+    const go = () => {
+      const n = ++waitingLoad.current;
+      const edits = waitingEdits.current;
+      api
+        .waitingItems()
+        .then((l) => {
+          if (n !== waitingLoad.current) return;
+          if (edits !== waitingEdits.current) return go();
+          setWaiting(l);
+          setWaitingError("");
+        })
+        .catch((e) => n === waitingLoad.current && setWaitingError(String(e)));
+    };
+    go();
+  }, []);
+
+  const mailLoad = useRef(0);
+  const mailEdits = useRef(0);
+  /**
+   * true or false: the "force" of a load. "saved": the saved list at any age, with no download.
+   * "timer": a download that keeps the shown list on screen while it runs. Gmail can be slow.
+   */
+  const loadMail = useCallback(
+    (how: boolean | "saved" | "timer") => {
+      const go = (how: boolean | "saved" | "timer") => {
+        const n = ++mailLoad.current;
+        const edits = mailEdits.current;
+        if (how === true || how === false) setMailState("loading");
+        (how === "saved" ? api.gmailSaved() : api.gmailThreads(how !== false))
+          .then((list) => {
+            if (n !== mailLoad.current) return;
+            // A hide or a track during the load: the saved list has the change.
+            if (edits !== mailEdits.current) return go("saved");
+            // null: Gmail is not connected. Then there are no emails, and no error.
+            setMail(list ?? { reply: [], sent: [], fetched_at: 0 });
+            setMailState(list ? "ok" : "off");
+            loadMeta();
+            // A download closes the "waiting for" items whose person answered.
+            loadWaiting();
+          })
+          .catch((e) => n === mailLoad.current && setMailState(String(e)));
+      };
+      go(how);
+    },
+    [loadMeta, loadWaiting],
+  );
 
   const loadClickup = useCallback(
     (force: boolean, connected: boolean) => {
@@ -245,8 +308,10 @@ export default function App() {
     loadMeta();
     loadGithub(false);
     loadCalendar(false);
+    loadMail(false);
+    loadWaiting();
     checkClickup(false);
-  }, [loadTasks, loadMeta, loadGithub, loadCalendar, checkClickup]);
+  }, [loadTasks, loadMeta, loadGithub, loadCalendar, loadMail, loadWaiting, checkClickup]);
 
   // The plan, the brief, and the plan chat belong to one day. A new day loads them again.
   useEffect(() => {
@@ -300,9 +365,10 @@ export default function App() {
       loadGithub(true);
       loadClickup(true, clickupOn);
       loadCalendar(true);
+      loadMail("timer");
     }, refreshMinutes * 60_000);
     return () => clearInterval(timer);
-  }, [refreshMinutes, loadGithub, loadClickup, loadCalendar, clickupOn]);
+  }, [refreshMinutes, loadGithub, loadClickup, loadCalendar, loadMail, clickupOn]);
 
   // The first start downloads the meaning search model. Check again until it is ready.
   const meaningStarting = info?.meaning_search === "starting";
@@ -334,7 +400,15 @@ export default function App() {
       .catch((e) => setBriefState(String(e)));
   }, [today]);
 
+  // The load state of each source of items, by the start of the item key ("github:...").
+  const sourceStates = useMemo<Record<string, ListState>>(
+    () => ({ github: githubState, clickup: clickupState, gmail: mailState }),
+    [githubState, clickupState, mailState],
+  );
+  const sourcesLoading = Object.values(sourceStates).includes("loading");
+
   // The brief writes itself once a day, after the lists are loaded, when the setting is on.
+  // It does not wait for Gmail: the brief gets the emails itself, and Gmail can be slow.
   const listsReady = githubState !== "loading" && clickupState !== "loading";
   useEffect(() => {
     if (!settings?.auto_brief || briefLoaded !== today || brief || !listsReady || briefTried.current.has(today)) return;
@@ -351,8 +425,8 @@ export default function App() {
       const t = goalText(id);
       if (t) goalOf[key] = t;
     }
-    return buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}, goalOf);
-  }, [tasks, github.items, clickup.items, meta, est, brief, goalText]);
+    return buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}, goalOf, mail.reply);
+  }, [tasks, github.items, clickup.items, meta, est, brief, goalText, mail.reply]);
 
   const byKey = useMemo(() => new Map(items.map((i) => [i.key, i])), [items]);
   const planItems = useMemo(() => (plan?.items ?? []).map((p) => byKey.get(p.key)).filter((i): i is Item => !!i), [plan, byKey]);
@@ -362,8 +436,8 @@ export default function App() {
 
   // An item that left the list (closed in ClickUp, deleted) closes its panel.
   useEffect(() => {
-    if (sel && !byKey.has(sel) && githubState !== "loading" && clickupState !== "loading") setSel(null);
-  }, [sel, byKey, githubState, clickupState]);
+    if (sel && !byKey.has(sel) && !sourcesLoading) setSel(null);
+  }, [sel, byKey, sourcesLoading]);
 
   // ---------- Toast ----------
 
@@ -407,6 +481,28 @@ export default function App() {
 
   const putTask = (t: api.Task) => setTasks((all) => all.map((x) => (x.id === t.id ? t : x)));
 
+  /**
+   * Hides an email in AIfred, with Undo. The email in Gmail does not change.
+   * `list`: the list that the email leaves, "reply" or "sent".
+   */
+  const hideMail = useCallback(
+    (m: api.Mail, list: "reply" | "sent", text: string): Promise<boolean> => {
+      if (mailBusy.current.has(m.id)) return Promise.resolve(false);
+      mailBusy.current.add(m.id);
+      return run(api.hideEmail(m.id, true), () => {
+        mailEdits.current++;
+        setMail((l) => ({ ...l, [list]: l[list].filter((x) => x.id !== m.id) }));
+        toast(text, () =>
+          run(api.hideEmail(m.id, false), () => {
+            mailEdits.current++;
+            setMail((l) => ({ ...l, [list]: putBack(l[list], m) }));
+          }),
+        );
+      }).finally(() => mailBusy.current.delete(m.id));
+    },
+    [run, toast],
+  );
+
   const toggleDone = useCallback(
     (i: Item) => {
       if (i.task) {
@@ -415,6 +511,8 @@ export default function App() {
           putTask(t);
           if (done) toast(`Finished: ${i.title}`, () => run(api.setTaskDone(t.id, false), putTask));
         });
+      } else if (i.mail) {
+        void hideMail(i.mail, "reply", `Hidden: ${i.mail.subject}. It comes back when a new message comes.`);
       } else if (i.cu) {
         const c = i.cu;
         if (closing.current.has(c.id)) return;
@@ -426,7 +524,7 @@ export default function App() {
         }).finally(() => closing.current.delete(c.id));
       }
     },
-    [run, toast],
+    [run, toast, hideMail],
   );
 
   const undoClose = useCallback(
@@ -436,6 +534,77 @@ export default function App() {
         loadClickup(true, true);
       }),
     [run, loadClickup],
+  );
+
+  // ---------- The "waiting for" list ----------
+
+  const putWaiting = (w: api.Waiting) => {
+    waitingEdits.current++;
+    setWaiting((all) => (all.some((x) => x.id === w.id) ? all.map((x) => (x.id === w.id ? w : x)) : [...all, w]));
+  };
+  const dropWaiting = (id: number) => {
+    waitingEdits.current++;
+    setWaiting((all) => all.filter((x) => x.id !== id));
+  };
+
+  /** Puts an email that you sent on the "waiting for" list. */
+  const trackEmail = useCallback(
+    (m: api.Mail, followUp?: string): Promise<boolean> => {
+      if (mailBusy.current.has(m.id)) return Promise.resolve(false);
+      mailBusy.current.add(m.id);
+      return run(api.addWaiting({ thread: m.id, follow_up: followUp }), (w) => {
+        putWaiting(w);
+        mailEdits.current++;
+        setMail((l) => ({ ...l, sent: l.sent.filter((x) => x.id !== m.id) }));
+        toast(`Waiting for ${w.who}: ${w.what}`, () =>
+          run(api.deleteWaiting(w.id), () => {
+            dropWaiting(w.id);
+            mailEdits.current++;
+            setMail((l) => ({ ...l, sent: putBack(l.sent, m) }));
+          }),
+        );
+      }).finally(() => mailBusy.current.delete(m.id));
+    },
+    [run, toast],
+  );
+
+  /** Hides an email that you sent from the suggestions: you wait for nothing. */
+  const hideSent = useCallback((m: api.Mail) => hideMail(m, "sent", `Hidden: ${m.subject}`), [hideMail]);
+
+  const addWaiting = useCallback(
+    (item: api.NewWaiting) =>
+      run(api.addWaiting(item), (w) => {
+        putWaiting(w);
+        // An item from an email takes it off the suggestions.
+        if (item.thread) {
+          mailEdits.current++;
+          setMail((l) => ({ ...l, sent: l.sent.filter((x) => x.id !== item.thread) }));
+        }
+      }),
+    [run],
+  );
+
+  const changeWaiting = useCallback(
+    (id: number, changes: api.WaitingChanges) =>
+      run(api.updateWaiting(id, changes), (w) => {
+        putWaiting(w);
+        if (changes.done) toast(`Closed: ${w.what}`, () => run(api.updateWaiting(w.id, { done: false }), putWaiting));
+      }),
+    [run, toast],
+  );
+
+  const removeWaiting = useCallback(
+    (w: api.Waiting) =>
+      run(api.deleteWaiting(w.id), () => {
+        dropWaiting(w.id);
+        // An email item goes back to the suggestions. The saved list has
+        // it: no download from Gmail.
+        if (w.thread) {
+          mailEdits.current++;
+          loadMail("saved");
+        }
+      }),
+    [run, loadMail],
   );
 
   const addTask = useCallback(
@@ -483,12 +652,12 @@ export default function App() {
   /** True when the list of the item is loaded, so an item that is not in it is gone. */
   const listLoaded = useCallback(
     (key: string) => {
-      if (key.startsWith("task:")) return tasksLoaded;
-      if (key.startsWith("github:")) return githubState === "ok";
-      if (key.startsWith("clickup:")) return clickupState === "ok" || clickupState === "off";
-      return true;
+      const source = key.slice(0, key.indexOf(":"));
+      if (source === "task") return tasksLoaded;
+      const state = sourceStates[source];
+      return state === undefined || state === "ok" || state === "off";
     },
-    [tasksLoaded, githubState, clickupState],
+    [tasksLoaded, sourceStates],
   );
 
   /**
@@ -886,6 +1055,16 @@ export default function App() {
     clickupState,
     githubWarning: github.warning,
     clickupWarning: clickup.warning,
+    mailState,
+    mailWarning: mail.warning,
+    sentMail: mail.sent,
+    waiting,
+    waitingError,
+    trackEmail,
+    hideSent,
+    addWaiting,
+    changeWaiting,
+    removeWaiting,
     tasksError,
     sel,
     open,
@@ -943,9 +1122,10 @@ export default function App() {
     one("GitHub", githubState, github.fetched_at, github.warning);
     one("ClickUp", clickupState, clickup.fetched_at, clickup.warning);
     one("Calendar", calendarState, calendar.fetched_at, calendar.warning);
+    one("Gmail", mailState, mail.fetched_at, mail.warning);
     return parts;
   })();
-  const states = [githubState, clickupState, calendarState];
+  const states = [...Object.values(sourceStates), calendarState];
   const loading = states.includes("loading");
   const bad = states.some((s) => !["loading", "ok", "off"].includes(s));
 
@@ -985,6 +1165,8 @@ export default function App() {
                 loadGithub(true);
                 loadClickup(true, clickupOn);
                 loadCalendar(true);
+                loadMail(true);
+                loadWaiting();
               }}
             >
               ↻
@@ -1028,7 +1210,10 @@ export default function App() {
                   info={info}
                   clickupToken={clickupToken}
                   onClickupTokenChanged={() => checkClickup(true)}
-                  onGoogleChanged={() => loadCalendar(true)}
+                  onGoogleChanged={() => {
+                    loadCalendar(true);
+                    loadMail(true);
+                  }}
                   update={update}
                   onUpdateChanged={setUpdate}
                   busy={anyBusy}

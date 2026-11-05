@@ -31,6 +31,19 @@ export type AppCtx = {
   clickupState: ListState;
   githubWarning?: string;
   clickupWarning?: string;
+  /** "off": Gmail is not connected, or the Google login does not allow it. */
+  mailState: ListState;
+  mailWarning?: string;
+  /** Emails that you sent and that got no answer yet: suggestions for the "waiting for" list. */
+  sentMail: api.Mail[];
+  /** The "waiting for" list: the open items, then the items that closed in the last 3 days. */
+  waiting: api.Waiting[];
+  waitingError: string;
+  trackEmail: (m: api.Mail, followUp?: string) => Promise<boolean>;
+  hideSent: (m: api.Mail) => Promise<boolean>;
+  addWaiting: (item: api.NewWaiting) => Promise<boolean>;
+  changeWaiting: (id: number, changes: api.WaitingChanges) => Promise<boolean>;
+  removeWaiting: (w: api.Waiting) => Promise<boolean>;
   tasksError: string;
 
   sel: string | null;

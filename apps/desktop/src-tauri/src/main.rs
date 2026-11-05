@@ -24,6 +24,7 @@ use aifred_core::clickup_list::{ClickupList, ClickupStore};
 use aifred_core::files::now;
 use aifred_core::github;
 use aifred_core::github_list::{GithubList, GithubStore};
+use aifred_core::gmail::{self, MailList};
 use aifred_core::goals::Goals;
 use aifred_core::google::{self, GoogleStatus};
 use aifred_core::history::Turn;
@@ -35,6 +36,7 @@ use aifred_core::settings::{self, Settings};
 use aifred_core::side::SideTurn;
 use aifred_core::tasks::{Task, TaskFields};
 use aifred_core::uploads::FileRef;
+use aifred_core::waiting::{self, NewWaiting, Waiting, WaitingChange};
 use aifred_core::{Answer, Assistant, default_data_dir};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
@@ -672,6 +674,78 @@ async fn download_calendar(
     anyhow::bail!("the Google login changed during the download. Click reload")
 }
 
+/// The emails of the last 14 days (gmail.rs), from the saved list while it
+/// is new enough, else from Gmail. None: Gmail is not connected, or the
+/// Google login does not allow it. When Gmail cannot be asked, it shows
+/// the saved list at any age, with a warning.
+#[tauri::command]
+async fn gmail_threads(app: State<'_, App>, force: bool) -> CmdResult<Option<MailList>> {
+    let dir = app.assistant.dir.clone();
+    if !force {
+        let d = dir.clone();
+        let saved = blocking(&app, move |_| gmail::cached(&d, max_age(&d), now())).await?;
+        if saved.is_some() {
+            return Ok(saved);
+        }
+    }
+    match gmail::download_and_save(&dir).await {
+        Ok(list) => Ok(list),
+        Err(e) => {
+            let e = err(e);
+            let saved = blocking(&app, move |_| gmail::cached(&dir, u64::MAX, now())).await;
+            match saved {
+                Ok(Some(mut list)) => {
+                    list.warning = Some(format!(
+                        "Cannot download from Gmail, so this is the saved list. {e}"
+                    ));
+                    Ok(Some(list))
+                }
+                _ => Err(e),
+            }
+        }
+    }
+}
+
+/// The saved emails at any age, with no download. For a change on the
+/// screen that only needs the list again. None: no saved list.
+#[tauri::command]
+async fn gmail_saved(app: State<'_, App>) -> CmdResult<Option<MailList>> {
+    blocking(&app, |a| gmail::cached(&a.dir, u64::MAX, now())).await
+}
+
+/// Hides an email thread until a new message comes in it ("no answer
+/// needed"), or shows it again (`hide` false, for Undo).
+#[tauri::command]
+async fn hide_email(app: State<'_, App>, id: String, hide: bool) -> CmdResult<()> {
+    blocking(&app, move |a| gmail::hide(&a.dir, &id, hide, now())).await
+}
+
+/// The "waiting for" list (waiting.rs): the open items and the items that
+/// closed in the last days.
+#[tauri::command]
+async fn waiting_items(app: State<'_, App>) -> CmdResult<Vec<Waiting>> {
+    blocking(&app, |a| waiting::list(&a.dir, false, now())).await
+}
+
+#[tauri::command]
+async fn add_waiting(app: State<'_, App>, item: NewWaiting) -> CmdResult<Waiting> {
+    blocking(&app, move |a| waiting::add(&a.dir, item, now())).await
+}
+
+#[tauri::command]
+async fn update_waiting(
+    app: State<'_, App>,
+    id: i64,
+    changes: WaitingChange,
+) -> CmdResult<Waiting> {
+    blocking(&app, move |a| waiting::update(&a.dir, id, changes, now())).await
+}
+
+#[tauri::command]
+async fn delete_waiting(app: State<'_, App>, id: i64) -> CmdResult<()> {
+    blocking(&app, move |a| waiting::delete(&a.dir, id)).await
+}
+
 /// The Google connection (google.rs): the registration, the account, and the
 /// features that the login allows. Never a secret or a token.
 #[tauri::command]
@@ -690,6 +764,16 @@ async fn set_google_client(
         google::set_client(&a.dir, &client_id, &client_secret)
     })
     .await
+}
+
+/// Turns an optional Google feature (Gmail) on or off (google.rs).
+#[tauri::command]
+async fn set_google_feature(
+    app: State<'_, App>,
+    name: String,
+    on: bool,
+) -> CmdResult<GoogleStatus> {
+    blocking(&app, move |a| google::set_feature(&a.dir, &name, on)).await
 }
 
 /// Opens Google's login page in the browser and waits until the user is
@@ -1187,8 +1271,16 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         memory_facts,
         add_fact,
         calendar_events,
+        gmail_threads,
+        gmail_saved,
+        hide_email,
+        waiting_items,
+        add_waiting,
+        update_waiting,
+        delete_waiting,
         google_status,
         set_google_client,
+        set_google_feature,
         connect_google,
         disconnect_google,
         goals,
@@ -1753,6 +1845,44 @@ mod tests {
         .unwrap();
         assert_eq!(st["secret_set"], true);
         assert!(!st.to_string().contains("hidden-secret"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn waiting_commands_and_no_gmail_without_google() {
+        let (_app, win, dir) = window("waiting");
+        assert_eq!(
+            call(&win, "gmail_threads", json!({ "force": false })).unwrap(),
+            Value::Null,
+            "Google is not connected: no emails, and no error"
+        );
+        assert_eq!(call(&win, "waiting_items", json!({})).unwrap(), json!([]));
+        let w = call(
+            &win,
+            "add_waiting",
+            json!({ "item": { "what": "The contract", "who": "Ana", "follow_up": "2026-11-06" } }),
+        )
+        .unwrap();
+        assert_eq!(w["follow_up"], "2026-11-06");
+        let id = w["id"].clone();
+        let w = call(
+            &win,
+            "update_waiting",
+            json!({ "id": id, "changes": { "done": true } }),
+        )
+        .unwrap();
+        assert_eq!(w["done"], true);
+        assert!(
+            call(
+                &win,
+                "add_waiting",
+                json!({ "item": { "what": "x", "who": "" } })
+            )
+            .is_err(),
+            "an error reaches the window as text"
+        );
+        call(&win, "delete_waiting", json!({ "id": id })).unwrap();
+        assert_eq!(call(&win, "waiting_items", json!({})).unwrap(), json!([]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

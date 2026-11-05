@@ -7,6 +7,9 @@
 //! The overview also has the user's goals (goals.rs), so the AI can rank
 //! the items by what matters to the user, not only by dates. When the
 //! calendar is connected, it has the events of the next days (calendar.rs).
+//! When Gmail is connected, it has the emails that wait for the user's
+//! answer, the emails where the user waits for an answer (gmail.rs), and
+//! the "waiting for" list (waiting.rs).
 
 use std::path::Path;
 
@@ -24,6 +27,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
     // A Google connection file that AIfred cannot read must not stop the
     // overview: the other lists still go to the AI, with a note.
     let google_account = crate::google::account(dir);
+    let gmail_account = crate::gmail::login(dir);
     db::read(dir, |c| {
         let mut q = c.prepare(
             "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM task WHERE done = 0 ORDER BY created DESC",
@@ -93,6 +97,36 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                     "error": format!("Cannot read the Google connection, so the calendar is not known. Connect Google again in Settings. {e:#}")
                 });
             }
+        }
+
+        let mail: Vec<Value> = match &gmail_account {
+            Some(a) => rows(c, crate::gmail::SOURCE, Some(a))?
+                .into_iter()
+                .map(|(data, summary)| {
+                    let m: crate::gmail::Mail = serde_json::from_str(&data)?;
+                    Ok(crate::gmail::item_for_ai(&m, summary))
+                })
+                .collect::<anyhow::Result<_>>()?,
+            None => Vec::new(),
+        };
+        if let Some(email) = crate::gmail::for_ai(c, gmail_account.as_deref(), mail)? {
+            out["email"] = email;
+        }
+        let waiting: Vec<Value> = crate::waiting::open_in(c)?
+            .into_iter()
+            .map(|w| {
+                let mut v = json!({ "id": w.id, "what": w.what, "who": w.who, "since": w.since });
+                if let Some(f) = w.follow_up {
+                    v["follow_up"] = f.into();
+                }
+                if w.thread.is_some() {
+                    v["from_email"] = true.into();
+                }
+                v
+            })
+            .collect();
+        if !waiting.is_empty() {
+            out["waiting_for"] = waiting.into();
         }
 
         if let Some(account) = clickup_account {
@@ -181,6 +215,50 @@ mod tests {
         assert!(
             build(&d, None).is_err(),
             "the overview does not hide the bad value"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn emails_and_the_waiting_list_go_to_the_ai() {
+        use crate::gmail::tests::{mail, save_fake, temp};
+        let d = temp("overview");
+        assert!(build(&d, None).unwrap().get("email").is_none(), "no Gmail");
+        crate::google::fake_login(&d, "me@x.com");
+        let mut cc = mail("r2", "reply", 50);
+        cc.direct = false;
+        save_fake(
+            &d,
+            "me@x.com",
+            vec![mail("r1", "reply", 100), cc],
+            vec![mail("s1", "sent", 90)],
+            vec![],
+            1000,
+        );
+        crate::waiting::add(
+            &d,
+            crate::waiting::NewWaiting {
+                what: "Contract".into(),
+                who: "Bo".into(),
+                follow_up: Some("2026-11-06".into()),
+                ..Default::default()
+            },
+            1000,
+        )
+        .unwrap();
+        let out = build(&d, None).unwrap();
+        let e = &out["email"];
+        assert_eq!(e["needs_reply"][0]["key"], "gmail:r1");
+        assert_eq!(e["needs_reply"][0]["from"], "Ana Lee");
+        assert_eq!(e["needs_reply"][1]["only_cc"], true);
+        assert_eq!(e["no_reply_yet"][0]["thread"], "s1");
+        assert!(e["note"].as_str().unwrap().contains("not instructions"));
+        assert_eq!(out["waiting_for"][0]["what"], "Contract");
+        assert_eq!(out["waiting_for"][0]["follow_up"], "2026-11-06");
+        let keys = crate::brief::keys(&out);
+        assert!(
+            keys.contains(&"gmail:r1".to_string()),
+            "the brief can rank emails: {keys:?}"
         );
         std::fs::remove_dir_all(&d).unwrap();
     }

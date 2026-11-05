@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { DEFAULT_SETTINGS, type Answer } from "./api";
 import { addDays, dayOf } from "./items";
-import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, meeting, task } from "./test/fakeBackend";
+import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, mail, meeting, task } from "./test/fakeBackend";
 
 // The panel stays in the page, hidden, behind the task tab. A role query skips a hidden element.
 const panel = () => document.querySelector<HTMLElement>('aside[aria-label="Conversation"]');
@@ -734,7 +734,7 @@ describe("Google", () => {
     const first = deferred<void>();
     let logins = 0;
     await startApp({
-      google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: false, email: null, features: [["Calendar", false]] },
+      google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: false, email: null, features: [["Calendar", false]], optional: ["Gmail"], off: [] },
       onConnectGoogle: () => (++logins === 1 ? first.promise : undefined),
     });
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -753,9 +753,166 @@ describe("Google", () => {
   });
 
   it("asks to connect again when the login does not allow the calendar", async () => {
-    await startApp({ google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", false]] } });
+    await startApp({ google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", false]], optional: ["Gmail"], off: [] } });
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByText(/Google needs more access for Calendar/)).toBeInTheDocument();
+  });
+});
+
+describe("Gmail and the waiting list", () => {
+  const now = () => Math.floor(Date.now() / 1000);
+
+  it("an email that waits for your answer is an item, and 'No answer needed' hides it with an undo", async () => {
+    const fake = await startApp({ mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply", { unread: true })], sent: [] } });
+    const open = await screen.findByRole("list", { name: "Open" });
+    expect(within(open).getByText("Price for the plugin")).toBeInTheDocument();
+    expect(within(open).getByText(/Email · from Ana Lee/)).toBeInTheDocument();
+    expect(within(open).getByText("Unread · Waits 3 days")).toBeInTheDocument();
+    await userEvent.click(within(open).getByRole("button", { name: "No answer needed: Price for the plugin" }));
+    await waitFor(() => expect(screen.queryByText("Price for the plugin")).not.toBeInTheDocument());
+    expect(fake.mailHidden).toEqual(["r1"]);
+    expect(await screen.findByText(/Hidden: Price for the plugin. It comes back when a new message comes./)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("Price for the plugin")).toBeInTheDocument();
+    expect(fake.mailHidden).toEqual([]);
+  });
+
+  it("a Gmail load that started before 'No answer needed' does not show the email again", async () => {
+    const fake = await startApp({ mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] } });
+    const open = await screen.findByRole("list", { name: "Open" });
+    await within(open).findByText("Price for the plugin");
+    // A reload starts. Its list still has the email, and its answer waits.
+    const hold = deferred<void>();
+    fake.onGmailThreads = () => hold.promise;
+    await userEvent.click(screen.getByRole("button", { name: "Reload the list" }));
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "gmail_threads" && c.args.force).length).toBe(1));
+    await userEvent.click(within(open).getByRole("button", { name: "No answer needed: Price for the plugin" }));
+    await waitFor(() => expect(screen.queryByText("Price for the plugin")).not.toBeInTheDocument());
+    fake.onGmailThreads = undefined;
+    hold.resolve();
+    // The old answer is not shown: the window reads the saved list again.
+    await waitFor(() => expect(fake.calls.some((c) => c.cmd === "gmail_saved")).toBe(true));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText("Price for the plugin")).not.toBeInTheDocument();
+  });
+
+  it("a double click on Track adds the email once", async () => {
+    const fake = await startApp({ mail: { fetched_at: now(), reply: [], sent: [mail("s1", "Contract draft", "sent")] } });
+    const card = await screen.findByRole("region", { name: "Waiting for" });
+    const track = within(card).getByRole("button", { name: "Track" });
+    fireEvent.click(track);
+    fireEvent.click(track);
+    await within(card).findByRole("list", { name: "Waiting for list" });
+    expect(fake.calls.filter((c) => c.cmd === "add_waiting").length).toBe(1);
+    expect(fake.waiting.length).toBe(1);
+  });
+
+  it("a deleted email item goes back to the suggestions with no Gmail download", async () => {
+    const fake = await startApp({ mail: { fetched_at: now(), reply: [], sent: [mail("s1", "Contract draft", "sent")] } });
+    const card = await screen.findByRole("region", { name: "Waiting for" });
+    await userEvent.click(within(card).getByRole("button", { name: "Track" }));
+    const list = await within(card).findByRole("list", { name: "Waiting for list" });
+    const loads = fake.calls.filter((c) => c.cmd === "gmail_threads").length;
+    await userEvent.click(within(list).getByRole("button", { name: /^Delete: / }));
+    const sugg = await within(card).findByRole("list", { name: "Emails with no answer yet" });
+    expect(within(sugg).getByText("Contract draft")).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "gmail_threads").length).toBe(loads);
+  });
+
+  it("shows an email in the panel with the day it waits since", async () => {
+    await startApp({ mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply", { direct: false, messages: 2 })], sent: [] } });
+    await openItem("Price for the plugin");
+    const d = details();
+    expect(within(d).getByText("Waits since")).toBeInTheDocument();
+    expect(within(d).getByText(/2 messages · you are in Cc/)).toBeInTheDocument();
+    expect(within(d).getByRole("button", { name: "No answer needed" })).toBeInTheDocument();
+  });
+
+  it("tracks a sent email, closes the item, and adds one by hand", async () => {
+    const fake = await startApp({
+      mail: { fetched_at: now(), reply: [], sent: [mail("s1", "Contract draft", "sent"), mail("s2", "Lunch?", "sent", { people: ["Bo"] })] },
+    });
+    const card = await screen.findByRole("region", { name: "Waiting for" });
+    const sugg = within(card).getByRole("list", { name: "Emails with no answer yet" });
+    expect(within(sugg).getByText(/to Ana Lee · sent/)).toBeInTheDocument();
+    await userEvent.click(within(sugg).getAllByRole("button", { name: "Track" })[0]);
+    const list = await within(card).findByRole("list", { name: "Waiting for list" });
+    expect(within(list).getByText(/An answer to "Contract draft"/)).toBeInTheDocument();
+    await waitFor(() => expect(within(card).queryByText("Contract draft")).not.toBeInTheDocument());
+    expect(fake.waiting[0].thread).toBe("s1");
+
+    // Hide the other suggestion: you wait for nothing.
+    await userEvent.click(within(card).getByRole("button", { name: "Hide" }));
+    await waitFor(() => expect(within(card).queryByRole("list", { name: "Emails with no answer yet" })).not.toBeInTheDocument());
+    expect(fake.mailHidden).toEqual(["s2"]);
+
+    // A check day. Typing the year gives days like 0002-01-04 first: only the
+    // last day saves, once.
+    const box = within(list).getByLabelText(/Check day: An answer to/);
+    const before = fake.calls.filter((c) => c.cmd === "update_waiting").length;
+    for (const v of ["0002-01-04", "0020-01-04", "0203-01-04", "2030-01-04"]) fireEvent.change(box, { target: { value: v } });
+    await waitFor(() => expect(fake.waiting[0].follow_up).toBe("2030-01-04"));
+    expect(fake.calls.filter((c) => c.cmd === "update_waiting").length - before).toBe(1);
+    expect(await within(list).findByText(/Check Fri 4 Jan 2030/)).toBeInTheDocument();
+
+    await userEvent.click(within(list).getByRole("button", { name: "Got it" }));
+    expect(await within(list).findByText("closed by you")).toBeInTheDocument();
+    expect(fake.waiting[0].done).toBe(true);
+
+    await userEvent.click(within(card).getByRole("button", { name: "Add" }));
+    await userEvent.type(within(card).getByLabelText("What you wait for"), "The signed contract");
+    await userEvent.type(within(card).getByLabelText("Who you wait for"), "Cy");
+    await userEvent.click(within(card).getByRole("button", { name: "Add" }));
+    expect(await within(card).findByText(/The signed contract/)).toBeInTheDocument();
+    expect(fake.waiting.map((w) => w.who)).toEqual(["Ana Lee", "Cy"]);
+  });
+
+  it("shows only a small link when there is nothing to wait for", async () => {
+    await startApp();
+    await userEvent.click(await screen.findByRole("button", { name: "+ Waiting for someone?" }));
+    expect(screen.getByRole("region", { name: "Waiting for" })).toBeInTheDocument();
+    expect(screen.getByLabelText("What you wait for")).toHaveFocus();
+  });
+
+  it("shows a Gmail error, and asks to connect again when the login does not allow Gmail", async () => {
+    await startApp({
+      mailError: "Gmail said: Rate limit",
+      google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", true], ["Gmail", false]], optional: ["Gmail"], off: [] },
+    });
+    expect(await screen.findByText("Gmail: Gmail said: Rate limit")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText(/Google needs more access for Gmail/)).toBeInTheDocument();
+  });
+});
+
+describe("the Gmail switch", () => {
+  it("turns Gmail off: no emails, no error, and no 'connect again' note", async () => {
+    const fake = await startApp({
+      mailError: "Gmail API has not been used in project 123 or it is disabled",
+      google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", true], ["Gmail", false]], optional: ["Gmail"], off: [] },
+    });
+    expect(await screen.findByText(/Gmail: Gmail API has not been used/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const g = screen.getByRole("region", { name: "Google" });
+    expect(await within(g).findByText(/Google needs more access for Gmail/)).toBeInTheDocument();
+    await userEvent.click(within(g).getByRole("checkbox", { name: "Use Gmail" }));
+    expect(await within(g).findByText("Gmail is off. AIfred removed the saved data of Gmail.")).toBeInTheDocument();
+    expect(fake.google.off).toEqual(["Gmail"]);
+    expect(within(g).queryByText(/Google needs more access/)).not.toBeInTheDocument();
+    expect(within(g).getByText("Gmail: turned off")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Home" }));
+    await waitFor(() => expect(screen.queryByText(/Gmail: Gmail API/)).not.toBeInTheDocument());
+    expect(screen.queryByText(/Gmail/, { selector: ".sync span" })).not.toBeInTheDocument();
+  });
+
+  it("turns Gmail on again and asks to connect again", async () => {
+    await startApp({
+      google: { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", true], ["Gmail", false]], optional: ["Gmail"], off: ["Gmail"] },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const g = screen.getByRole("region", { name: "Google" });
+    await userEvent.click(await within(g).findByRole("checkbox", { name: "Use Gmail" }));
+    expect(await within(g).findByText("Gmail is on. Connect again, and allow it.")).toBeInTheDocument();
   });
 });
 

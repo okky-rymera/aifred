@@ -219,17 +219,43 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - This tick is the only change AIfred makes in ClickUp. The chat can only read ClickUp.
 - The token never goes into the tool settings file that Claude reads. The ClickUp tool server reads the token itself.
 
-## Google (calendar)
+## Google (calendar and Gmail)
 
 - AIfred connects to Google itself. Each user makes their own Google registration once:
   1. In Google Cloud Console, make a project.
-  2. Turn on the Google Calendar API.
-  3. Set up Google Auth Platform. Pick the audience "Internal" for a company Google Workspace. Else pick "External" and publish the app: in "Testing", Google ends the login every 7 days.
+  2. Turn on the Google Calendar API and the Gmail API.
+  3. Set up Google Auth Platform. Pick the audience "Internal" for a company Google Workspace. Else pick "External" and publish the app: in "Testing", Google ends the login every 7 days. Google then shows "Google hasn't verified this app" at the login. It is your own registration: click "Advanced" and continue.
   4. Create a client of the type "Desktop app".
 - Paste the client ID and the client secret on the Settings page, then click "Connect Google". Google's login page opens in the browser.
 - AIfred keeps the registration and the login key in `google.json` in the data folder. Only you can read that file.
 - AIfred reads the next 7 days of the primary calendar. It cannot change the calendar. The day plan goes around busy events, and the brief and the chats see the meetings.
-- One connection serves all Google features. When a new feature needs more access, Settings asks you to connect again (`crates/aifred-core/src/google.rs`).
+- One connection serves all Google features. When a new feature needs more access, Settings asks you to connect again (`crates/aifred-core/src/google.rs`). A login from before Gmail was added does not allow Gmail: connect again once.
+
+### Gmail
+
+AIfred reads Gmail. It cannot send, change, or delete email (`crates/aifred-core/src/gmail.rs`).
+
+- To not use Gmail, untick "Use Gmail" in Settings > Google. Then the login does not ask for Gmail, AIfred removes the saved emails, and no Gmail error or "connect again" note shows. If the login already allows Gmail, connect again to remove that access at Google. Tick it again to use Gmail: connect again, and allow it.
+
+- AIfred reads the threads of the last 14 days: at most 100 from the inbox and 50 from "Sent". It reads only the headers (sender, people, subject) and Google's short preview of each message, not the full text.
+- An email from a person, in the inbox, to you, whose last message is not yours, waits for your answer. It shows in the list as an "Email" item. The brief and the day plan rank it with the other work.
+- AIfred leaves out mail from machines: newsletters, notifications, and "no-reply" senders.
+- AIfred leaves out Gmail's Promotions, Social, Updates, and Forums tabs.
+- AIfred leaves out archived threads, and threads where you are only in Cc and never wrote.
+- A tracked email closes when the person answers. AIfred reads each tracked thread again once a day. So an answer in a left-out tab closes the item within one day.
+- "No answer needed" (the tick) hides an email in AIfred. Gmail does not change. The email comes back when a new message comes in the thread.
+- An email that you sent, with no answer yet, shows under "No answer yet to your emails" in the "Waiting for" card. "Track" puts it on the list. "Hide" removes the suggestion.
+- AIfred reads again only the threads that changed since the last download. The first download can take some seconds.
+
+### "Waiting for" list
+
+The "Waiting for" card on the home page lists what you wait for from other people (`crates/aifred-core/src/waiting.rs`).
+
+- An item has what you wait for, who, and since when. Add one with "Add", with "Track" on an email, or in the chat ("I wait for the contract from Ana").
+- An item from an email closes by itself when the person answers in the thread. It shows "Ana Lee answered on Thu 5 Nov" for 3 days.
+- "Check on…" sets a check day. On that day, at the start of your work day, AIfred sends a notification when the item is still open. For an email item, AIfred reads Gmail first, so an answer from that morning counts. This needs no AI call. In the chat, "tell me if Ana has not answered by Friday" sets it.
+- "Got it" closes an item. "Open again" opens it.
+- At most 50 open items.
 
 ## Check the app without a window on your screen
 

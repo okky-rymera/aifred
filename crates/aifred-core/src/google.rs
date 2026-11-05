@@ -1,5 +1,5 @@
 //! One connection to the user's Google account, for all Google features:
-//! the calendar now, and later Docs, Sheets, and Gmail.
+//! the calendar and Gmail now, and later Docs and Sheets.
 //!
 //! Each user makes their own Google app registration (an OAuth client of
 //! the type "Desktop app") in Google Cloud Console and gives AIfred its
@@ -29,6 +29,8 @@ use crate::files;
 
 /// Read the user's calendars.
 pub const CALENDAR: &str = "https://www.googleapis.com/auth/calendar.readonly";
+/// Read the user's email. AIfred never sends, changes, or deletes email.
+pub const GMAIL: &str = "https://www.googleapis.com/auth/gmail.readonly";
 /// The account's email, so the window can show which account is connected.
 const IDENTITY: &[&str] = &["openid", "email"];
 
@@ -36,13 +38,30 @@ const IDENTITY: &[&str] = &["openid", "email"];
 pub struct Feature {
     pub name: &'static str,
     pub scopes: &'static [&'static str],
+    /// The user can turn the feature off on the Settings page. Then the
+    /// login does not ask for its access, and AIfred does not use it.
+    pub optional: bool,
+    /// Removes what AIfred saved of the feature: when the user turns it
+    /// off, or when the login ends.
+    pub forget: fn(&Path) -> anyhow::Result<()>,
 }
 
-/// All features that use Google. A login asks for the access of all of them.
-pub const FEATURES: &[Feature] = &[Feature {
-    name: "Calendar",
-    scopes: &[CALENDAR],
-}];
+/// All features that use Google. A login asks for the access of all the
+/// features that are not turned off.
+pub const FEATURES: &[Feature] = &[
+    Feature {
+        name: "Calendar",
+        scopes: &[CALENDAR],
+        optional: false,
+        forget: crate::calendar::forget,
+    },
+    Feature {
+        name: "Gmail",
+        scopes: &[GMAIL],
+        optional: true,
+        forget: crate::gmail::forget,
+    },
+];
 
 /// The longest wait for the user to finish the login in the browser.
 pub const LOGIN_WAIT: Duration = Duration::from_secs(300);
@@ -90,6 +109,10 @@ struct Saved {
     /// so an old login that ends late cannot connect the account again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending: Option<String>,
+    /// The optional features that the user turned off. A choice of the
+    /// user, so a new login or a new registration keeps it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    off: Vec<String>,
 }
 
 fn path(dir: &Path) -> PathBuf {
@@ -123,6 +146,7 @@ fn clear_login(dir: &Path, keep_pending: bool) -> anyhow::Result<()> {
             client_id: s.client_id,
             client_secret: s.client_secret,
             pending: if keep_pending { s.pending } else { None },
+            off: s.off,
             ..Saved::default()
         },
     )
@@ -138,6 +162,10 @@ pub struct GoogleStatus {
     pub email: Option<String>,
     /// Each feature, and true when the login allows it.
     pub features: Vec<(String, bool)>,
+    /// The features that the user can turn off.
+    pub optional: Vec<String>,
+    /// The features that the user turned off.
+    pub off: Vec<String>,
 }
 
 pub fn status(dir: &Path) -> anyhow::Result<GoogleStatus> {
@@ -155,6 +183,12 @@ pub fn status(dir: &Path) -> anyhow::Result<GoogleStatus> {
                 (f.name.to_string(), on)
             })
             .collect(),
+        optional: FEATURES
+            .iter()
+            .filter(|f| f.optional)
+            .map(|f| f.name.to_string())
+            .collect(),
+        off: s.off.clone(),
     })
 }
 
@@ -168,6 +202,44 @@ pub fn account(dir: &Path) -> anyhow::Result<Option<String>> {
         .map(|_| format!("{} {}", s.client_id, s.email.as_deref().unwrap_or_default())))
 }
 
+/// True when Google is connected and the login allows `scope`. A login
+/// from before a feature was added does not allow it: the user must
+/// connect again.
+/// A feature that the user turned off counts as not allowed.
+pub fn allows(dir: &Path, scope: &str) -> anyhow::Result<bool> {
+    let s = load(dir)?;
+    let off = FEATURES
+        .iter()
+        .any(|f| f.scopes.contains(&scope) && s.off.iter().any(|o| o == f.name));
+    Ok(!off && s.refresh_token.is_some() && s.scopes.iter().any(|g| g == scope))
+}
+
+/// Turns an optional feature on or off. Off: AIfred removes what it saved
+/// of the feature, and the next login does not ask for its access. On: the
+/// user must connect again when the login does not allow it yet.
+pub fn set_feature(dir: &Path, name: &str, on: bool) -> anyhow::Result<GoogleStatus> {
+    let Some(f) = FEATURES.iter().find(|f| f.name == name) else {
+        bail!("there is no Google feature \"{name}\"");
+    };
+    if !f.optional {
+        bail!("{name} cannot be turned off");
+    }
+    locked(dir, || {
+        // A file that AIfred cannot read stays: a tick of a box must not
+        // remove the registration and the login.
+        let mut s = load(dir).context("cannot change the Google features")?;
+        s.off.retain(|o| o != name);
+        if !on {
+            s.off.push(name.to_string());
+        }
+        save(dir, &s)
+    })?;
+    if !on {
+        (f.forget)(dir)?;
+    }
+    status(dir)
+}
+
 /// A login with no real tokens, for the tests of other modules.
 #[cfg(test)]
 pub(crate) fn fake_login(dir: &Path, email: &str) {
@@ -177,7 +249,7 @@ pub(crate) fn fake_login(dir: &Path, email: &str) {
             client_id: "123-abc.apps.googleusercontent.com".into(),
             client_secret: "sec".into(),
             refresh_token: Some(format!("refresh-{email}")),
-            scopes: vec![CALENDAR.into()],
+            scopes: vec![CALENDAR.into(), GMAIL.into()],
             email: Some(email.into()),
             ..Saved::default()
         },
@@ -215,6 +287,7 @@ pub fn set_client(
             Saved {
                 client_id: id.into(),
                 client_secret: secret.into(),
+                off: old.off,
                 ..Saved::default()
             }
         };
@@ -222,8 +295,8 @@ pub fn set_client(
         Ok(new_client)
     })?;
     if new_client {
-        // The saved events belong to the old login.
-        crate::calendar::forget(dir)?;
+        // The saved events and emails belong to the old login.
+        forget_saved(dir)?;
     }
     status(dir)
 }
@@ -239,10 +312,10 @@ fn challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-/// All scopes that a login asks for.
-fn all_scopes() -> Vec<&'static str> {
+/// All scopes that a login asks for: not the scopes of the features in `off`.
+fn all_scopes(off: &[String]) -> Vec<&'static str> {
     let mut v: Vec<&str> = IDENTITY.to_vec();
-    for f in FEATURES {
+    for f in FEATURES.iter().filter(|f| !off.iter().any(|o| o == f.name)) {
         for s in f.scopes {
             if !v.contains(s) {
                 v.push(s);
@@ -300,7 +373,7 @@ pub async fn begin(dir: &Path, ends: Endpoints) -> anyhow::Result<Login> {
             ("client_id", s.client_id.as_str()),
             ("redirect_uri", &redirect),
             ("response_type", "code"),
-            ("scope", &all_scopes().join(" ")),
+            ("scope", &all_scopes(&s.off).join(" ")),
             ("code_challenge", &challenge(&verifier)),
             ("code_challenge_method", "S256"),
             ("state", &state),
@@ -507,7 +580,7 @@ fn save_login(
     t: TokenReply,
     email: Option<String>,
 ) -> anyhow::Result<()> {
-    let other_account = locked(dir, || {
+    let (other_account, lost) = locked(dir, || {
         let s = load(dir)?;
         if s.client_id != client_id {
             bail!("the Google registration changed during the login. Click Connect Google again");
@@ -516,23 +589,33 @@ fn save_login(
             bail!("the login stopped, because a new login started or Google was disconnected");
         }
         let other_account = s.email.is_some() && s.email != email;
+        let scopes: Vec<String> = t.scope.split_whitespace().map(String::from).collect();
+        // The features that this login does not allow, for example Gmail
+        // when the user unticked it on Google's page.
+        let lost: Vec<&Feature> = FEATURES
+            .iter()
+            .filter(|f| !f.scopes.iter().all(|x| scopes.iter().any(|g| g == x)))
+            .collect();
         save(
             dir,
             &Saved {
                 refresh_token: Some(refresh),
                 access_token: Some(t.access_token),
                 expires_at: files::now() + t.expires_in,
-                scopes: t.scope.split_whitespace().map(String::from).collect(),
+                scopes,
                 email,
                 pending: None,
                 ..s
             },
         )?;
-        Ok(other_account)
+        Ok((other_account, lost))
     })?;
     if other_account {
-        // The saved events belong to the old account.
-        crate::calendar::forget(dir)?;
+        // The saved events and emails belong to the old account.
+        forget_saved(dir)?;
+    } else {
+        // Without the access, AIfred cannot update what it saved: remove it.
+        lost.iter().try_for_each(|f| (f.forget)(dir))?;
     }
     Ok(())
 }
@@ -691,8 +774,14 @@ fn drop_login(dir: &Path, refresh: &str) -> anyhow::Result<()> {
     if !dropped {
         return Ok(());
     }
-    // The saved events belong to the ended login.
-    crate::calendar::forget(dir)
+    // The saved events and emails belong to the ended login.
+    forget_saved(dir)
+}
+
+/// Removes what AIfred saved from Google: the calendar events and the
+/// emails. The user's own "waiting for" list stays.
+fn forget_saved(dir: &Path) -> anyhow::Result<()> {
+    FEATURES.iter().try_for_each(|f| (f.forget)(dir))
 }
 
 /// Ends the login: Google forgets the token, and AIfred deletes it. The
@@ -719,9 +808,9 @@ pub async fn disconnect(dir: &Path, ends: &Endpoints) -> anyhow::Result<GoogleSt
             .send()
             .await;
     }
-    // The saved events belong to the ended login.
+    // The saved events and emails belong to the ended login.
     files::off_thread(dir, |dir| {
-        crate::calendar::forget(dir)?;
+        forget_saved(dir)?;
         status(dir)
     })
     .await
@@ -768,6 +857,49 @@ mod tests {
     }
 
     #[test]
+    fn gmail_can_be_turned_off_and_on() {
+        let d = temp("feature");
+        fake_login(&d, "me@x.com");
+        crate::gmail::tests::save_fake(
+            &d,
+            "me@x.com",
+            vec![crate::gmail::tests::mail("r1", "reply", 100)],
+            vec![],
+            vec![],
+            1000,
+        );
+        assert!(allows(&d, GMAIL).unwrap());
+        assert!(set_feature(&d, "Calendar", false).is_err(), "not optional");
+        assert!(set_feature(&d, "Docs", false).is_err());
+
+        let st = set_feature(&d, "Gmail", false).unwrap();
+        assert_eq!(st.off, ["Gmail"]);
+        assert_eq!(st.optional, ["Gmail"]);
+        assert!(
+            !allows(&d, GMAIL).unwrap(),
+            "off, also when the login allows it"
+        );
+        assert!(allows(&d, CALENDAR).unwrap());
+        assert!(
+            crate::gmail::cached(&d, u64::MAX, 1000).unwrap().is_none(),
+            "the saved emails are gone"
+        );
+        assert!(
+            !all_scopes(&st.off).contains(&GMAIL),
+            "the login does not ask for it"
+        );
+        assert!(all_scopes(&st.off).contains(&CALENDAR));
+        // A new registration keeps the choice.
+        let st = set_client(&d, "9-z.apps.googleusercontent.com", "s").unwrap();
+        assert_eq!(st.off, ["Gmail"]);
+
+        let st = set_feature(&d, "Gmail", true).unwrap();
+        assert!(st.off.is_empty());
+        assert!(all_scopes(&st.off).contains(&GMAIL));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn the_registration_is_checked_and_kept_private() {
         let d = temp("client");
         assert!(set_client(&d, "not-an-id", "x").is_err());
@@ -777,7 +909,13 @@ mod tests {
             (st.client_id.as_str(), st.secret_set, st.connected),
             (ID, true, false)
         );
-        assert_eq!(st.features, [("Calendar".to_string(), false)]);
+        assert_eq!(
+            st.features,
+            [
+                ("Calendar".to_string(), false),
+                ("Gmail".to_string(), false)
+            ]
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -871,6 +1009,15 @@ mod tests {
             .into_boxed_str(),
         );
         let (ends, seen) = fake_google(reply).await;
+        // Saved Gmail data of an earlier login.
+        crate::db::write(&d, |tx| {
+            tx.execute(
+                "INSERT INTO mail_hidden (thread, last_at, hidden_at) VALUES ('t1', 1, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         let login = begin(&d, ends.clone()).await.unwrap();
         let url = reqwest::Url::parse(&login.url).unwrap();
         let q = |k: &str| {
@@ -881,7 +1028,7 @@ mod tests {
                 .into_owned()
         };
         assert_eq!(q("code_challenge_method"), "S256");
-        assert!(q("scope").contains(CALENDAR));
+        assert!(q("scope").contains(CALENDAR) && q("scope").contains(GMAIL));
         let (redirect, state) = (q("redirect_uri"), q("state"));
         // The browser opens an extra connection that sends nothing, and
         // one that closes at once. They must not delay or stop the login.
@@ -909,7 +1056,18 @@ mod tests {
             (st.connected, st.email.as_deref()),
             (true, Some("me@x.com"))
         );
-        assert_eq!(st.features, [("Calendar".to_string(), true)]);
+        // Google gave only the calendar: the user unticked Gmail.
+        assert_eq!(
+            st.features,
+            [("Calendar".to_string(), true), ("Gmail".to_string(), false)]
+        );
+        assert!(allows(&d, CALENDAR).unwrap() && !allows(&d, GMAIL).unwrap());
+        // Without the Gmail access, the saved Gmail data is gone.
+        let hidden: i64 = crate::db::read(&d, |c| {
+            Ok(c.query_row("SELECT COUNT(*) FROM mail_hidden", [], |r| r.get(0))?)
+        })
+        .unwrap();
+        assert_eq!(hidden, 0);
         let sent = seen.lock().unwrap()[0].clone();
         assert!(
             sent.contains("code=c1") && sent.contains("code_verifier="),

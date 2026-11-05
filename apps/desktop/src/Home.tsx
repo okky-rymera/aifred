@@ -5,20 +5,22 @@ import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
 import { GoalTag, GoalsCard } from "./Goals";
-import { SRC_NAME, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, longDay, parseTask, shortDay, type Item } from "./items";
+import { WaitingCard } from "./Waiting";
+import { SRC_NAME, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, longDay, parseTask, shortDay, type Item } from "./items";
 
 export function Check(props: { item: Item }) {
   const { toggleDone } = useApp();
   const i = props.item;
   // GitHub items have no tick: AIfred only reads GitHub. An item leaves the list when it closes there.
   if (i.src === "gh") return <span className="chk-none" title="GitHub is read-only. The item leaves the list when it closes on GitHub." />;
-  const label = i.src === "cu" ? `Close in ClickUp: ${i.title}` : `${i.done ? "Open again" : "Finish"}: ${i.title}`;
+  const label = i.src === "cu" ? `Close in ClickUp: ${i.title}` : i.src === "gm" ? `No answer needed: ${i.title}` : `${i.done ? "Open again" : "Finish"}: ${i.title}`;
+  const tip = i.src === "cu" ? "Close this task in ClickUp" : i.src === "gm" ? "No answer needed: hide this email until a new message comes. Gmail does not change." : undefined;
   return (
     <button
       className={`chk p-${i.priority ?? "normal"}`}
       aria-pressed={i.done}
       aria-label={label}
-      title={i.src === "cu" ? "Close this task in ClickUp" : undefined}
+      title={tip}
       onClick={(e) => {
         e.stopPropagation();
         toggleDone(i);
@@ -45,6 +47,7 @@ export function SrcLine({ item: i, extra }: { item: Item; extra?: React.ReactNod
         {i.ref && ` · ${i.ref}`}
       </span>
       {i.gh && <span className="tagc">{REASON[i.gh.reason]}</span>}
+      {i.mail && <MailTag m={i.mail} />}
       {i.cu && (
         <span className="pill status" title={`ClickUp status in ${i.cu.workspace}`}>
           <i style={{ background: i.cu.status_color || "var(--faint)" }} aria-hidden />
@@ -58,6 +61,19 @@ export function SrcLine({ item: i, extra }: { item: Item; extra?: React.ReactNod
       ))}
       {extra}
     </div>
+  );
+}
+
+/** How long an email waits for your answer. */
+function MailTag({ m }: { m: api.Mail }) {
+  const { today } = useApp();
+  // Calendar days, as in the "since" day: a mail from 23:00 yesterday waits 1 day at 08:00.
+  const days = Math.max(0, daysBetween(dayOf(new Date(m.since * 1000)), today));
+  return (
+    <span className={`tagc${days >= 2 ? " late" : ""}`} title={`Waits for your answer since ${dayOfSecs(m.since, today)}`}>
+      {m.unread ? "Unread · " : ""}
+      {days < 1 ? "Waits since today" : `Waits ${days} day${days > 1 ? "s" : ""}`}
+    </span>
   );
 }
 
@@ -240,7 +256,7 @@ function BriefCard(props: { needYou: number }) {
       {brief ? (
         <Md className="btext" text={brief.text} onItem={open} hasItem={(k) => byKey.has(k)} />
       ) : briefState === "writing" ? (
-        <div className="btext wait">AIfred is reading your tasks, GitHub, and ClickUp to write today's brief…</div>
+        <div className="btext wait">AIfred is reading your tasks, GitHub, ClickUp, and email to write today's brief…</div>
       ) : (
         <div className="btext wait">
           {props.needYou ? `${props.needYou} things need you today. ` : "Nothing urgent is due today. "}
@@ -329,7 +345,7 @@ function HomeBox() {
 }
 
 export function Home() {
-  const { items, today, githubState, clickupState, githubWarning, clickupWarning, tasksError } = useApp();
+  const { items, today, githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
   const [showLater, setShowLater] = useState(false);
   const [showDone, setShowDone] = useState(false);
   const g = groupItems(items, today);
@@ -345,6 +361,7 @@ export function Home() {
           </h2>
           <GoalsCard />
           <BriefCard needYou={g.now.length + g.today.length} />
+          <WaitingCard />
           {tasksError && <div className="note-line err">Cannot load your tasks: {tasksError}</div>}
           {githubState === "loading" && <div className="note-line">Loading GitHub items…</div>}
           {githubWarning && githubState === "ok" && <div className="note-line warn">{githubWarning}</div>}
@@ -352,6 +369,8 @@ export function Home() {
           {clickupState === "loading" && <div className="note-line">Loading ClickUp tasks…</div>}
           {clickupWarning && clickupState === "ok" && <div className="note-line warn">{clickupWarning}</div>}
           {!["loading", "ok", "off"].includes(clickupState) && <div className="note-line err">ClickUp: {clickupState}</div>}
+          {mailWarning && mailState === "ok" && <div className="note-line warn">{mailWarning}</div>}
+          {!["loading", "ok", "off"].includes(mailState) && <div className="note-line err">Gmail: {mailState}</div>}
           <Group title="Needs you now" list={g.now} alert why />
           <Group title="Today" list={g.today} hideToday why />
           <Group title="New" list={g.isNew} why />

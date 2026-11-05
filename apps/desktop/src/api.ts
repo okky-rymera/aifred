@@ -333,8 +333,75 @@ export type CalEvent = {
 export type CalendarList = { fetched_at: number; events: CalEvent[]; warning?: string };
 /** null: Google is not connected, so there is no calendar. */
 export const calendarEvents = (force: boolean) => invoke<CalendarList | null>("calendar_events", { force });
+/** One email thread (gmail.rs). Times in Unix seconds. */
+export type Mail = {
+  id: string;
+  subject: string;
+  /** "reply": you must answer. "sent": you wait for an answer. */
+  kind: "reply" | "sent";
+  /** "reply": who wrote the last message. "sent": who you wrote to. */
+  people: string[];
+  more_people: number;
+  email: string;
+  /** The email addresses of all people. */
+  emails?: string[];
+  last_at: number;
+  /** "reply": the first message after your last one. "sent": your last message. */
+  since: number;
+  snippet: string;
+  /** "reply": you are in To, not only in Cc. */
+  direct: boolean;
+  unread: boolean;
+  question: boolean;
+  messages: number;
+  url: string;
+};
+export type MailList = { fetched_at: number; reply: Mail[]; sent: Mail[]; warning?: string };
+/** null: Gmail is not connected, or the Google login does not allow it. */
+export const gmailThreads = (force: boolean) => invoke<MailList | null>("gmail_threads", { force });
+/** The saved emails at any age. It never downloads. */
+export const gmailSaved = () => invoke<MailList | null>("gmail_saved");
+/** Hides an email until a new message comes in it. hide false: show it again (Undo). */
+export const hideEmail = (id: string, hide: boolean) => invoke<void>("hide_email", { id, hide });
+/** One item of the "waiting for" list (waiting.rs). Days are "YYYY-MM-DD". */
+export type Waiting = {
+  id: number;
+  what: string;
+  who: string;
+  since: string;
+  follow_up: string | null;
+  told: boolean;
+  /** The Gmail thread, when the item came from an email. */
+  thread: string | null;
+  url: string | null;
+  done: boolean;
+  /** Why it closed, for example "Ana Lee answered on Thu 5 Nov". */
+  done_why: string;
+  created: number;
+  updated: number;
+};
+export type NewWaiting = { what?: string; who?: string; since?: string; follow_up?: string; thread?: string };
+/** Only the fields that are set change. follow_up "": no follow-up day. */
+export type WaitingChanges = { what?: string; who?: string; follow_up?: string; done?: boolean };
+/** The open items, then the items that closed in the last 3 days. */
+export const waitingItems = () => invoke<Waiting[]>("waiting_items");
+export const addWaiting = (item: NewWaiting) => invoke<Waiting>("add_waiting", { item });
+export const updateWaiting = (id: number, changes: WaitingChanges) => invoke<Waiting>("update_waiting", { id, changes });
+export const deleteWaiting = (id: number) => invoke<void>("delete_waiting", { id });
 /** The Google connection (google.rs). `features`: each feature, and true when the login allows it. */
-export type GoogleStatus = { client_id: string; secret_set: boolean; connected: boolean; email: string | null; features: [string, boolean][] };
+export type GoogleStatus = {
+  client_id: string;
+  secret_set: boolean;
+  connected: boolean;
+  email: string | null;
+  features: [string, boolean][];
+  /** The features that the user can turn off. */
+  optional: string[];
+  /** The features that the user turned off. The login does not ask for them. */
+  off: string[];
+};
+/** Turns an optional Google feature (Gmail) on or off. */
+export const setGoogleFeature = (name: string, on: boolean) => invoke<GoogleStatus>("set_google_feature", { name, on });
 export const googleStatus = () => invoke<GoogleStatus>("google_status");
 export const setGoogleClient = (clientId: string, clientSecret: string) => invoke<GoogleStatus>("set_google_client", { clientId, clientSecret });
 /** Opens Google's login page and waits until the user is back. */

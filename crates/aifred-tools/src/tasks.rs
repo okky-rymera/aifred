@@ -7,11 +7,14 @@
 //! database. It downloads a new list first when the saved one is too old.
 //!
 //! The goal tools change the user's goals (goals.rs) in the same database.
+//!
+//! The waiting tools change the user's "waiting for" list (waiting.rs) in
+//! the same database. They cannot send or change email.
 
 use aifred_core::tasks::{StepFields, Task, TaskFields, TaskStore, clean_tag};
 use aifred_core::{
-    clickup, default_data_dir, files::now, github_list::GithubStore, goals, overview, plan,
-    settings,
+    clickup, default_data_dir, files::now, github_list::GithubStore, gmail, goals, overview, plan,
+    settings, waiting,
 };
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, model::*, tool,
@@ -100,7 +103,7 @@ struct DayArgs {
 
 #[derive(Deserialize, JsonSchema)]
 struct PlanItemArg {
-    /// The item key from the overview tool, for example "task:t123", "github:owner/repo#7", or "clickup:86a".
+    /// The item key from the overview tool, for example "task:t123", "github:owner/repo#7", "clickup:86a", or "gmail:18c2a".
     key: String,
     /// How many minutes the work takes. Give it when you can guess it. It does not replace a time that the user set.
     minutes: Option<u32>,
@@ -128,6 +131,40 @@ struct GoalEditArgs {
 struct GoalIdArgs {
     /// The goal id, from the goals in overview.
     id: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct WaitingListArgs {
+    /// Also include the closed items. Default false: the open items, and the items closed in the last 3 days.
+    all: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct AddWaitingArgs {
+    /// What the user waits for, in one short line. Example: "The signed contract". Leave out for an email: AIfred uses its subject.
+    what: Option<String>,
+    /// Who the user waits for. Example: "Ana Lee". Leave out for an email: AIfred uses the people it went to.
+    who: Option<String>,
+    /// Since when the user waits, "YYYY-MM-DD". Leave out for today, or for the day of the email.
+    since: Option<String>,
+    /// The day to check, "YYYY-MM-DD". On this day AIfred tells the user when the item is still open. Only when the user gives a day.
+    follow_up: Option<String>,
+    /// The thread of an email from no_reply_yet in the overview. The item then closes by itself when the person answers.
+    thread: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct UpdateWaitingArgs {
+    /// The item id, from waiting_list or overview.
+    id: i64,
+    /// A new text of what the user waits for. Leave out to keep it.
+    what: Option<String>,
+    /// A new person. Leave out to keep it.
+    who: Option<String>,
+    /// A new day to check, "YYYY-MM-DD". "" removes it. Leave out to keep it.
+    follow_up: Option<String>,
+    /// true closes the item (it came, or the user stopped waiting). false opens it again.
+    done: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -202,19 +239,23 @@ impl TaskTools {
 #[tool_router]
 impl TaskTools {
     #[tool(
-        description = "Everything on the user's plate in one call: the user's goals, the open local to-do tasks, the open GitHub items (assigned issues, review requests, and the user's own pull requests), the open ClickUp tasks, and the calendar events of the next 7 days when the calendar is connected. Each item has a short summary of its description. Use this first when the user asks what to do, what is open, or for a plan. Then use item_details or task_details only for the few items that need a closer look. The goals (at most 5) say what matters most to the user now: an item that serves a goal is more important. fetched_at is when each list came from GitHub or ClickUp (Unix seconds)."
+        description = "Everything on the user's plate in one call: the user's goals, the open local to-do tasks, the open GitHub items (assigned issues, review requests, and the user's own pull requests), the open ClickUp tasks, the calendar events of the next 7 days when the calendar is connected, the emails that wait for the user's answer and the emails where the user waits for an answer when Gmail is connected, and the user's waiting-for list. Each item has a short summary of its description. Use this first when the user asks what to do, what is open, or for a plan. Then use item_details or task_details only for the few items that need a closer look. The goals (at most 5) say what matters most to the user now: an item that serves a goal is more important. fetched_at is when each list came from GitHub or ClickUp (Unix seconds)."
     )]
     async fn overview(&self) -> Result<CallToolResult, ErrorData> {
         // Both downloads at the same time: each can take some seconds.
         let gh = GithubStore::new(&self.dir);
-        let (gh_note, cu_note, cal_note) = tokio::join!(
+        let (gh_note, cu_note, cal_note, mail_note) = tokio::join!(
             gh.refresh_if_old(),
             aifred_core::clickup_list::refresh_if_old(&self.dir),
-            aifred_core::calendar::refresh_if_old(&self.dir)
+            aifred_core::calendar::refresh_if_old(&self.dir),
+            gmail::refresh_if_old(&self.dir, settings::tool_max_age_secs(&self.dir))
         );
         let account = clickup::token(&self.dir).map(|t| clickup::account_key(&t));
         let mut out = overview::build(&self.dir, account.as_deref()).map_err(fail)?;
-        let notes: Vec<String> = [gh_note, cu_note, cal_note].into_iter().flatten().collect();
+        let notes: Vec<String> = [gh_note, cu_note, cal_note, mail_note]
+            .into_iter()
+            .flatten()
+            .collect();
         if !notes.is_empty() {
             out["notes"] = notes.into();
         }
@@ -385,6 +426,49 @@ impl TaskTools {
     ) -> Result<CallToolResult, ErrorData> {
         goals::remove(&self.dir, a.id, now()).map_err(fail)?;
         json(&goals::list(&self.dir).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "The user's \"waiting for\" list: what the user waits for from other people, since when, and the follow-up day. An item from an email closes by itself when the person answers."
+    )]
+    async fn waiting_list(
+        &self,
+        Parameters(a): Parameters<WaitingListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        json(&waiting::list(&self.dir, a.all.unwrap_or(false), now()).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Add an item to the user's \"waiting for\" list. Use it when the user says they wait for something from another person, or asks to track an email (give its thread from no_reply_yet in overview). For \"tell me if Ana has not answered by Friday\", give follow_up: on that day AIfred tells the user when the item is still open. Use this, not a job, for that."
+    )]
+    async fn add_waiting(
+        &self,
+        Parameters(a): Parameters<AddWaitingArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let n = waiting::NewWaiting {
+            what: a.what.unwrap_or_default(),
+            who: a.who.unwrap_or_default(),
+            since: a.since,
+            follow_up: a.follow_up,
+            thread: a.thread,
+        };
+        json(&waiting::add(&self.dir, n, now()).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Change an item of the user's \"waiting for\" list: its text, the person, or the follow-up day. Or close it (done true) when it came or the user stopped waiting. Use it only when the user asks."
+    )]
+    async fn update_waiting(
+        &self,
+        Parameters(a): Parameters<UpdateWaitingArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ch = waiting::WaitingChange {
+            what: a.what,
+            who: a.who,
+            follow_up: a.follow_up,
+            done: a.done,
+        };
+        json(&waiting::update(&self.dir, a.id, ch, now()).map_err(fail)?)
     }
 
     #[tool(

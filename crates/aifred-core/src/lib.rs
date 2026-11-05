@@ -11,6 +11,7 @@ pub mod embed;
 pub mod files;
 pub mod github;
 pub mod github_list;
+pub mod gmail;
 pub mod goals;
 pub mod google;
 pub mod history;
@@ -28,5 +29,6 @@ pub mod tasks;
 pub mod text;
 pub mod update;
 pub mod uploads;
+pub mod waiting;
 
 pub use assistant::{Answer, Assistant, default_data_dir};

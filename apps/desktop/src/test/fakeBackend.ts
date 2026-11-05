@@ -19,6 +19,8 @@ import type {
   ItemDetails,
   Job,
   JobRun,
+  Mail,
+  MailList,
   ProgressEvent,
   Settings,
   SideTurn,
@@ -26,6 +28,7 @@ import type {
   TaskChanges,
   Turn,
   UpdateStatus,
+  Waiting,
 } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void, args: Record<string, any>) => Promise<Answer> | Answer;
@@ -43,6 +46,9 @@ export type Fake = {
   /** Runs after edit_goal changes the goal and before it answers. A test
    * can hold the answer with it, so the answer comes after a later change. */
   onEditGoal?: () => Promise<void> | void;
+  /** Runs after gmail_threads makes its list and before it answers. A test
+   * can hold the answer with it, so the answer comes after a later change. */
+  onGmailThreads?: () => Promise<void> | void;
   /** Runs before day_plan answers. A test can hold the plan load with it. */
   onDayPlan?: (day: string) => Promise<void> | void;
   /** Runs before connect_google answers, like a user in the browser. A
@@ -75,6 +81,13 @@ export type Fake = {
   /** The calendar. null: Google is not connected, so no calendar. */
   calendar: CalendarList | null;
   calendarError?: string;
+  /** Gmail. null: Gmail is not connected, so no emails. Hidden threads are left out. */
+  mail: MailList | null;
+  mailError?: string;
+  /** The threads that the user hid ("no answer needed"). */
+  mailHidden: string[];
+  /** The "waiting for" list, like waiting.rs. */
+  waiting: Waiting[];
   /** The Google connection. connect_google connects as me@x.com and allows all features. */
   google: GoogleStatus;
   /** The user's goals, like goals.rs. */
@@ -219,6 +232,12 @@ export function meeting(id: string, title: string, from: string, to: string, ext
   return { id, title, start: at(from), end: at(to), all_day: false, busy: true, attendees: ["Josh", "Ana"], more_attendees: 0, response: "accepted", url: `https://calendar.google.com/e/${id}`, description: "", ...extra };
 }
 
+/** An email thread. `kind` "reply" waits for your answer; "sent" waits for an answer to you. */
+export function mail(id: string, subject: string, kind: Mail["kind"], extra: Partial<Mail> = {}): Mail {
+  const t = nowSecs() - 3 * 86_400;
+  return { id, subject, kind, people: ["Ana Lee"], more_people: 0, email: "ana@y.com", last_at: t, since: t, snippet: "Can you send the price?", direct: true, unread: false, question: true, messages: 1, url: `https://mail.google.com/mail/#all/${id}`, ...extra };
+}
+
 export function answer(text: string, extra: Partial<Answer> = {}): Answer {
   return withInfo({ text, stats: { startup_ms: 10, total_ms: 1500, tool_calls: [] }, model_ms: 1000, cost_usd: 0.005, memory: [], model: null, info: "", ...extra });
 }
@@ -251,7 +270,10 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     memory: [],
     goals: { goals: [], checked: 0, stale: false },
     calendar: null,
-    google: { client_id: "", secret_set: false, connected: false, email: null, features: [["Calendar", false]] },
+    mail: null,
+    mailHidden: [],
+    waiting: [],
+    google: { client_id: "", secret_set: false, connected: false, email: null, features: [["Calendar", false], ["Gmail", false]], optional: ["Gmail"], off: [] },
     fail: {},
     calls: [],
     onAsk: (p) => answer(`You said: ${p}`),
@@ -414,16 +436,102 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       case "connect_google":
         await fake.onConnectGoogle?.();
         if (!fake.google.secret_set) throw "add the client ID and the client secret of your Google registration first";
-        fake.google = { ...fake.google, connected: true, email: "me@x.com", features: [["Calendar", true]] };
-        fake.calendar = fake.calendar ?? { fetched_at: nowSecs(), events: [] };
+        {
+          // The login does not ask for a feature that is turned off.
+          const gmail = !fake.google.off.includes("Gmail");
+          fake.google = { ...fake.google, connected: true, email: "me@x.com", features: [["Calendar", true], ["Gmail", gmail]] };
+          fake.calendar = fake.calendar ?? { fetched_at: nowSecs(), events: [] };
+          fake.mail = gmail ? (fake.mail ?? { fetched_at: nowSecs(), reply: [], sent: [] }) : null;
+        }
         return structuredClone(fake.google);
       case "disconnect_google":
-        fake.google = { ...fake.google, connected: false, email: null, features: [["Calendar", false]] };
+        fake.google = { ...fake.google, connected: false, email: null, features: [["Calendar", false], ["Gmail", false]] };
         fake.calendar = null;
+        fake.mail = null;
         return structuredClone(fake.google);
       case "calendar_events":
         if (fake.calendarError) throw fake.calendarError;
         return structuredClone(fake.calendar);
+      case "set_google_feature": {
+        const name = String(args.name);
+        if (!fake.google.optional.includes(name)) throw `${name} cannot be turned off`;
+        const off = fake.google.off.filter((x) => x !== name);
+        if (!args.on) off.push(name);
+        fake.google = { ...fake.google, off };
+        if (!args.on && name === "Gmail") fake.mail = null;
+        return structuredClone(fake.google);
+      }
+      case "gmail_saved":
+      case "gmail_threads": {
+        if (fake.google.off.includes("Gmail")) return null;
+        // The saved list needs no download, so a download error does not stop it.
+        if (cmd === "gmail_threads" && fake.mailError) throw fake.mailError;
+        if (!fake.mail) return null;
+        const tracked = new Set(fake.waiting.filter((w) => !w.done && w.thread).map((w) => w.thread));
+        const shown = (m: Mail) => !fake.mailHidden.includes(m.id);
+        const list = structuredClone({
+          ...fake.mail,
+          reply: fake.mail.reply.filter(shown),
+          sent: fake.mail.sent.filter((m) => shown(m) && !tracked.has(m.id)),
+        });
+        if (cmd === "gmail_threads") await fake.onGmailThreads?.();
+        return list;
+      }
+      case "hide_email": {
+        const id = String(args.id);
+        fake.mailHidden = fake.mailHidden.filter((x) => x !== id);
+        if (args.hide) fake.mailHidden.push(id);
+        return null;
+      }
+      case "waiting_items":
+        return structuredClone(fake.waiting);
+      case "add_waiting": {
+        const n = args.item as { what?: string; who?: string; since?: string; follow_up?: string; thread?: string };
+        let { what = "", who = "" } = n;
+        let url: string | null = null;
+        if (n.thread) {
+          const m = fake.mail?.sent.find((x) => x.id === n.thread);
+          if (!m) throw `"${n.thread}" is not an email that waits for an answer`;
+          what ||= `An answer to "${m.subject}"`;
+          who ||= m.people.join(", ");
+          url = m.url;
+        }
+        if (!what.trim()) throw "what is empty";
+        if (!who.trim()) throw "who is empty";
+        const w: Waiting = {
+          id: fake.waiting.reduce((a, x) => Math.max(a, x.id), 0) + 1,
+          what: what.trim(),
+          who: who.trim(),
+          since: n.since ?? new Date().toISOString().slice(0, 10),
+          follow_up: n.follow_up ?? null,
+          told: false,
+          thread: n.thread ?? null,
+          url,
+          done: false,
+          done_why: "",
+          created: nowSecs(),
+          updated: nowSecs(),
+        };
+        fake.waiting.push(w);
+        return structuredClone(w);
+      }
+      case "update_waiting": {
+        const w = fake.waiting.find((x) => x.id === args.id);
+        if (!w) throw `no "waiting for" item with id ${args.id}`;
+        const c = args.changes as { what?: string; who?: string; follow_up?: string; done?: boolean };
+        if (c.what !== undefined) w.what = c.what;
+        if (c.who !== undefined) w.who = c.who;
+        if (c.follow_up !== undefined) w.follow_up = c.follow_up || null;
+        if (c.done !== undefined) {
+          w.done = c.done;
+          w.done_why = c.done ? "closed by you" : "";
+        }
+        w.updated = nowSecs();
+        return structuredClone(w);
+      }
+      case "delete_waiting":
+        fake.waiting = fake.waiting.filter((x) => x.id !== args.id);
+        return null;
       case "github_items": {
         // The real app uses a saved list when force is false. The fake
         // counts only the real GitHub calls, so tests can see the difference.

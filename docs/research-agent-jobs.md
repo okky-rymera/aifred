@@ -115,5 +115,5 @@ These are the defaults until the user decides otherwise:
 ## Plan
 
 - **Step 1 (done, 2026-11-05):** jobs table and run history, reminders (once and repeat), the event "a task is done" with the brief refresh, agent jobs with read-only tools, the job tools for the chat, desktop notifications, and a jobs list in the window.
-- **Step 2:** watches with an end ("tell me when PR #123 merges"), and deadlines with a cancel rule ("follow up if Ana has not replied by Friday").
+- **Step 2:** watches with an end ("tell me when PR #123 merges"), and deadlines with a cancel rule ("follow up if Ana has not replied by Friday"). The email case is done (2026-11-05) with the check day of the "waiting for" list (`crates/aifred-core/src/waiting.rs`), not with a job. Watches are not done.
 - **Step 3:** quiet hours, cost limits, and OS timers that work when the app is closed.

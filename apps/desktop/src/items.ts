@@ -1,11 +1,12 @@
-// One list of work items from all sources: your tasks, GitHub, and ClickUp.
-// The item key is the same as in the Rust app (items.rs): "task:<id>",
-// "github:<id>", or "clickup:<id>". The plan, the time guesses, the brief,
+// One list of work items from all sources: your tasks, GitHub, ClickUp, and
+// the emails that wait for your answer. The item key is the same as in the
+// Rust app (items.rs): "task:<id>", "github:<id>", "clickup:<id>", or
+// "gmail:<thread id>". The plan, the time guesses, the brief,
 // and the item chats use it.
 import type * as api from "./api";
 
-export type Src = "me" | "gh" | "cu";
-export const SRC_NAME: Record<Src, string> = { me: "Mine", gh: "GitHub", cu: "ClickUp" };
+export type Src = "me" | "gh" | "cu" | "gm";
+export const SRC_NAME: Record<Src, string> = { me: "Mine", gh: "GitHub", cu: "ClickUp", gm: "Email" };
 
 /** A time guess when there is none: 30 minutes. */
 export const DEFAULT_MINUTES = 30;
@@ -37,6 +38,7 @@ export type Item = {
   task?: api.Task;
   gh?: api.GithubItem;
   cu?: api.ClickupItem;
+  mail?: api.Mail;
 };
 
 export const taskKey = (id: string) => `task:${id}`;
@@ -109,7 +111,10 @@ export function byPlan(a: Item, b: Item): number {
   return r(a) - r(b) || a.title.localeCompare(b.title);
 }
 
-/** All items, from the three lists and what the app knows about them. */
+/** "Mon 2 Nov" of a time in Unix seconds. */
+export const dayOfSecs = (t: number, today: string) => shortDay(dayOf(new Date(t * 1000)), today);
+
+/** All items, from the four lists and what the app knows about them. */
 export function buildItems(
   tasks: api.Task[],
   github: api.GithubItem[],
@@ -118,6 +123,7 @@ export function buildItems(
   est: Record<string, api.Estimate>,
   why: Record<string, string>,
   goal: Record<string, string> = {},
+  mail: api.Mail[] = [],
 ): Item[] {
   const m = new Map(meta.map((x) => [x.key, x]));
   const extra = (key: string) => {
@@ -180,6 +186,24 @@ export function buildItems(
       tags: [],
       done: false,
       cu: c,
+      ...extra(key),
+    });
+  }
+  for (const m of mail) {
+    const key = `gmail:${m.id}`;
+    const who = m.people.join(", ") + (m.more_people ? ` +${m.more_people}` : "");
+    out.push({
+      key,
+      src: "gm",
+      title: m.subject,
+      ref: m.direct ? `from ${who}` : `from ${who} · you are in Cc`,
+      url: m.url,
+      due: null,
+      start: null,
+      priority: null,
+      tags: [],
+      done: false,
+      mail: m,
       ...extra(key),
     });
   }
