@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 17;
+const VERSION: i64 = 18;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -599,6 +599,24 @@ ALTER TABLE brief ADD COLUMN next  TEXT NOT NULL DEFAULT '{}'; -- {\"<item key>\
 ALTER TABLE brief ADD COLUMN draft TEXT NOT NULL DEFAULT '{}'; -- {\"<item key>\": \"email\" | \"doc\" | \"sheet\"}
 ";
 
+/// The log of AIfred's actions in other apps (actions.rs).
+const SCHEMA_18: &str = "
+CREATE TABLE action (
+  id        INTEGER PRIMARY KEY,
+  at        INTEGER NOT NULL,           -- Unix seconds
+  app       TEXT NOT NULL,              -- 'gmail'
+  kind      TEXT NOT NULL,              -- 'draft'
+  item      TEXT NOT NULL,              -- the item key, for example 'gmail:<thread>'
+  title     TEXT NOT NULL,              -- what AIfred did, in one line
+  after     TEXT NOT NULL,              -- the new text, as the user saw it
+  target    TEXT NOT NULL,              -- JSON: the ids in the other app, for Undo
+  url       TEXT NOT NULL,
+  undone_at INTEGER,                    -- NULL: not undone
+  note      TEXT NOT NULL DEFAULT ''    -- why Undo did not delete it, for example
+);
+CREATE INDEX action_by_item ON action(item);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -720,6 +738,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 17 {
         tx.execute_batch(SCHEMA_17)?;
+    }
+    if version < 18 {
+        tx.execute_batch(SCHEMA_18)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

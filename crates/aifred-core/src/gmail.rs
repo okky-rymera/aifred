@@ -44,13 +44,13 @@ const INBOX_MAX: usize = 100;
 const SENT_MAX: usize = 50;
 /// How many threads AIfred reads from Google at the same time. Gmail allows
 /// each user 250 "quota units" per second, and one thread read costs 10.
-/// Fast answers can go over that limit: then call() waits and tries again.
+/// Fast answers can go over that limit: then send() waits and tries again.
 const PARALLEL: usize = 4;
-/// How many times call() sends a request when Gmail is busy.
+/// How many times send() sends a request when Gmail is busy.
 const TRIES: u32 = 4;
 /// Change this when classify() sorts threads in another way: then the
 /// saved threads are read again.
-const RULES: u32 = 3;
+const RULES: u32 = 4;
 /// The meta key of the saved "sent" list.
 const SENT: &str = "gmail_sent";
 /// The meta key of the saved threads, so AIfred reads again only the
@@ -71,6 +71,7 @@ const KEEP_HIDDEN_SECS: u64 = (DAYS as u64 + 1) * 86_400;
 /// The headers that AIfred reads of each message.
 const HEADERS: &[&str] = &[
     "From",
+    "Reply-To",
     "To",
     "Cc",
     "Subject",
@@ -80,6 +81,8 @@ const HEADERS: &[&str] = &[
     "Auto-Submitted",
     "X-Autoreply",
 ];
+/// The labels of messages that are not part of the talk in a thread.
+const NOT_TALK: &[&str] = &["DRAFT", "TRASH", "SPAM"];
 /// Gmail's tabs for mail that is not from a person.
 const BULK_LABELS: &[&str] = &[
     "CATEGORY_PROMOTIONS",
@@ -105,6 +108,11 @@ pub struct Mail {
     /// The email address of the first person in `people`.
     #[serde(default)]
     pub email: String,
+    /// "reply": who a reply goes to (Reply-To, else the sender of the last
+    /// message). The name, or the email when there is no name. Empty for
+    /// "sent", and for emails that AIfred saved before it read Reply-To.
+    #[serde(default)]
+    pub reply_to: String,
     /// The email addresses of all people, not only of the first
     /// MAX_PEOPLE. "sent": an answer of one of them closes a "waiting for"
     /// item (waiting.rs).
@@ -245,8 +253,8 @@ struct RawRef {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawThread {
-    id: String,
+pub(crate) struct RawThread {
+    pub(crate) id: String,
     #[serde(default)]
     history_id: Option<String>,
     #[serde(default)]
@@ -255,11 +263,13 @@ struct RawThread {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawMessage {
+pub(crate) struct RawMessage {
+    #[serde(default)]
+    pub(crate) id: String,
     #[serde(default)]
     label_ids: Vec<String>,
     #[serde(default)]
-    snippet: String,
+    pub(crate) snippet: String,
     #[serde(default)]
     internal_date: Option<String>,
     #[serde(default)]
@@ -278,8 +288,33 @@ struct RawHeader {
     value: String,
 }
 
+impl RawThread {
+    /// The messages of the talk, oldest first. A draft is not a message
+    /// yet, and spam and deleted messages are not part of the talk.
+    pub(crate) fn talk(&self) -> Vec<&RawMessage> {
+        let mut msgs: Vec<&RawMessage> = self
+            .messages
+            .iter()
+            .filter(|m| !NOT_TALK.iter().any(|l| m.has(l)))
+            .collect();
+        msgs.sort_by_key(|m| m.at());
+        msgs
+    }
+}
+
+/// The newest message of `talk` (oldest first) that a person wrote: the
+/// user, or another person. An out-of-office reply or a bounce is not an
+/// answer, so it does not count. classify() and drafts::pick() both use
+/// it, so the list and the reply draft agree on the message to answer.
+pub(crate) fn last_of_talk<'a>(talk: &[&'a RawMessage], me: &[String]) -> Option<&'a RawMessage> {
+    talk.iter()
+        .rev()
+        .find(|m| m.mine(me) || !m.auto_reply())
+        .copied()
+}
+
 impl RawMessage {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.payload.as_ref().and_then(|p| {
             p.headers
                 .iter()
@@ -288,7 +323,7 @@ impl RawMessage {
         })
     }
 
-    fn has(&self, label: &str) -> bool {
+    pub(crate) fn has(&self, label: &str) -> bool {
         self.label_ids.iter().any(|l| l == label)
     }
 
@@ -300,15 +335,23 @@ impl RawMessage {
             .map_or(0, |ms| ms / 1000)
     }
 
-    fn from(&self) -> Option<Person> {
+    pub(crate) fn from(&self) -> Option<Person> {
         addresses(self.header("From").unwrap_or_default())
             .into_iter()
             .next()
     }
 
     /// True when the user wrote the message.
-    fn mine(&self, me: &[String]) -> bool {
+    pub(crate) fn mine(&self, me: &[String]) -> bool {
         self.has("SENT") || self.from().is_some_and(|p| me.contains(&p.email))
+    }
+
+    /// The address of a reply to this message: Reply-To, else From.
+    pub(crate) fn reply_address(&self) -> Option<Person> {
+        addresses(self.header("Reply-To").unwrap_or_default())
+            .into_iter()
+            .next()
+            .or_else(|| self.from())
     }
 
     /// True for mail from a machine: a newsletter, a notification, or an
@@ -349,11 +392,11 @@ impl RawMessage {
 
 /// One address of a From, To, or Cc header.
 #[derive(Debug, Clone, PartialEq)]
-struct Person {
+pub(crate) struct Person {
     /// The name, or the email when there is no name.
-    name: String,
+    pub(crate) name: String,
     /// In small letters.
-    email: String,
+    pub(crate) email: String,
 }
 
 impl Person {
@@ -379,7 +422,7 @@ impl Person {
 }
 
 /// The addresses of a header such as `Ana Lee <ana@x.com>, "Doe, J" <j@y.com>, bob@z.com`.
-fn addresses(header: &str) -> Vec<Person> {
+pub(crate) fn addresses(header: &str) -> Vec<Person> {
     // Split at commas that are not in quotes or in <>.
     let mut parts = Vec::new();
     let (mut cur, mut quoted, mut angle) = (String::new(), false, false);
@@ -425,7 +468,7 @@ fn addresses(header: &str) -> Vec<Person> {
 /// Gmail's snippets have HTML codes for some characters. A long snippet
 /// ends with "…" and has at most SNIPPET_CHARS characters, so it is short
 /// enough to be its own summary (summaries.rs).
-fn plain(snippet: &str) -> String {
+pub(crate) fn plain(snippet: &str) -> String {
     let t = snippet
         .replace("&#39;", "'")
         .replace("&quot;", "\"")
@@ -444,7 +487,7 @@ fn plain(snippet: &str) -> String {
 }
 
 /// The thread in Gmail, in the account of `email`.
-fn web_link(email: &str, thread: &str) -> String {
+pub(crate) fn web_link(email: &str, thread: &str) -> String {
     let who: String = email
         .chars()
         .map(|c| match c {
@@ -460,8 +503,7 @@ fn web_link(email: &str, thread: &str) -> String {
 /// two lists (or None), and the newest message of each other person,
 /// newest first.
 fn classify(t: &RawThread, me: &[String]) -> (Option<Mail>, Vec<Answer>) {
-    let mut msgs: Vec<&RawMessage> = t.messages.iter().filter(|m| !m.has("DRAFT")).collect();
-    msgs.sort_by_key(|m| m.at());
+    let msgs = t.talk();
     // An out-of-office reply or a bounce is not an answer.
     let mut seen = HashSet::new();
     let answer: Vec<Answer> = msgs
@@ -480,7 +522,7 @@ fn classify(t: &RawThread, me: &[String]) -> (Option<Mail>, Vec<Answer>) {
         .collect();
     // The last message of a person. An out-of-office reply or a bounce
     // after the user's message does not change who waits for whom.
-    let Some(last) = msgs.iter().rev().find(|m| m.mine(me) || !m.auto_reply()) else {
+    let Some(last) = last_of_talk(&msgs, me) else {
         return (None, answer);
     };
     let subject = msgs
@@ -506,6 +548,7 @@ fn classify(t: &RawThread, me: &[String]) -> (Option<Mail>, Vec<Answer>) {
                 .collect(),
             email,
             emails,
+            reply_to: String::new(),
             last_at: last.at(),
             since,
             snippet: plain(&last.snippet),
@@ -553,7 +596,12 @@ fn classify(t: &RawThread, me: &[String]) -> (Option<Mail>, Vec<Answer>) {
         .take_while(|m| !m.mine(me))
         .last()
         .map_or(last.at(), |m| m.at());
+    // The same address as drafts::pick.
+    let reply_to = last
+        .reply_address()
+        .map_or_else(|| from.name.clone(), |p| p.name);
     let mut m = base("reply", vec![from], since);
+    m.reply_to = reply_to;
     m.direct = direct;
     m.unread = last.has("UNREAD");
     (Some(m), answer)
@@ -569,21 +617,59 @@ struct Api {
 }
 
 /// The answer of one call. None: the thread does not exist (any more).
-/// When Gmail is busy (a rate limit, or a server error), it waits and
-/// tries again, at most TRIES times.
 async fn call(api: &Api, path: &str, query: &[(&str, &str)]) -> anyhow::Result<Option<Vec<u8>>> {
+    let url = format!("{API}/{path}");
+    let (status, body) = send(
+        &api.client,
+        &api.token,
+        reqwest::Method::GET,
+        &url,
+        query,
+        None,
+    )
+    .await?;
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        bail!(UNAUTHORIZED);
+    }
+    if status.is_success() {
+        return Ok(Some(body));
+    }
+    Err(refused(
+        status,
+        &serde_json::from_slice(&body).unwrap_or_default(),
+    ))
+}
+
+/// Sends one Gmail call, and gives the status and the body of the answer.
+/// When AIfred cannot reach Gmail, or Gmail is busy (a rate limit, or a
+/// server error), it waits and tries again, at most TRIES times. A call
+/// that can make a thing (POST) is sent again only when Gmail surely did
+/// not do it: no connection, or a rate limit (HTTP 429, or HTTP 403 with
+/// the reason rateLimitExceeded or userRateLimitExceeded).
+pub(crate) async fn send(
+    client: &reqwest::Client,
+    token: &str,
+    method: reqwest::Method,
+    url: &str,
+    query: &[(&str, &str)],
+    json: Option<&Value>,
+) -> anyhow::Result<(reqwest::StatusCode, Vec<u8>)> {
+    let safe_again = matches!(method, reqwest::Method::GET | reqwest::Method::DELETE);
     let mut wait = std::time::Duration::from_secs(1);
     let mut tries = 1;
     loop {
-        let sent = api
-            .client
-            .get(format!("{API}/{path}"))
-            .bearer_auth(&api.token)
+        let mut req = client
+            .request(method.clone(), url)
+            .bearer_auth(token)
             .query(query)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await;
-        let r = match sent {
+            .timeout(std::time::Duration::from_secs(30));
+        if let Some(j) = json {
+            req = req.json(j);
+        }
+        let r = match req.send().await {
             Err(e) if e.is_connect() && tries < TRIES => {
                 tokio::time::sleep(wait).await;
                 wait *= 2;
@@ -593,37 +679,46 @@ async fn call(api: &Api, path: &str, query: &[(&str, &str)]) -> anyhow::Result<O
             r => r.context("cannot reach Gmail")?,
         };
         let status = r.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            bail!(UNAUTHORIZED);
-        }
         let retry_after = r
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok());
-        let body = r.bytes().await?.to_vec();
-        if status.is_success() {
-            return Ok(Some(body));
+        let body = r
+            .bytes()
+            .await
+            .context("cannot read Gmail's answer")?
+            .to_vec();
+        if !status.is_success() && tries < TRIES {
+            let v: Value = serde_json::from_slice(&body).unwrap_or_default();
+            if send_again(safe_again, status, &v) {
+                let w = retry_after
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(wait)
+                    .min(std::time::Duration::from_secs(30));
+                tokio::time::sleep(w).await;
+                wait *= 2;
+                tries += 1;
+                continue;
+            }
         }
-        let v: Value = serde_json::from_slice(&body).unwrap_or_default();
-        if tries < TRIES && busy(status, &v) {
-            let w = retry_after
-                .map(std::time::Duration::from_secs)
-                .unwrap_or(wait)
-                .min(std::time::Duration::from_secs(30));
-            tokio::time::sleep(w).await;
-            wait *= 2;
-            tries += 1;
-            continue;
-        }
-        match v["error"]["message"].as_str() {
-            Some(m) => bail!("Gmail said: {m}"),
-            None => bail!("Gmail said {status}"),
-        }
+        return Ok((status, body));
     }
+}
+
+/// The error of a call that Gmail did not do.
+pub(crate) fn refused(status: reqwest::StatusCode, v: &Value) -> anyhow::Error {
+    match v["error"]["message"].as_str() {
+        Some(m) => anyhow::anyhow!("Gmail said: {m}"),
+        None => anyhow::anyhow!("Gmail said {status}"),
+    }
+}
+
+/// True when send() sends a call again. `safe_again`: the call makes
+/// nothing (GET or DELETE). A server error can come after Gmail did the
+/// call, so a POST is sent again only after a rate limit.
+fn send_again(safe_again: bool, status: reqwest::StatusCode, body: &Value) -> bool {
+    busy(status, body) && (safe_again || !status.is_server_error())
 }
 
 /// True when Gmail refused a call only for now: a rate limit (HTTP 429,
@@ -1030,6 +1125,27 @@ pub fn save(dir: &Path, d: Downloaded, now: u64) -> anyhow::Result<Option<MailLi
         return Ok(None);
     }
     saved(dir, &account, u64::MAX, now)
+}
+
+/// The user's addresses in small letters, the account's address first:
+/// the list of the last download of this login, or only the account's
+/// address. Empty when Google is not connected.
+pub(crate) fn my_addresses_saved(dir: &Path) -> anyhow::Result<Vec<String>> {
+    let Some(account) = crate::google::account(dir)? else {
+        return Ok(Vec::new());
+    };
+    let cache = db::read(dir, |c| db::meta(c, CACHE))?
+        .and_then(|t| serde_json::from_str::<Cache>(&t).ok())
+        .filter(|c| c.account == account && !c.me.is_empty());
+    Ok(match cache {
+        Some(c) => c.me,
+        None => vec![
+            account
+                .split_once(' ')
+                .map_or("", |(_, e)| e)
+                .to_lowercase(),
+        ],
+    })
 }
 
 /// Removes the saved emails, for example after the user disconnects Google.
@@ -1488,6 +1604,37 @@ pub(crate) mod tests {
         let m = classify(&t, &me()).0.unwrap();
         assert_eq!(m.since, 300);
         assert!(m.unread);
+        assert_eq!(m.reply_to, "Ana Lee");
+    }
+
+    #[test]
+    fn spam_and_deleted_messages_are_not_part_of_the_talk() {
+        // The user's reply is in the trash: Ana still waits for an answer.
+        let t = thread(vec![
+            msg(100, &["INBOX"], ANA, "me@x.com", &[]),
+            msg(200, &["SENT", "TRASH"], "me@x.com", "ana@y.com", &[]),
+        ]);
+        let m = classify(&t, &me()).0.unwrap();
+        assert_eq!((m.kind.as_str(), m.messages), ("reply", 1));
+        // A newer message in spam does not change who waits.
+        let t = thread(vec![
+            msg(100, &["SENT"], "me@x.com", "ana@y.com", &[]),
+            msg(200, &["SPAM"], ANA, "me@x.com", &[]),
+        ]);
+        assert_eq!(classify(&t, &me()).0.unwrap().kind, "sent");
+        // The reply goes to Reply-To, as drafts::pick says.
+        let t = thread(vec![msg(
+            100,
+            &["INBOX"],
+            ANA,
+            "me@x.com",
+            &[("Reply-To", "Sales <sales@y.com>")],
+        )]);
+        let m = classify(&t, &me()).0.unwrap();
+        assert_eq!(
+            (m.people[0].as_str(), m.reply_to.as_str()),
+            ("Ana Lee", "Sales")
+        );
     }
 
     #[test]
@@ -1711,6 +1858,13 @@ pub(crate) mod tests {
         assert!(busy(S::FORBIDDEN, &limit));
         assert!(!busy(S::FORBIDDEN, &denied));
         assert!(!busy(S::BAD_REQUEST, &Value::Null));
+
+        // A POST goes again after a rate limit, not after a server error.
+        assert!(send_again(false, S::FORBIDDEN, &limit));
+        assert!(send_again(false, S::TOO_MANY_REQUESTS, &Value::Null));
+        assert!(!send_again(false, S::SERVICE_UNAVAILABLE, &Value::Null));
+        assert!(send_again(true, S::SERVICE_UNAVAILABLE, &Value::Null));
+        assert!(!send_again(true, S::FORBIDDEN, &denied));
     }
 
     #[test]
@@ -1760,6 +1914,7 @@ pub(crate) mod tests {
             more_people: 0,
             email: "ana@y.com".into(),
             emails: vec!["ana@y.com".into()],
+            reply_to: "Ana Lee".into(),
             last_at,
             since: last_at,
             snippet: "Can you send the price?".into(),

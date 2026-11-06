@@ -1,5 +1,5 @@
 //! One connection to the user's Google account, for all Google features:
-//! the calendar and Gmail now, and later Docs and Sheets.
+//! the calendar, Gmail, and Gmail drafts now, and later Docs and Sheets.
 //!
 //! Each user makes their own Google app registration (an OAuth client of
 //! the type "Desktop app") in Google Cloud Console and gives AIfred its
@@ -29,8 +29,12 @@ use crate::files;
 
 /// Read the user's calendars.
 pub const CALENDAR: &str = "https://www.googleapis.com/auth/calendar.readonly";
-/// Read the user's email. AIfred never sends, changes, or deletes email.
+/// Read the user's email.
 pub const GMAIL: &str = "https://www.googleapis.com/auth/gmail.readonly";
+/// Make and delete Gmail drafts (drafts.rs). Google has no narrower access
+/// for drafts: this access can also send email. AIfred never sends: no
+/// code of AIfred calls Gmail's send.
+pub const GMAIL_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
 /// The account's email, so the window can show which account is connected.
 const IDENTITY: &[&str] = &["openid", "email"];
 
@@ -41,6 +45,12 @@ pub struct Feature {
     /// The user can turn the feature off on the Settings page. Then the
     /// login does not ask for its access, and AIfred does not use it.
     pub optional: bool,
+    /// An optional feature that is off until the user turns it on: a
+    /// feature that changes things in Google.
+    pub starts_off: bool,
+    /// The feature that this feature needs. When that feature is off, this
+    /// feature is off too, and the login does not ask for its access.
+    pub needs: Option<&'static str>,
     /// Removes what AIfred saved of the feature: when the user turns it
     /// off, or when the login ends.
     pub forget: fn(&Path) -> anyhow::Result<()>,
@@ -53,15 +63,32 @@ pub const FEATURES: &[Feature] = &[
         name: "Calendar",
         scopes: &[CALENDAR],
         optional: false,
+        starts_off: false,
+        needs: None,
         forget: crate::calendar::forget,
     },
     Feature {
         name: "Gmail",
         scopes: &[GMAIL],
         optional: true,
+        starts_off: false,
+        needs: None,
         forget: crate::gmail::forget,
     },
+    Feature {
+        name: DRAFTS,
+        scopes: &[GMAIL_COMPOSE],
+        optional: true,
+        starts_off: true,
+        // A draft is a reply to an email that AIfred read in Gmail.
+        needs: Some("Gmail"),
+        // The drafts are in Gmail, and the log of AIfred's actions stays.
+        forget: |_| Ok(()),
+    },
 ];
+
+/// The name of the Gmail drafts feature.
+pub const DRAFTS: &str = "Gmail drafts";
 
 /// The longest wait for the user to finish the login in the browser.
 pub const LOGIN_WAIT: Duration = Duration::from_secs(300);
@@ -113,6 +140,39 @@ struct Saved {
     /// user, so a new login or a new registration keeps it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     off: Vec<String>,
+    /// The features with `starts_off` that the user turned on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    on: Vec<String>,
+}
+
+impl Saved {
+    /// True when the user turned the feature `f` off, or did not turn it on.
+    fn own_off(&self, f: &Feature) -> bool {
+        f.optional
+            && if f.starts_off {
+                !self.on.iter().any(|o| o == f.name)
+            } else {
+                self.off.iter().any(|o| o == f.name)
+            }
+    }
+
+    /// True when the feature `name` is off: by the user's choice, or
+    /// because a feature that it needs is off.
+    fn is_off(&self, name: &str) -> bool {
+        FEATURES
+            .iter()
+            .find(|f| f.name == name)
+            .is_some_and(|f| self.own_off(f) || f.needs.is_some_and(|n| self.is_off(n)))
+    }
+
+    /// The names of the optional features that are off now.
+    fn turned_off(&self) -> Vec<String> {
+        FEATURES
+            .iter()
+            .filter(|f| f.optional && self.is_off(f.name))
+            .map(|f| f.name.to_string())
+            .collect()
+    }
 }
 
 fn path(dir: &Path) -> PathBuf {
@@ -147,6 +207,7 @@ fn clear_login(dir: &Path, keep_pending: bool) -> anyhow::Result<()> {
             client_secret: s.client_secret,
             pending: if keep_pending { s.pending } else { None },
             off: s.off,
+            on: s.on,
             ..Saved::default()
         },
     )
@@ -188,7 +249,7 @@ pub fn status(dir: &Path) -> anyhow::Result<GoogleStatus> {
             .filter(|f| f.optional)
             .map(|f| f.name.to_string())
             .collect(),
-        off: s.off.clone(),
+        off: s.turned_off(),
     })
 }
 
@@ -208,10 +269,18 @@ pub fn account(dir: &Path) -> anyhow::Result<Option<String>> {
 /// A feature that the user turned off counts as not allowed.
 pub fn allows(dir: &Path, scope: &str) -> anyhow::Result<bool> {
     let s = load(dir)?;
+    let turned_off = s.turned_off();
     let off = FEATURES
         .iter()
-        .any(|f| f.scopes.contains(&scope) && s.off.iter().any(|o| o == f.name));
+        .any(|f| f.scopes.contains(&scope) && turned_off.iter().any(|o| o == f.name));
     Ok(!off && s.refresh_token.is_some() && s.scopes.iter().any(|g| g == scope))
+}
+
+/// True when Google is connected and the login allows `scope`, also when
+/// the user turned the feature off. Undo of a Gmail draft uses it.
+pub(crate) fn login_allows(dir: &Path, scope: &str) -> anyhow::Result<bool> {
+    let s = load(dir)?;
+    Ok(s.refresh_token.is_some() && s.scopes.iter().any(|g| g == scope))
 }
 
 /// Turns an optional feature on or off. Off: AIfred removes what it saved
@@ -228,9 +297,15 @@ pub fn set_feature(dir: &Path, name: &str, on: bool) -> anyhow::Result<GoogleSta
         // A file that AIfred cannot read stays: a tick of a box must not
         // remove the registration and the login.
         let mut s = load(dir).context("cannot change the Google features")?;
+        if on && let Some(n) = f.needs.filter(|n| s.is_off(n)) {
+            bail!("{name} needs {n}. Tick \"Use {n}\" first");
+        }
         s.off.retain(|o| o != name);
-        if !on {
-            s.off.push(name.to_string());
+        s.on.retain(|o| o != name);
+        match (f.starts_off, on) {
+            (true, true) => s.on.push(name.to_string()),
+            (false, false) => s.off.push(name.to_string()),
+            _ => {}
         }
         save(dir, &s)
     })?;
@@ -249,12 +324,31 @@ pub(crate) fn fake_login(dir: &Path, email: &str) {
             client_id: "123-abc.apps.googleusercontent.com".into(),
             client_secret: "sec".into(),
             refresh_token: Some(format!("refresh-{email}")),
-            scopes: vec![CALENDAR.into(), GMAIL.into()],
+            scopes: vec![CALENDAR.into(), GMAIL.into(), GMAIL_COMPOSE.into()],
             email: Some(email.into()),
             ..Saved::default()
         },
     )
     .unwrap();
+}
+
+/// Removes `scope` from the fake login, as a new login without that
+/// feature would.
+#[cfg(test)]
+pub(crate) fn fake_drop_scope(dir: &Path, scope: &str) {
+    let mut s = load(dir).unwrap();
+    s.scopes.retain(|g| g != scope);
+    save(dir, &s).unwrap();
+}
+
+/// Gives the fake login an access token that does not end, so a call
+/// to a fake Google server needs no token renewal.
+#[cfg(test)]
+pub(crate) fn fake_access(dir: &Path, token: &str) {
+    let mut s = load(dir).unwrap();
+    s.access_token = Some(token.into());
+    s.expires_at = u64::MAX / 2;
+    save(dir, &s).unwrap();
 }
 
 /// Saves the user's registration. A new client ID ends the old login: its
@@ -288,6 +382,7 @@ pub fn set_client(
                 client_id: id.into(),
                 client_secret: secret.into(),
                 off: old.off,
+                on: old.on,
                 ..Saved::default()
             }
         };
@@ -373,7 +468,7 @@ pub async fn begin(dir: &Path, ends: Endpoints) -> anyhow::Result<Login> {
             ("client_id", s.client_id.as_str()),
             ("redirect_uri", &redirect),
             ("response_type", "code"),
-            ("scope", &all_scopes(&s.off).join(" ")),
+            ("scope", &all_scopes(&s.turned_off()).join(" ")),
             ("code_challenge", &challenge(&verifier)),
             ("code_challenge_method", "S256"),
             ("state", &state),
@@ -872,9 +967,20 @@ mod tests {
         assert!(set_feature(&d, "Calendar", false).is_err(), "not optional");
         assert!(set_feature(&d, "Docs", false).is_err());
 
+        // Gmail drafts is off until the user turns it on, also when the
+        // login allows it.
+        assert!(!allows(&d, GMAIL_COMPOSE).unwrap());
+        assert!(!all_scopes(&status(&d).unwrap().off).contains(&GMAIL_COMPOSE));
+        let st = set_feature(&d, DRAFTS, true).unwrap();
+        assert!(st.off.is_empty(), "{:?}", st.off);
+        assert!(allows(&d, GMAIL_COMPOSE).unwrap());
+        assert!(all_scopes(&st.off).contains(&GMAIL_COMPOSE));
+        let st = set_feature(&d, DRAFTS, false).unwrap();
+        assert_eq!(st.off, [DRAFTS]);
+
         let st = set_feature(&d, "Gmail", false).unwrap();
-        assert_eq!(st.off, ["Gmail"]);
-        assert_eq!(st.optional, ["Gmail"]);
+        assert_eq!(st.off, ["Gmail", DRAFTS]);
+        assert_eq!(st.optional, ["Gmail", DRAFTS]);
         assert!(
             !allows(&d, GMAIL).unwrap(),
             "off, also when the login allows it"
@@ -889,13 +995,27 @@ mod tests {
             "the login does not ask for it"
         );
         assert!(all_scopes(&st.off).contains(&CALENDAR));
+        // Gmail drafts needs Gmail: it cannot go on while Gmail is off.
+        let e = set_feature(&d, DRAFTS, true).unwrap_err();
+        assert!(e.to_string().contains("needs Gmail"), "{e}");
+        assert!(!all_scopes(&status(&d).unwrap().off).contains(&GMAIL_COMPOSE));
+
+        // Gmail off also turns drafts off, and on again gives them back.
+        set_feature(&d, "Gmail", true).unwrap();
+        set_feature(&d, DRAFTS, true).unwrap();
+        let st = set_feature(&d, "Gmail", false).unwrap();
+        assert_eq!(st.off, ["Gmail", DRAFTS]);
+        assert!(!allows(&d, GMAIL_COMPOSE).unwrap());
+        assert!(!all_scopes(&st.off).contains(&GMAIL_COMPOSE));
+
         // A new registration keeps the choice.
         let st = set_client(&d, "9-z.apps.googleusercontent.com", "s").unwrap();
-        assert_eq!(st.off, ["Gmail"]);
+        assert_eq!(st.off, ["Gmail", DRAFTS]);
 
         let st = set_feature(&d, "Gmail", true).unwrap();
-        assert!(st.off.is_empty());
+        assert!(st.off.is_empty(), "{:?}", st.off);
         assert!(all_scopes(&st.off).contains(&GMAIL));
+        assert!(all_scopes(&st.off).contains(&GMAIL_COMPOSE));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -913,7 +1033,8 @@ mod tests {
             st.features,
             [
                 ("Calendar".to_string(), false),
-                ("Gmail".to_string(), false)
+                ("Gmail".to_string(), false),
+                (DRAFTS.to_string(), false)
             ]
         );
         #[cfg(unix)]
@@ -1059,7 +1180,11 @@ mod tests {
         // Google gave only the calendar: the user unticked Gmail.
         assert_eq!(
             st.features,
-            [("Calendar".to_string(), true), ("Gmail".to_string(), false)]
+            [
+                ("Calendar".to_string(), true),
+                ("Gmail".to_string(), false),
+                (DRAFTS.to_string(), false)
+            ]
         );
         assert!(allows(&d, CALENDAR).unwrap() && !allows(&d, GMAIL).unwrap());
         // Without the Gmail access, the saved Gmail data is gone.

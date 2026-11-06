@@ -1,7 +1,8 @@
 // Suggested work (plan step 7 in docs/plan-assistant.md): the next action
 // of an item from the brief, and steps that AIfred suggests for an item.
-// AIfred cannot change other apps yet. For a step that is text in an email,
-// a Google Doc, or a Google Sheet, it says that it can draft it later.
+// For a step that is text in an email, a Google Doc, or a Google Sheet, it
+// says that AIfred can draft it. Now it can write replies to emails
+// (Drafts.tsx). Docs and Sheets come later.
 import { useEffect, useState } from "react";
 import * as api from "./api";
 import { useApp } from "./ctx";
@@ -13,9 +14,20 @@ export const DRAFT_TEXT: Record<api.DraftKind, string> = {
   doc: "AIfred can draft the Doc text later",
   sheet: "AIfred can draft the Sheet change later",
 };
-const DRAFT_HINT = "AIfred cannot change other apps yet. When it can, it makes a draft for you to check. It sends nothing by itself.";
+const DRAFT_HINT = "AIfred makes a draft for you to check. It sends nothing by itself. Now it can write replies to emails. Docs, Sheets, and new emails come later.";
 
-function Who({ draft }: { draft?: api.DraftKind }) {
+/** `replyTo`: the item is an email from this person, so AIfred can write a
+ * reply to them now. The label names them: the next action can be an email
+ * to another person, and "Write a reply" cannot write that one. */
+function Who({ draft, replyTo }: { draft?: api.DraftKind; replyTo?: string }) {
+  if (draft === "email" && replyTo !== undefined) {
+    const to = replyTo || "the sender";
+    return (
+      <span className="who ai" title={`Click "Write a reply" in the item panel. The reply goes to ${to}. Write an email to another person yourself. AIfred sends nothing by itself.`}>
+        AIfred can write a reply to {to}
+      </span>
+    );
+  }
   return draft ? (
     <span className="who ai" title={DRAFT_HINT}>
       {DRAFT_TEXT[draft]}
@@ -32,7 +44,7 @@ export function NextStep({ item: i }: { item: Item }) {
   if (!i.next || i.done) return null;
   return (
     <div className="next-line">
-      <span className="k">Next:</span> <span className="nx">{i.next}</span> <Who draft={i.draft} />
+      <span className="k">Next:</span> <span className="nx">{i.next}</span> <Who draft={i.draft} replyTo={i.src === "gm" ? i.mail?.reply_to || (i.mail?.people[0] ?? "") : undefined} />
     </div>
   );
 }

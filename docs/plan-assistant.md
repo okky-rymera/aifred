@@ -134,11 +134,22 @@ Done: the brief call also gives the next action of each item that it names, and 
 Warning: when AIfred reads email and can also change things, one bad email can make the AI leak data or make changes. Simon Willison calls this the "lethal trifecta": private data, text from strangers, and a way to send data out ([his post](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)).
 
 - [ ] Make drafts first, in the app's own review place: Gmail drafts, Google Docs suggestions, Sheets comments. The Docs API can add suggestions and comments since September 2026 ([Google](https://workspaceupdates.googleblog.com/2026/09/programmatic-comment-and-suggestion.html)). Google's Gmail tool for AI can make drafts, but it cannot send ([Google](https://developers.google.com/workspace/guides/configure-mcp-servers)).
-- [ ] Set approval by the damage that an action can do. Reading and drafting run freely. Sending, deleting, and changes that other people can see need a clear "yes".
-- [ ] Do not accept a vague reply as a "yes".
-- [ ] Keep a log of each action, with Undo.
-- [ ] An AI run that read email, Slack, or other text from strangers cannot write to an app outside the computer. Use the same split as the read-only jobs.
-- [ ] Show each change before it is made (before and after).
+  - [x] Gmail reply drafts.
+  - [ ] Google Docs suggestions.
+  - [ ] Sheets comments.
+- [x] Set approval by the damage that an action can do. Reading and drafting run freely. Sending, deleting, and changes that other people can see need a clear "yes".
+- [x] Do not accept a vague reply as a "yes".
+- [x] Keep a log of each action, with Undo.
+- [x] An AI run that read email, Slack, or other text from strangers cannot write to an app outside the computer. Use the same split as the read-only jobs.
+- [x] Show each change before it is made (before and after).
+
+Done: Gmail reply drafts (`crates/aifred-core/src/drafts.rs`, `apps/desktop/src/Drafts.tsx`). "Use Gmail drafts" in Settings is off until the user turns it on. It asks Google for the `gmail.compose` access. Google has no smaller access for drafts, and this access can also send. AIfred has no code that sends. "✦ Write a reply" on an email item is one AI call with no tools. It gets only the email and the user's note: no memory facts, no other items. The address comes from the thread, not from the AI. The user reads and changes the text. Only the click on "Save as Gmail draft" saves it, in the Gmail thread. The save fails when the thread changed after the user saw the reply. The chat, the plan chat, and the jobs have no tool that writes to Gmail. So there is no chat "yes" to check: only a button saves. Each draft goes in the action log (`crates/aifred-core/src/actions.rs`), in the item panel and on the Settings page. Undo deletes the draft only when the user did not change it in Gmail. Not done yet:
+- Check with a real Gmail account: the draft shows in the thread, the reply address is right, and Undo works. The tests use a fake Gmail server.
+- Undo finds a draft that the user changed in Gmail by its message id. Gmail gives a draft a new message id when it saves a change. This is from Google's API documents, not from a test with real Gmail.
+- The AI sees only Google's short preview of the email, not the full text. A reply to a long email can miss facts.
+- Only replies. AIfred cannot write a new email, and cannot add people in Cc.
+- The reply has no name at the end. The user adds it.
+- Google Docs suggestions and Sheets comments are not done.
 
 ## Not checked
 

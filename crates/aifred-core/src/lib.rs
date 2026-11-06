@@ -1,5 +1,6 @@
 //! aifred core: memory, history, tasks, tools, and swappable AI backends.
 
+pub mod actions;
 pub mod assistant;
 pub mod backend;
 pub mod brief;
@@ -7,6 +8,7 @@ pub mod calendar;
 pub mod clickup;
 pub mod clickup_list;
 pub mod db;
+pub mod drafts;
 pub mod embed;
 pub mod files;
 pub mod github;

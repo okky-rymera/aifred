@@ -560,6 +560,52 @@ async fn suggest_steps(
     app.assistant.suggest_steps(&key).await.map_err(err)
 }
 
+/// Writes a reply to an email item (drafts.rs). It is one AI call with no
+/// tools. It saves nothing: the window shows the reply first.
+#[tauri::command]
+async fn write_reply(
+    app: State<'_, App>,
+    key: String,
+    note: String,
+) -> CmdResult<aifred_core::drafts::Draft> {
+    app.assistant.write_reply(&key, &note).await.map_err(err)
+}
+
+/// Saves the reply that the user checked as a Gmail draft, and logs it.
+/// Only a click of the user calls it: no AI can.
+#[tauri::command]
+async fn save_reply_draft(
+    app: State<'_, App>,
+    key: String,
+    to: String,
+    last_message: String,
+    body: String,
+) -> CmdResult<aifred_core::actions::Action> {
+    aifred_core::drafts::save(&app.assistant.dir, &key, &to, &last_message, &body, now())
+        .await
+        .map_err(err)
+}
+
+/// AIfred's actions in other apps, newest first. With `item`: only its actions.
+#[tauri::command]
+async fn actions(
+    app: State<'_, App>,
+    item: Option<String>,
+) -> CmdResult<Vec<aifred_core::actions::Action>> {
+    blocking(&app, move |a| {
+        aifred_core::actions::list(&a.dir, item.as_deref())
+    })
+    .await
+}
+
+/// Undoes an action: deletes the Gmail draft when nobody changed it.
+#[tauri::command]
+async fn undo_action(app: State<'_, App>, id: i64) -> CmdResult<aifred_core::actions::Action> {
+    aifred_core::drafts::undo(&app.assistant.dir, id, now())
+        .await
+        .map_err(err)
+}
+
 /// Puts the steps that the user picked on the open task of the item's
 /// group, or on a new task under the item (steps.rs).
 #[tauri::command]
@@ -1512,6 +1558,10 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         item_details,
         suggest_steps,
         add_steps,
+        write_reply,
+        save_reply_draft,
+        actions,
+        undo_action,
         update_status,
         check_update,
         restart_to_update

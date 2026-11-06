@@ -1,6 +1,7 @@
 import { useState } from "react";
 import * as api from "./api";
 import { GoogleSection } from "./Google";
+import { ActionLogSection } from "./Drafts";
 
 const REFRESH_CHOICES = [
   { minutes: 5, label: "Every 5 minutes" },
@@ -289,6 +290,7 @@ export function SettingsPage(props: {
 
       <ClickupSection status={props.clickupToken ?? null} onChanged={() => props.onClickupTokenChanged?.()} />
       <GoogleSection onChanged={() => props.onGoogleChanged?.()} />
+      <ActionLogSection />
 
       <UpdateSection status={props.update ?? null} onChanged={(s) => props.onUpdateChanged?.(s)} busy={props.busy} />
 

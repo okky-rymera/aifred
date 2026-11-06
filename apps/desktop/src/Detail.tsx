@@ -10,6 +10,7 @@ import { Minutes } from "./Plan";
 import { PriPill } from "./Home";
 import { SameWork } from "./Links";
 import { NextStep, SuggestSteps } from "./Steps";
+import { ReplyDraft } from "./Drafts";
 
 /** Text that saves when you leave the box, or press Enter. */
 function useField(value: string, save: (v: string) => void) {
@@ -312,6 +313,7 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
         {i.task && <Steps item={i} />}
         {!i.task && !i.done && <div className="d-sec">Steps</div>}
         <SuggestSteps item={i} />
+        <ReplyDraft item={i} />
         {i.task && i.task.files.length > 0 && (
           <>
             <div className="d-sec">

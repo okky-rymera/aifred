@@ -246,7 +246,8 @@ The brief and the chat get the linked items as one piece of work (`same_work` in
 - For each item that the brief names, the brief also gives the next action, for example "Next: Reply to Ana with the price." It shows under the reason in the home list and in the item panel. It costs no extra AI call: the brief call writes it.
 - A label says who does the next action:
   - "You do this": only you can do it, for example a decision, a call, code, or a review.
-  - "AIfred can draft the email later" (or the Doc text, or the Sheet change): AIfred cannot change other apps yet. When it can, it makes a draft for you to check. It sends nothing by itself.
+  - "AIfred can write a reply to (name)": the item is an email from that person. Use "Write a reply" in the item panel (see "Reply drafts" below). An email to another person, you write yourself.
+  - "AIfred can draft the email later" (or the Doc text, or the Sheet change): AIfred cannot do this yet. When it can, it makes a draft for you to check. It sends nothing by itself.
 - "✦ Suggest steps" in the item panel splits an item into 2 to 8 steps. It is one AI call (Sonnet) on your Claude login. It saves nothing until you pick:
   - Clear the box of a step that you do not want, then click "Add N steps".
   - For your own task, the steps go at the end of its checklist. A step that the checklist has already is not added again.
@@ -267,7 +268,7 @@ The brief and the chat get the linked items as one piece of work (`same_work` in
 
 ### Gmail
 
-AIfred reads Gmail. It cannot send, change, or delete email (`crates/aifred-core/src/gmail.rs`).
+AIfred reads Gmail (`crates/aifred-core/src/gmail.rs`). It cannot send or delete email. With "Use Gmail drafts" on, it can save a reply draft when you click (see "Reply drafts" below).
 
 - To not use Gmail, untick "Use Gmail" in Settings > Google. Then the login does not ask for Gmail, AIfred removes the saved emails, and no Gmail error or "connect again" note shows. If the login already allows Gmail, connect again to remove that access at Google. Tick it again to use Gmail: connect again, and allow it.
 
@@ -280,6 +281,18 @@ AIfred reads Gmail. It cannot send, change, or delete email (`crates/aifred-core
 - "No answer needed" (the tick) hides an email in AIfred. Gmail does not change. The email comes back when a new message comes in the thread.
 - An email that you sent, with no answer yet, shows under "No answer yet to your emails" in the "Waiting for" card. "Track" puts it on the list. "Hide" removes the suggestion.
 - AIfred reads again only the threads that changed since the last download. The first download can take some seconds.
+
+### Reply drafts
+
+AIfred can write a reply to an email that waits for your answer (`crates/aifred-core/src/drafts.rs`). You check it. Only your click saves it, as a draft in the Gmail thread. AIfred never sends.
+
+- Turn it on once: tick "Use Gmail drafts" in Settings > Google, then click "Connect again" and allow it. It is off until you turn it on. It needs "Use Gmail": when Gmail is off, drafts are off too, and the login does not ask for the drafts access. Google has no access for "drafts only", so this access could also send email. AIfred has no code that sends.
+- Open an email item. The "What to say" box has the next action from the brief. Change it or clear it. Then click "✦ Write a reply". It is one AI call (Sonnet) on your Claude login.
+- The AI call gets only this email (the subject, the sender, and Google's short preview) and your note. It gets no memory facts and no other items, and it has no tools. So the text of an email cannot make it collect your other data.
+- The reply shows with its address and subject. The address comes from the email (Reply-To, else From), not from the AI. Change the text, then click "Save as Gmail draft". "Copy text" copies it.
+- The save fails when a new message came in the thread after AIfred wrote the reply. Then write the reply again.
+- Each saved draft goes in the action log: under "Reply" in the item panel, and under "AIfred's actions" on the Settings page (`crates/aifred-core/src/actions.rs`).
+- Undo deletes the draft in Gmail. When you changed the draft in Gmail, Undo does not delete it. When the draft is gone (you sent or deleted it), Undo deletes nothing, marks it, and tells you so. Undo works also after you turn Gmail or Gmail drafts off, until you connect Google again: a new login does not ask for drafts. A reply answers the newest message of a person: an out-of-office reply or a bounce does not count. When Gmail gives no clear answer to a save (for example a timeout), AIfred looks in the Gmail drafts of the thread. When it finds the draft with the same text, it logs it, so you do not get a second draft.
 
 ### "Waiting for" list
 

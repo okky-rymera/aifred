@@ -5,6 +5,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { DEFAULT_SETTINGS } from "../api";
 import { MAX_GROUP, groupOf } from "../items";
 import type {
+  Action,
   Answer,
   Brief,
   CalEvent,
@@ -121,6 +122,18 @@ export type Fake = {
   jobRuns: JobRun[];
   /** What suggest_steps gives for an item. Throw to fail it. */
   onSuggestSteps: (key: string) => Promise<Step[]> | Step[];
+  /** The text of the reply that write_reply gives for an email item. Throw to fail it. */
+  onWriteReply: (key: string, note: string) => Promise<string> | string;
+  /** AIfred's actions in other apps, like actions.rs, oldest first. */
+  actions: Action[];
+  /** True: the next Undo finds the draft gone from Gmail (sent or deleted). */
+  draftGone?: boolean;
+  /** Runs before a draft save, so a test can hold the save open. */
+  beforeSave?: () => Promise<void>;
+  /** Runs before an Undo of an action, so a test can hold the Undo open. */
+  beforeUndo?: () => Promise<void>;
+  /** How many Undo calls of actions came in. */
+  undoCalls?: number;
   /** What write_brief makes. Throw to fail it. */
   onWriteBrief: (day: string) => Promise<Brief> | Brief;
   side: Record<string, SideTurn[]>;
@@ -331,6 +344,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     jobRuns: [],
     onWriteBrief: (day) => ({ day, written: nowSecs(), text: "Nothing urgent today.", why: {} }),
     onSuggestSteps: () => [{ text: "Read the item" }],
+    onWriteReply: (_key, note) => `Hi Ana, thanks. ${note}`.trim(),
+    actions: [],
     side: {},
     newKeys: [],
     summaries: {},
@@ -751,6 +766,54 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         fake.mailHidden = fake.mailHidden.filter((x) => x !== id);
         if (args.hide) fake.mailHidden.push(id);
         return null;
+      }
+      case "write_reply": {
+        const key = String(args.key);
+        const m = fake.mail?.reply.find((x) => `gmail:${x.id}` === key);
+        if (!m) throw "AIfred can write a reply only for an email";
+        const body = await fake.onWriteReply(key, String(args.note));
+        const canSave = fake.google.features.some(([n, on]) => n === "Gmail drafts" && on) && !fake.google.off.includes("Gmail drafts");
+        return { key, to: m.email, to_name: m.people[0] ?? m.email, subject: `Re: ${m.subject}`, body, last_message: `${m.id}-last`, can_save: canSave };
+      }
+      case "save_reply_draft": {
+        await fake.beforeSave?.();
+        const key = String(args.key);
+        const m = fake.mail?.reply.find((x) => `gmail:${x.id}` === key);
+        if (!m) throw "this email is not in Gmail any more";
+        if (args.to !== m.email || args.lastMessage !== `${m.id}-last`) throw "the email changed after AIfred wrote the reply. Write the reply again";
+        if (!String(args.body).trim()) throw "the reply is empty";
+        const a: Action = {
+          id: fake.actions.length + 1,
+          at: nowSecs(),
+          app: "gmail",
+          kind: "draft",
+          item: key,
+          title: `Reply draft to ${m.email}: Re: ${m.subject}`,
+          after: String(args.body).trim(),
+          url: m.url,
+          undone_at: null,
+          note: "",
+        };
+        fake.actions.push(a);
+        return structuredClone(a);
+      }
+      case "actions":
+        return structuredClone(
+          fake.actions
+            .filter((a) => args.item == null || a.item === args.item)
+            .slice()
+            .reverse(),
+        );
+      case "undo_action": {
+        fake.undoCalls = (fake.undoCalls ?? 0) + 1;
+        await fake.beforeUndo?.();
+        const a = fake.actions.find((x) => x.id === args.id);
+        if (!a) throw "there is no such action";
+        if (a.undone_at !== null) throw "this action is undone already";
+        a.undone_at = nowSecs();
+        // Like drafts::undo: a draft that is not in Gmail any more is not deleted.
+        if (fake.draftGone) a.note = "AIfred deleted nothing: the draft was not in Gmail any more. You sent it or deleted it.";
+        return structuredClone(a);
       }
       case "suggest_steps":
         if (!titlePlace(String(args.key))) throw `no item ${args.key}`;

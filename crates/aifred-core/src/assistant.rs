@@ -968,6 +968,24 @@ impl<B: Backend> Assistant<B> {
             .await?;
         crate::steps::parse(&answer)
     }
+
+    /// Writes a reply to the email item `key` (drafts.rs), in one AI call
+    /// with no tools. The call gets only the email and the user's `note`.
+    /// It saves nothing: the user checks the reply, and saves it as a draft.
+    pub async fn write_reply(&self, key: &str, note: &str) -> anyhow::Result<crate::drafts::Draft> {
+        let reply = crate::drafts::prepare(&self.dir, key).await?;
+        let answer = self
+            .backend
+            .complete(
+                crate::drafts::RULES,
+                &crate::drafts::prompt(&reply, note),
+                Some(crate::drafts::MODEL),
+            )
+            .await?;
+        let body = crate::drafts::parse(&answer)?;
+        let can_save = self.off_thread(crate::drafts::can_save).await?;
+        Ok(reply.draft(key, body, can_save))
+    }
 }
 
 /// The short line under an answer: the time, the model, the lookups, and the cost.

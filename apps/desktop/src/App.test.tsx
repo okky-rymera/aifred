@@ -543,6 +543,149 @@ describe("suggested work", () => {
   });
 });
 
+describe("email replies", () => {
+  const now = () => Math.floor(Date.now() / 1000);
+  const drafts = { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", true], ["Gmail", true], ["Gmail drafts", true]] as [string, boolean][], optional: ["Gmail", "Gmail drafts"], off: [] };
+
+  it("writes a reply that you change, saves it as a Gmail draft, and logs it with an undo", async () => {
+    const fake = await startApp({
+      google: drafts,
+      mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] },
+      onWriteReply: (_k, note) => `Hi Ana, ${note}`,
+    });
+    await openItem("Price for the plugin");
+    await userEvent.type(within(details()).getByRole("textbox", { name: "What to say" }), "the price is 500 EUR");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    const box = await within(details()).findByRole("group", { name: "Reply draft" });
+    expect(within(box).getByText(/To: Ana Lee <ana@y.com> · Re: Price for the plugin/)).toBeInTheDocument();
+    const text = within(box).getByRole("textbox", { name: "Reply text" });
+    expect(text).toHaveValue("Hi Ana, the price is 500 EUR");
+    await userEvent.type(text, ". Bo");
+    // Nothing is in Gmail before the click.
+    expect(fake.actions).toEqual([]);
+    await userEvent.click(within(box).getByRole("button", { name: "Save as Gmail draft" }));
+    expect(await screen.findByText("Saved the reply as a draft in Gmail. It is not sent.")).toBeInTheDocument();
+    expect(fake.actions.map((a) => a.after)).toEqual(["Hi Ana, the price is 500 EUR. Bo"]);
+    const log = await within(details()).findByRole("list", { name: "AIfred's actions on this item" });
+    expect(within(log).getByText("Reply draft to ana@y.com: Re: Price for the plugin")).toBeInTheDocument();
+    await userEvent.click(within(log).getByRole("button", { name: "Undo" }));
+    expect(await within(log).findByText(/^Undone/)).toBeInTheDocument();
+    expect(fake.actions[0].undone_at).not.toBeNull();
+    // The settings page has the same log.
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const all = await screen.findByRole("region", { name: "AIfred's actions" });
+    expect(within(all).getByText("Reply draft to ana@y.com: Re: Price for the plugin")).toBeInTheDocument();
+  });
+
+  it("a second Undo click while the first one runs does not start a second Undo", async () => {
+    let finish: () => void = () => {};
+    const fake = await startApp({ google: drafts, mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] } });
+    await openItem("Price for the plugin");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    const box = await within(details()).findByRole("group", { name: "Reply draft" });
+    await userEvent.click(within(box).getByRole("button", { name: "Save as Gmail draft" }));
+    const log = await within(details()).findByRole("list", { name: "AIfred's actions on this item" });
+    fake.beforeUndo = () => new Promise<void>((r) => (finish = r));
+    await userEvent.click(within(log).getByRole("button", { name: "Undo" }));
+    // The list button is off while the Undo runs. The Undo of the toast joins the same Undo.
+    expect(within(log).getByRole("button", { name: "Undoing…" })).toBeDisabled();
+    const toast = screen.getByText("Saved the reply as a draft in Gmail. It is not sent.").closest("div")!;
+    await userEvent.click(within(toast).getByRole("button", { name: "Undo" }));
+    finish();
+    expect(await within(log).findByText(/^Undone/)).toBeInTheDocument();
+    expect(fake.undoCalls).toBe(1);
+    expect(screen.queryByText(/Cannot undo/)).not.toBeInTheDocument();
+  });
+
+  it("the reply label names the person that the reply goes to", async () => {
+    await startApp({
+      google: drafts,
+      // Ana wrote, but her email asks for replies to Sales (Reply-To).
+      mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply", { reply_to: "Sales" })], sent: [] },
+      briefs: { [today()]: { day: today(), written: 1, text: "One thing.", why: {}, next: { "gmail:r1": "Send Ana the price." }, draft: { "gmail:r1": "email" } } },
+    });
+    await openItem("Price for the plugin");
+    expect(within(details()).getByText("AIfred can write a reply to Sales")).toBeInTheDocument();
+  });
+
+  it("Undo says that it deleted nothing when you sent the draft already", async () => {
+    const fake = await startApp({ google: drafts, mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] } });
+    await openItem("Price for the plugin");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    const box = await within(details()).findByRole("group", { name: "Reply draft" });
+    await userEvent.click(within(box).getByRole("button", { name: "Save as Gmail draft" }));
+    const log = await within(details()).findByRole("list", { name: "AIfred's actions on this item" });
+    fake.draftGone = true;
+    await userEvent.click(within(log).getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText(/^AIfred deleted nothing: .*You sent it or deleted it\.$/)).toBeInTheDocument();
+    expect(screen.queryByText("Deleted the draft in Gmail.")).not.toBeInTheDocument();
+  });
+
+  it("a save that ends after you started a new reply does not remove the new reply", async () => {
+    let finish: () => void = () => {};
+    const fake = await startApp({ google: drafts, mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] } });
+    await openItem("Price for the plugin");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    let box = await within(details()).findByRole("group", { name: "Reply draft" });
+    fake.beforeSave = () => new Promise<void>((r) => (finish = r));
+    await userEvent.click(within(box).getByRole("button", { name: "Save as Gmail draft" }));
+    // While the save waits: Cancel, and write a new reply.
+    await userEvent.click(within(box).getByRole("button", { name: "Cancel" }));
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    box = await within(details()).findByRole("group", { name: "Reply draft" });
+    finish();
+    expect(await screen.findByText("Saved the reply as a draft in Gmail. It is not sent.")).toBeInTheDocument();
+    expect(within(details()).getByRole("group", { name: "Reply draft" })).toBeInTheDocument();
+  });
+
+  it("you cannot change the reply text while it saves, so no change is lost", async () => {
+    let finish: () => void = () => {};
+    const fake = await startApp({ google: drafts, mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] } });
+    await openItem("Price for the plugin");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    const box = await within(details()).findByRole("group", { name: "Reply draft" });
+    fake.beforeSave = () => new Promise<void>((r) => (finish = r));
+    await userEvent.click(within(box).getByRole("button", { name: "Save as Gmail draft" }));
+    const text = within(box).getByRole("textbox", { name: "Reply text" });
+    expect(text).toHaveAttribute("readonly");
+    await userEvent.type(text, " More.");
+    expect(text).toHaveValue("Hi Ana, thanks.");
+    finish();
+    expect(await screen.findByText("Saved the reply as a draft in Gmail. It is not sent.")).toBeInTheDocument();
+  });
+
+  it("cannot save a draft before you turn on Gmail drafts", async () => {
+    const fake = await startApp({ mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] } });
+    await openItem("Price for the plugin");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    const box = await within(details()).findByRole("group", { name: "Reply draft" });
+    expect(within(box).getByText(/tick "Use Gmail drafts" in Settings/)).toBeInTheDocument();
+    expect(within(box).getByRole("button", { name: "Save as Gmail draft" })).toBeDisabled();
+    await userEvent.click(within(box).getByRole("button", { name: "Cancel" }));
+    expect(within(details()).queryByRole("group", { name: "Reply draft" })).not.toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "save_reply_draft")).toBe(false);
+  });
+
+  it("shows why a save failed, and keeps your text", async () => {
+    const fake = await startApp({ google: drafts, mail: { fetched_at: now(), reply: [mail("r1", "Price for the plugin", "reply")], sent: [] } });
+    await openItem("Price for the plugin");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Write a reply" }));
+    const box = await within(details()).findByRole("group", { name: "Reply draft" });
+    // A new message came in the thread after AIfred wrote the reply.
+    fake.mail!.reply[0].email = "bo@y.com";
+    await userEvent.click(within(box).getByRole("button", { name: "Save as Gmail draft" }));
+    expect(await within(box).findByText(/Cannot save: .*the email changed/)).toBeInTheDocument();
+    expect(within(box).getByRole("textbox", { name: "Reply text" })).toHaveValue("Hi Ana, thanks.");
+    expect(fake.actions).toEqual([]);
+  });
+
+  it("offers no reply on an item that is not an email", async () => {
+    await startApp({ tasks: [task("Plan the trip")] });
+    await openItem("Plan the trip");
+    expect(within(details()).queryByRole("button", { name: "✦ Write a reply" })).not.toBeInTheDocument();
+  });
+});
+
 describe("corrections of the brief", () => {
   /** Three GitHub items from acme/shop, each with a reason from today's brief. */
   const ranked = () => ({

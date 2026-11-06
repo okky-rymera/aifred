@@ -366,6 +366,19 @@ export const suggestSteps = (key: string) => invoke<Step[]>("suggest_steps", { k
 export type AddedSteps = { task: Task; added: number; created: boolean };
 /** Puts the steps on the open task of the item's group, or on a new task under the item. */
 export const addSteps = (key: string, steps: string[]) => invoke<AddedSteps>("add_steps", { key, steps });
+/** A reply to an email that AIfred wrote (drafts.rs), for you to check. `to` comes from the email, not from the AI.
+ * `can_save`: false until you turn on Gmail drafts in Settings and connect Google again. */
+export type ReplyDraft = { key: string; to: string; to_name: string; subject: string; body: string; last_message: string; can_save: boolean };
+/** AIfred writes a reply to an email item. One AI call with no tools. It saves nothing. */
+export const writeReply = (key: string, note: string) => invoke<ReplyDraft>("write_reply", { key, note });
+/** One action of AIfred in another app (actions.rs). `undone_at`: Undo ran. `note`: why Undo did not remove the change. */
+export type Action = { id: number; at: number; app: "gmail"; kind: "draft"; item: string; title: string; after: string; url: string; undone_at: number | null; note: string };
+/** Saves the reply that you checked as a draft in its Gmail thread. It never sends. */
+export const saveReplyDraft = (d: ReplyDraft) => invoke<Action>("save_reply_draft", { key: d.key, to: d.to, lastMessage: d.last_message, body: d.body });
+/** AIfred's actions, newest first. With `item`: only the actions of that item. */
+export const actions = (item?: string) => invoke<Action[]>("actions", { item: item ?? null });
+/** Deletes the Gmail draft of an action, when nobody changed it in Gmail. */
+export const undoAction = (id: number) => invoke<Action>("undo_action", { id });
 
 export const history = () => invoke<Turn[]>("history");
 /** All facts: the ones in use, then the forgotten ones. */
@@ -416,6 +429,8 @@ export type Mail = {
   email: string;
   /** The email addresses of all people. */
   emails?: string[];
+  /** "reply": who a reply goes to (Reply-To, else the sender). Empty in emails saved before AIfred read it. */
+  reply_to?: string;
   last_at: number;
   /** "reply": the first message after your last one. "sent": your last message. */
   since: number;
@@ -483,7 +498,7 @@ export type GoogleStatus = {
   /** The features that the user turned off. The login does not ask for them. */
   off: string[];
 };
-/** Turns an optional Google feature (Gmail) on or off. */
+/** Turns an optional Google feature (Gmail, Gmail drafts) on or off. */
 export const setGoogleFeature = (name: string, on: boolean) => invoke<GoogleStatus>("set_google_feature", { name, on });
 export const googleStatus = () => invoke<GoogleStatus>("google_status");
 export const setGoogleClient = (clientId: string, clientSecret: string) => invoke<GoogleStatus>("set_google_client", { clientId, clientSecret });
