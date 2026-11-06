@@ -19,6 +19,7 @@ mod import;
 pub mod items;
 pub mod jobs;
 pub mod learn;
+pub mod links;
 pub mod memory;
 pub mod overview;
 pub mod plan;

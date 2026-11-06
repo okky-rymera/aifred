@@ -41,6 +41,14 @@ export type AppCtx = {
   /** The "waiting for" list: the open items, then the items that closed in the last 3 days. */
   waiting: api.Waiting[];
   waitingError: string;
+  /** Items that are one piece of work in many places, and AIfred's suggestions (links.rs). */
+  links: api.Links;
+  /** Puts `key` and its group under the main item of `main`, with an undo. */
+  linkItems: (main: string, key: string) => Promise<boolean>;
+  /** Takes an item out of its group, with an undo. */
+  unlinkItem: (key: string) => Promise<boolean>;
+  /** "Not the same work": AIfred does not suggest the pair again. */
+  rejectLink: (s: api.LinkSuggestion) => Promise<boolean>;
   trackEmail: (m: api.Mail, followUp?: string) => Promise<boolean>;
   hideSent: (m: api.Mail) => Promise<boolean>;
   addWaiting: (item: api.NewWaiting) => Promise<boolean>;

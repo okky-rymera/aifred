@@ -106,9 +106,15 @@ Done: the "End of the day" card and the "Weekly review" card on the home page (`
 
 Why: a ClickUp task, its GitHub issue, and the pull request for the same work show as 2 or 3 rows. The research found no standard method to merge them.
 
-- [ ] Let one task link to many source items (ClickUp task, GitHub issue, pull request, email thread).
-- [ ] Suggest links when titles or descriptions match. The user accepts or rejects each link.
-- [ ] Show one row for the linked items, with the sources under it.
+- [x] Let one task link to many source items (ClickUp task, GitHub issue, pull request, email thread).
+- [x] Suggest links when titles or descriptions match. The user accepts or rejects each link.
+- [x] Show one row for the linked items, with the sources under it.
+
+Done: any open items from different sources can be one group, with one main item (`crates/aifred-core/src/links.rs`, `apps/desktop/src/Links.tsx`). The home list shows one row with "Also in" under it. The "Same work?" card suggests a pair when one item names the other (a link, "acme/shop#7", "DEV-42", "CU-86a1b2"), or when the titles share most words. "Not the same" stops a suggestion for good. The item panel can link and unlink by hand. The brief and the chat get the groups as `same_work`. Not done yet:
+- On the real data of 2026-11-06, the rules found no pair. The closest pair shares one word only ("echowp"). Check with real use if the rules find too few pairs. Meaning search (the local model) can find more pairs, but it can also find wrong ones.
+- The AI cannot link items in the chat. Only the user can.
+- The plan, the end-of-day check, and the weekly review still show each item of a group on its own.
+- "Not today" and "Wrong priority" on a row correct only the main item.
 
 ### 7. Suggest the work
 

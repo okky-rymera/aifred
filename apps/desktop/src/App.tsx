@@ -5,7 +5,7 @@ import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
 import { Ctx, useApp, type AppCtx, type CardMode, type ChatState, type ListState } from "./ctx";
 import { Detail } from "./Detail";
 import { Home } from "./Home";
-import { addDays, buildItems, dayOf, dur, meetingsOn, schedule, type Item } from "./items";
+import { addDays, buildItems, dayOf, dur, groupOf, meetingsOn, schedule, type Item } from "./items";
 import { JobsPage } from "./Jobs";
 import { MemoryList } from "./Memory";
 import { PlanChat, PlanView } from "./Plan";
@@ -105,6 +105,7 @@ export default function App() {
   const [restartError, setRestartError] = useState("");
   const [meta, setMeta] = useState<api.ItemMeta[]>([]);
   const [est, setEst] = useState<Record<string, api.Estimate>>({});
+  const [links, setLinks] = useState<api.Links>({ links: [], suggestions: [] });
   const [brief, setBrief] = useState<api.Brief | null>(null);
   const [goals, setGoals] = useState<api.Goals | null>(null);
   const [briefLoaded, setBriefLoaded] = useState("");
@@ -176,6 +177,8 @@ export default function App() {
   const loadMeta = useCallback(() => {
     api.itemMeta().then(setMeta).catch(() => {});
     api.estimates().then(setEst).catch(() => {});
+    // The suggestions come from the open items, so they change with each list.
+    api.itemLinks().then(setLinks).catch(() => {});
   }, []);
 
   /** Loads can overlap (reload, then a tick). Only the answer to the newest load may change the screen. */
@@ -752,6 +755,8 @@ export default function App() {
         setWork((w) => (w?.key === i.key ? null : w));
         setTasks((all) => all.filter((x) => x.id !== t.id));
         if (now.current.sel === i.key) setSel(null);
+        // The backend takes the task out of its group too (tasks.rs).
+        api.itemLinks().then(setLinks).catch(() => {});
         toast(`Deleted: ${t.title}`);
       });
     },
@@ -1174,7 +1179,9 @@ export default function App() {
       // counts for today, and today's brief gets it.
       const day = today;
       const shown = brief.day;
-      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => k !== i.key));
+      // A row of linked items can show the reason of one of its linked items.
+      const keys = new Set([i.key, ...(i.linked ?? []).map((x) => x.key)]);
+      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => !keys.has(k)));
       run(api.correctBrief(i.key, kind, day), (c) => {
         setBrief((b) => (b && b.day === shown ? { ...b, why: drop(b.why)!, goal: drop(b.goal) } : b));
         if (c.learned) api.memoryFacts().then(setFacts).catch(() => {});
@@ -1192,6 +1199,56 @@ export default function App() {
       });
     },
     [brief, today, run, toast],
+  );
+
+  // ---------- One piece of work in many places (links.rs) ----------
+
+  const titleOf = useCallback((key: string) => byKey.get(key)?.title ?? key, [byKey]);
+
+  /** Puts `key` (and its group) under `main`. The undo puts the old links back. */
+  const linkItems = useCallback(
+    (main: string, key: string) => {
+      const before = links.links;
+      return run(api.linkItems(main, key), (l) => {
+        setLinks(l);
+        // The main row of the new group, and all its items.
+        const group = groupOf(l.links, key);
+        const target = group[0];
+        const members = new Set(group);
+        toast(`Linked: ${titleOf(key)} shows under ${titleOf(target)}`, () => {
+          // Back to the old groups: take each item out, then link the old pairs again.
+          let p: Promise<api.Links> = Promise.resolve(l);
+          for (const k of members) if (k !== target) p = p.then(() => api.unlinkItem(k));
+          for (const b of before) if (members.has(b.key)) p = p.then(() => api.linkItems(b.main, b.key));
+          run(p, setLinks);
+        });
+      });
+    },
+    [links, run, toast, titleOf],
+  );
+
+  const unlinkItem = useCallback(
+    (key: string) => {
+      const was = links.links.find((l) => l.key === key);
+      const wasMain = !was && links.links.find((l) => l.main === key);
+      return run(api.unlinkItem(key), (l) => {
+        setLinks(l);
+        // The undo links it again. A main item becomes the main item again:
+        // linking it to any item of its old group puts the whole group under it.
+        const back = was ? () => run(api.linkItems(was.main, key), setLinks) : wasMain ? () => run(api.linkItems(key, wasMain.key), setLinks) : undefined;
+        toast(`Unlinked: ${titleOf(key)}`, back);
+      });
+    },
+    [links, run, toast, titleOf],
+  );
+
+  const rejectLink = useCallback(
+    (sug: api.LinkSuggestion) =>
+      run(api.rejectLink(sug.main, sug.key, true), (l) => {
+        setLinks(l);
+        toast("AIfred will not suggest these two again", () => run(api.rejectLink(sug.main, sug.key, false), setLinks));
+      }),
+    [run, toast],
   );
 
   // An item that you work on can close elsewhere, for example when AIfred
@@ -1233,6 +1290,10 @@ export default function App() {
     sentMail: mail.sent,
     waiting,
     waitingError,
+    links,
+    linkItems,
+    unlinkItem,
+    rejectLink,
     trackEmail,
     hideSent,
     addWaiting,

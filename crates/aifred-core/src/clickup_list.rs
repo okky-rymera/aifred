@@ -82,6 +82,7 @@ impl ClickupStore {
                 "DELETE FROM work_item WHERE source = ?1 AND account != ?2",
                 [SOURCE, account],
             )?;
+            crate::links::drop_gone_in(tx, now)?;
             let rows = fetched
                 .items
                 .iter()
@@ -146,6 +147,7 @@ impl ClickupStore {
         db::write(&self.dir, |tx| {
             tx.execute("DELETE FROM work_item WHERE source = ?1", [SOURCE])?;
             tx.execute("DELETE FROM work_fetch WHERE source = ?1", [SOURCE])?;
+            crate::links::drop_gone_in(tx, crate::files::now())?;
             Ok(())
         })
     }

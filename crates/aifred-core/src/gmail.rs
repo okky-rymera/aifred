@@ -987,6 +987,7 @@ pub fn save(dir: &Path, d: Downloaded, now: u64) -> anyhow::Result<Option<MailLi
             "DELETE FROM work_item WHERE source = ?1 AND account != ?2",
             [SOURCE, &account],
         )?;
+        crate::links::drop_gone_in(tx, now)?;
         tx.execute(
             "DELETE FROM mail_hidden WHERE hidden_at < ?1",
             [now.saturating_sub(KEEP_HIDDEN_SECS) as i64],
@@ -1038,6 +1039,7 @@ pub fn forget(dir: &Path) -> anyhow::Result<()> {
         tx.execute("DELETE FROM work_item WHERE source = ?1", [SOURCE])?;
         tx.execute("DELETE FROM work_fetch WHERE source = ?1", [SOURCE])?;
         tx.execute("DELETE FROM mail_hidden", [])?;
+        crate::links::drop_gone_in(tx, crate::files::now())?;
         for k in [SENT, CACHE, FAILED] {
             tx.execute("DELETE FROM meta WHERE key = ?1", [k])?;
         }

@@ -15,6 +15,9 @@
 //! corrections of the brief (learn.rs) and the real times of finished work
 //! next to the time guesses (worktime.rs), and the user's picks in the
 //! weekly review (review.rs).
+//!
+//! `same_work` lists the items that the user linked as one piece of work
+//! (links.rs). The AI must treat each list as one item.
 
 use std::path::Path;
 
@@ -132,6 +135,12 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             .collect();
         if !waiting.is_empty() {
             out["waiting_for"] = waiting.into();
+        }
+
+        // Items in more than one place that are one piece of work (links.rs).
+        let same = crate::links::for_ai(c)?;
+        if !same.is_empty() {
+            out["same_work"] = json!(same);
         }
 
         // What AIfred learned from the user: the corrections of the brief
@@ -399,6 +408,12 @@ mod tests {
             "Write the notes for the release."
         );
         assert_eq!(o["clickup"]["fetched_at"], 2000);
+        assert!(o.get("same_work").is_none(), "no links: no same_work");
+        crate::links::link(&d, "clickup:86a", "github:acme/shop#7", 1).unwrap();
+        assert_eq!(
+            build(&d, Some("acct")).unwrap()["same_work"],
+            json!([["clickup:86a", "github:acme/shop#7"]])
+        );
         assert!(
             build(&d, None).unwrap().get("clickup").is_none(),
             "no ClickUp part when it is not connected"

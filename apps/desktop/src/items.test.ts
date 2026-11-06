@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "./api";
 import type * as api from "./api";
-import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, meetingsOn, parseTask, schedule, shortDay, type Item } from "./items";
+import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, meetingsOn, parseTask, schedule, shortDay, type Item } from "./items";
 import { clickupItem, githubItem, task } from "./test/fakeBackend";
 
 // Wednesday 4 November 2026.
@@ -170,5 +170,54 @@ describe("schedule", () => {
     expect(schedule([item("a", 30)], { ...DEFAULT_SETTINGS, lunch_minutes: 0 }).all.map((b) => b.key)).toEqual(["a"]);
     expect(dur(90)).toBe("1 h 30 m");
     expect(dur(45)).toBe("45 m");
+  });
+});
+
+describe("joinLinked", () => {
+  const t = task("Refund Ana", { id: "t1" } as Partial<api.Task>);
+  const items = buildItems([t], [githubItem(7, "assigned", "Fix refund")], [clickupItem("86a", "Refund", { due: Date.parse("2026-11-03T12:00:00") })], [], {}, { "github:acme/shop#7": "It blocks the release." });
+
+  it("makes one row of the open items of a group, with the most urgent day", () => {
+    const rows = joinLinked(items, [
+      { key: "github:acme/shop#7", main: "task:t1" },
+      { key: "clickup:86a", main: "task:t1" },
+    ]);
+    expect(rows.map((r) => r.key)).toEqual(["task:t1"]);
+    // The other items are in key order, like links.rs.
+    expect(rows[0].linked?.map((l) => l.key)).toEqual(["clickup:86a", "github:acme/shop#7"]);
+    // The task has no due day: the row takes the ClickUp one, so it is late.
+    expect(rows[0].due).toBe("2026-11-03");
+    expect(groupItems(rows, TODAY).now.map((r) => r.key)).toEqual(["task:t1"]);
+    // The reason of a linked item shows on the row.
+    expect(rows[0].why).toBe("It blocks the release.");
+  });
+
+  it("shows the first open item as the row when the main item is done", () => {
+    const done = items.map((i) => (i.key === "task:t1" ? { ...i, done: true } : i));
+    const rows = joinLinked(done, [
+      { key: "github:acme/shop#7", main: "task:t1" },
+      { key: "clickup:86a", main: "task:t1" },
+    ]);
+    expect(rows.map((r) => r.key)).toEqual(["task:t1", "clickup:86a"]);
+    expect(rows[1].linked?.map((l) => l.key)).toEqual(["github:acme/shop#7"]);
+  });
+
+  it("does not hide late linked work under Later when only the main item starts later", () => {
+    const later = items.map((i) => (i.key === "task:t1" ? { ...i, start: addDays(TODAY, 5) } : i));
+    const links = [
+      { key: "github:acme/shop#7", main: "task:t1" },
+      { key: "clickup:86a", main: "task:t1" },
+    ];
+    const rows = joinLinked(later, links);
+    expect(rows[0].start).toBeNull();
+    expect(groupItems(rows, TODAY).now.map((r) => r.key)).toEqual(["task:t1"]);
+    // When all open items start later, the row starts with the earliest one.
+    const all = later.map((i) => ({ ...i, start: i.key === "task:t1" ? i.start : addDays(TODAY, 3) }));
+    expect(joinLinked(all, links)[0].start).toBe(addDays(TODAY, 3));
+  });
+
+  it("keeps a group with one open item as a plain row", () => {
+    const rows = joinLinked(items, [{ key: "github:none#1", main: "task:t1" }]);
+    expect(rows).toEqual(items);
   });
 });

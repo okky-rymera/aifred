@@ -31,6 +31,7 @@ use aifred_core::history::Turn;
 use aifred_core::items::{ItemDetails, ItemMeta};
 use aifred_core::jobs::{Job, JobChange, Run};
 use aifred_core::learn::{self, Corrected};
+use aifred_core::links::{self, Links};
 use aifred_core::memory::Fact;
 use aifred_core::plan::{DayPlan, Estimate, PlanItem};
 use aifred_core::review::{self, DayCheck, Pick, WeekReview};
@@ -761,6 +762,29 @@ async fn delete_waiting(app: State<'_, App>, id: i64) -> CmdResult<()> {
     blocking(&app, move |a| waiting::delete(&a.dir, id)).await
 }
 
+/// One piece of work in many places (links.rs): the links and the suggestions.
+#[tauri::command]
+async fn item_links(app: State<'_, App>) -> CmdResult<Links> {
+    blocking(&app, |a| links::get(&a.dir)).await
+}
+
+/// Puts `key` and its group under the main item of `main`.
+#[tauri::command]
+async fn link_items(app: State<'_, App>, main: String, key: String) -> CmdResult<Links> {
+    blocking(&app, move |a| links::link(&a.dir, &main, &key, now())).await
+}
+
+#[tauri::command]
+async fn unlink_item(app: State<'_, App>, key: String) -> CmdResult<Links> {
+    blocking(&app, move |a| links::unlink(&a.dir, &key, now())).await
+}
+
+/// "Not the same work" for a suggestion (`no` true), or its Undo (`no` false).
+#[tauri::command]
+async fn reject_link(app: State<'_, App>, a: String, b: String, no: bool) -> CmdResult<Links> {
+    blocking(&app, move |x| links::reject(&x.dir, &a, &b, no, now())).await
+}
+
 /// The Google connection (google.rs): the registration, the account, and the
 /// features that the login allows. Never a secret or a token.
 #[tauri::command]
@@ -1383,6 +1407,10 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         add_waiting,
         update_waiting,
         delete_waiting,
+        item_links,
+        link_items,
+        unlink_item,
+        reject_link,
         google_status,
         set_google_client,
         set_google_feature,
@@ -2002,6 +2030,39 @@ mod tests {
         );
         call(&win, "delete_waiting", json!({ "id": id })).unwrap();
         assert_eq!(call(&win, "waiting_items", json!({})).unwrap(), json!([]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn link_commands_give_the_new_links() {
+        let (_app, win, dir) = window("links");
+        let l = call(&win, "item_links", json!({})).unwrap();
+        assert_eq!(l, json!({ "links": [], "suggestions": [] }));
+        let a = call(
+            &win,
+            "add_task",
+            json!({ "task": { "title": "PayPal refund Ana" } }),
+        )
+        .unwrap();
+        let b = call(&win, "add_task", json!({ "task": { "title": "Other" } })).unwrap();
+        let (ka, kb) = (
+            format!("task:{}", a["id"].as_str().unwrap()),
+            format!("task:{}", b["id"].as_str().unwrap()),
+        );
+        let l = call(&win, "link_items", json!({ "main": ka, "key": kb })).unwrap();
+        assert_eq!(l["links"], json!([{ "key": kb, "main": ka }]));
+        let l = call(&win, "unlink_item", json!({ "key": kb })).unwrap();
+        assert_eq!(l["links"], json!([]));
+        call(&win, "reject_link", json!({ "a": ka, "b": kb, "no": true })).unwrap();
+        assert!(
+            call(
+                &win,
+                "link_items",
+                json!({ "main": ka, "key": "task:none" })
+            )
+            .is_err(),
+            "an unknown item is an error"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

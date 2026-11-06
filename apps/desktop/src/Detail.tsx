@@ -8,6 +8,7 @@ import { useApp } from "./ctx";
 import { SRC_NAME, dayOfSecs, dueInfo, fmtTime, shortDay, type Item } from "./items";
 import { Minutes } from "./Plan";
 import { PriPill } from "./Home";
+import { SameWork } from "./Links";
 
 /** Text that saves when you leave the box, or press Enter. */
 function useField(value: string, save: (v: string) => void) {
@@ -305,6 +306,7 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
         {why && !i.done && <span className="why">{why}</span>}
         <Description item={i} />
         <Links item={i} />
+        <SameWork item={i} />
         {i.task && <Steps item={i} />}
         {i.task && i.task.files.length > 0 && (
           <>

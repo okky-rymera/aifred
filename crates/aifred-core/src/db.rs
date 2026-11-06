@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 15;
+const VERSION: i64 = 16;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -573,6 +573,25 @@ ALTER TABLE task ADD COLUMN updated INTEGER NOT NULL DEFAULT 0;
 UPDATE task SET updated = CAST(strftime('%s', 'now') AS INTEGER);
 ";
 
+/// One piece of work in many places (links.rs): the items that show under
+/// another item, and the pairs that the user said are not one piece of work.
+const SCHEMA_16: &str = "
+CREATE TABLE item_link (
+  key  TEXT PRIMARY KEY,              -- the item key of the item under the main item
+  main TEXT NOT NULL,                 -- the item key of the main item; never itself in key
+  ts   INTEGER NOT NULL
+);
+CREATE INDEX item_link_by_main ON item_link(main);
+
+-- A suggestion that the user rejected. a < b.
+CREATE TABLE link_no (
+  a  TEXT NOT NULL,
+  b  TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  PRIMARY KEY (a, b)
+);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -688,6 +707,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 15 {
         tx.execute_batch(SCHEMA_15)?;
+    }
+    if version < 16 {
+        tx.execute_batch(SCHEMA_16)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

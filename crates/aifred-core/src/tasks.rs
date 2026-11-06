@@ -434,6 +434,7 @@ impl TaskStore {
                 bail!("no task with id {id}");
             }
             crate::worktime::forget_in(tx, &format!("task:{id}"))?;
+            crate::links::unlink_in(tx, &format!("task:{id}"), now())?;
             Ok(())
         })
     }

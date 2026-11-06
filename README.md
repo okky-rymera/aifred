@@ -219,6 +219,28 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - This tick is the only change AIfred makes in ClickUp. The chat can only read ClickUp.
 - The token never goes into the tool settings file that Claude reads. The ClickUp tool server reads the token itself.
 
+## One piece of work in many places
+
+A ClickUp task, its GitHub pull request, and an email about it can be one piece of work. Link them, and the home list shows one row for them (`crates/aifred-core/src/links.rs`).
+
+- The row is the main item. The other items show under it after "Also in". Click one to open it.
+- When the main item is finished or closed, the next open item of the group becomes the row.
+- The row shows the earliest due day and the highest priority of its open items. So a GitHub row with a late ClickUp task in it shows under "Needs you now".
+- The tick, "Start", and "+ Plan" of the row act on the main item.
+- To link items yourself, open an item and click "+ Link another item" under "Same work". Type words of the other item's title.
+- "Unlink" under "Same work" shows an item as its own row again. When you unlink the main item, the next item becomes the main item.
+- Each link and unlink has an Undo.
+- One piece of work can have at most 10 items.
+
+AIfred suggests links in the "Same work?" card on the home page. A suggestion needs no AI call. It comes from these rules, only for items from different sources:
+
+- One item names the other: a GitHub link, "acme/shop#7", a ClickUp link, a ClickUp id like "DEV-42", or "CU-86a1b2".
+- The titles have mostly the same words: at least 2 words in common, and at least 60% of all their words. Short and common words ("fix", "the", "add") do not count.
+
+"Link" accepts a suggestion. "Not the same" rejects it, and AIfred does not suggest that pair again. The main item of a suggestion is your own task first, then the ClickUp task, then the GitHub item, then the email.
+
+The brief and the chat get the linked items as one piece of work (`same_work` in the overview).
+
 ## Google (calendar and Gmail)
 
 - AIfred connects to Google itself. Each user makes their own Google registration once:

@@ -3,6 +3,7 @@
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { DEFAULT_SETTINGS } from "../api";
+import { MAX_GROUP, groupOf } from "../items";
 import type {
   Answer,
   Brief,
@@ -20,6 +21,8 @@ import type {
   GoogleStatus,
   GithubItem,
   ItemDetails,
+  ItemLink,
+  LinkSuggestion,
   Job,
   JobRun,
   Mail,
@@ -147,6 +150,13 @@ export type Fake = {
   picks: (ReviewPick & { undo: { plan?: string; start?: string | null; setStart?: boolean; waiting?: number; closed?: boolean } })[];
   /** The finished items of the last 7 days that served each goal, by goal id. */
   goalDone: Record<number, number>;
+  /** The items under another item, like links.rs. */
+  links: ItemLink[];
+  /** AIfred's suggestions. The fake does not find them: a test sets them.
+   * A suggestion of a linked or rejected pair is left out, like in links.rs. */
+  linkSuggestions: LinkSuggestion[];
+  /** The rejected pairs, as "a|b" with a < b. */
+  linkNo: string[];
 };
 
 let nextId = 1;
@@ -332,7 +342,32 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     staleMax: 30,
     picks: [],
     goalDone: {},
+    links: [],
+    linkSuggestions: [],
+    linkNo: [],
     ...init,
+  };
+
+  /** The links and the suggestions, like links::get. A rejected pair
+   * blocks all pairs of its two groups, like in links.rs. */
+  const linksNow = () => {
+    const head = (k: string) => groupOf(fake.links, k)[0];
+    const pairOf = (a: string, b: string) => [head(a), head(b)].sort().join("|");
+    const no = new Set(fake.linkNo.map((p) => pairOf(...(p.split("|") as [string, string]))));
+    return structuredClone({
+      links: [...fake.links].sort((a, b) => a.main.localeCompare(b.main) || a.key.localeCompare(b.key)),
+      suggestions: fake.linkSuggestions.filter((s) => head(s.main) !== head(s.key) && !no.has(pairOf(s.main, s.key))),
+    });
+  };
+  /** Takes `key` out of its group, like links::unlink_in. */
+  const unlink = (key: string) => {
+    const g = groupOf(fake.links, key);
+    if (g[0] !== key) fake.links = fake.links.filter((l) => l.key !== key);
+    else {
+      const [next, ...others] = g.slice(1);
+      fake.links = fake.links.filter((l) => l.main !== key);
+      for (const k of others) fake.links.push({ key: k, main: next });
+    }
   };
 
   mockIPC(async (cmd, payload) => {
@@ -645,6 +680,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         find(args.id);
         fake.tasks = fake.tasks.filter((t) => t.id !== args.id);
         fake.sessions = fake.sessions.filter((x) => x.key !== `task:${args.id}`);
+        // Like tasks.rs: a deleted task leaves its group.
+        unlink(`task:${args.id}`);
         return null;
       case "google_status":
         return structuredClone(fake.google);
@@ -701,6 +738,30 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         fake.mailHidden = fake.mailHidden.filter((x) => x !== id);
         if (args.hide) fake.mailHidden.push(id);
         return null;
+      }
+      case "item_links":
+        return linksNow();
+      case "link_items": {
+        // Like links::link_in.
+        const { main, key } = args as { main: string; key: string };
+        if (main === key) throw "an item cannot be linked to itself";
+        for (const k of [main, key]) if (!titlePlace(k)) throw `AIfred does not know the item ${k}`;
+        const [gm, gk] = [groupOf(fake.links, main), groupOf(fake.links, key)];
+        const target = gm[0] === gk[0] ? main : gm[0];
+        const all = new Set([...gm, ...gk]);
+        if (all.size > MAX_GROUP) throw `one piece of work can have at most ${MAX_GROUP} items`;
+        fake.links = fake.links.filter((l) => !all.has(l.key));
+        for (const k of [...all].sort()) if (k !== target) fake.links.push({ key: k, main: target });
+        return linksNow();
+      }
+      case "unlink_item":
+        unlink(String(args.key));
+        return linksNow();
+      case "reject_link": {
+        const pair = [String(args.a), String(args.b)].sort().join("|");
+        fake.linkNo = fake.linkNo.filter((p) => p !== pair);
+        if (args.no) fake.linkNo.push(pair);
+        return linksNow();
       }
       case "waiting_items":
         return structuredClone(fake.waiting);

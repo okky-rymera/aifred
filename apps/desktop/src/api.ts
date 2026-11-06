@@ -433,6 +433,18 @@ export type Waiting = {
 export type NewWaiting = { what?: string; who?: string; since?: string; follow_up?: string; thread?: string };
 /** Only the fields that are set change. follow_up "": no follow-up day. */
 export type WaitingChanges = { what?: string; who?: string; follow_up?: string; done?: boolean };
+/** One item that shows under another item: both are one piece of work (links.rs). */
+export type ItemLink = { key: string; main: string };
+/** Two items that AIfred thinks are one piece of work. `main` is the suggested main row. */
+export type LinkSuggestion = { main: string; key: string; why: string };
+export type Links = { links: ItemLink[]; suggestions: LinkSuggestion[] };
+export const itemLinks = () => invoke<Links>("item_links");
+/** Puts `key` and its group under the main item of `main`. */
+export const linkItems = (main: string, key: string) => invoke<Links>("link_items", { main, key });
+export const unlinkItem = (key: string) => invoke<Links>("unlink_item", { key });
+/** "Not the same work" (`no` true), or its undo (`no` false). */
+export const rejectLink = (a: string, b: string, no: boolean) => invoke<Links>("reject_link", { a, b, no });
+
 /** The open items, then the items that closed in the last 3 days. */
 export const waitingItems = () => invoke<Waiting[]>("waiting_items");
 export const addWaiting = (item: NewWaiting) => invoke<Waiting>("add_waiting", { item });

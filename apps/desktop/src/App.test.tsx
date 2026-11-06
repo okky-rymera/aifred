@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import { DEFAULT_SETTINGS, type Answer } from "./api";
 import { addDays, dayOf } from "./items";
@@ -241,6 +242,113 @@ describe("reviews", () => {
     const card = await screen.findByRole("region", { name: "Weekly review" });
     expect(within(card).getByText(/Nothing is stuck/)).toBeInTheDocument();
     expect(within(card).getByText(/You have no goals/)).toBeInTheDocument();
+  });
+});
+
+describe("same work", () => {
+  const lists = () => ({
+    clickupToken: "pk_test",
+    github: [githubItem(12, "your_pr", "DEV-42: round the tax")],
+    clickup: [clickupItem("86a", "Checkout totals", { custom_id: "DEV-42" })],
+  });
+
+  it("links a suggested pair into one row, with an undo", async () => {
+    const fake = await startApp({
+      ...lists(),
+      linkSuggestions: [{ main: "clickup:86a", key: "github:acme/shop#12", why: "The GitHub item names DEV-42" }],
+    });
+    const card = await screen.findByRole("region", { name: "Same work?" });
+    expect(within(card).getByText("The GitHub item names DEV-42")).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Link: Checkout totals and DEV-42: round the tax" }));
+    expect(fake.links).toEqual([{ key: "github:acme/shop#12", main: "clickup:86a" }]);
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Same work?" })).not.toBeInTheDocument());
+    const open = screen.getByRole("list", { name: "Open" });
+    expect(within(open).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(open).getByText("Also in")).toBeInTheDocument();
+    // The source under the row opens that item.
+    await userEvent.click(within(open).getByRole("button", { name: "Open details: DEV-42: round the tax" }));
+    expect(within(details()).getByText("main row", { exact: false })).toBeInTheDocument();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.links).toEqual([]));
+    await waitFor(() => expect(within(screen.getByRole("list", { name: "Open" })).getAllByRole("listitem")).toHaveLength(2));
+  });
+
+  it("Not the same hides a suggestion, with an undo", async () => {
+    const fake = await startApp({
+      ...lists(),
+      linkSuggestions: [{ main: "clickup:86a", key: "github:acme/shop#12", why: "Same words in the titles: tax" }],
+    });
+    const card = await screen.findByRole("region", { name: "Same work?" });
+    await userEvent.click(within(card).getByRole("button", { name: "Not the same: Checkout totals and DEV-42: round the tax" }));
+    expect(fake.linkNo).toEqual(["clickup:86a|github:acme/shop#12"]);
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Same work?" })).not.toBeInTheDocument());
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    expect(await screen.findByRole("region", { name: "Same work?" })).toBeInTheDocument();
+  });
+
+  it("the Link button names the main row of the group that the link goes under", async () => {
+    await startApp({
+      ...lists(),
+      tasks: [task("Tax work", { id: "t1" })],
+      links: [{ key: "github:acme/shop#12", main: "task:t1" }],
+      linkSuggestions: [{ main: "github:acme/shop#12", key: "clickup:86a", why: "The GitHub item names DEV-42" }],
+    });
+    const card = await screen.findByRole("region", { name: "Same work?" });
+    expect(within(card).getByRole("button", { name: /^Link: / })).toHaveAttribute("title", 'Show them as one row, under "Tax work"');
+  });
+
+  it("Tomorrow does not show on a row that a late linked item keeps in place", async () => {
+    await startApp({
+      ...lists(),
+      tasks: [task("Tax work", { id: "t1", due: today() })],
+      clickup: [clickupItem("86a", "Checkout totals", { custom_id: "DEV-42", due: Date.now() - 3 * 86400_000 })],
+      links: [{ key: "clickup:86a", main: "task:t1" }],
+    });
+    const open = await screen.findByRole("list", { name: "Needs you now" });
+    expect(within(open).getByText("Tax work")).toBeInTheDocument();
+    expect(within(open).queryByRole("button", { name: "Tomorrow" })).not.toBeInTheDocument();
+  });
+
+  it("a deleted task leaves its group on screen too", async () => {
+    const fake = await startApp({
+      ...lists(),
+      tasks: [task("Tax work", { id: "t1" })],
+      links: [
+        { key: "clickup:86a", main: "task:t1" },
+        { key: "github:acme/shop#12", main: "task:t1" },
+      ],
+    });
+    await openItem("Tax work");
+    await userEvent.click(within(details()).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(fake.links).toEqual([{ key: "github:acme/shop#12", main: "clickup:86a" }]));
+    await openItem("Checkout totals");
+    const group = await within(details()).findByRole("list", { name: "Same work" });
+    await waitFor(() => expect(within(group).queryByText(/Not in your list now/)).not.toBeInTheDocument());
+    expect(within(group).getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("a link fails like the real app: an unknown item, or a group that is too large", async () => {
+    const fake = await startApp({ ...lists(), tasks: [task("Tax work", { id: "t1" })] });
+    await expect(invoke("link_items", { main: "task:t1", key: "github:none#1" })).rejects.toBe("AIfred does not know the item github:none#1");
+    fake.links = Array.from({ length: 9 }, (_, n) => ({ key: `task:x${n}`, main: "clickup:86a" }));
+    fake.tasks.push(...Array.from({ length: 9 }, (_, n) => task(`X ${n}`, { id: `x${n}` })));
+    await expect(invoke("link_items", { main: "clickup:86a", key: "task:t1" })).rejects.toBe("one piece of work can have at most 10 items");
+  });
+
+  it("links another item from the item panel, and unlinks it", async () => {
+    const fake = await startApp({ ...lists(), tasks: [task("Tax rounding notes")] });
+    await openItem("Checkout totals");
+    await userEvent.click(within(details()).getByRole("button", { name: "+ Link another item" }));
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Find an item to link" }), "tax");
+    // The search finds the open items by title, not the item itself.
+    await userEvent.click(within(details()).getByRole("button", { name: "Link: DEV-42: round the tax" }));
+    expect(fake.links).toEqual([{ key: "github:acme/shop#12", main: "clickup:86a" }]);
+    const group = await within(details()).findByRole("list", { name: "Same work" });
+    expect(within(group).getByText("This item")).toBeInTheDocument();
+    await userEvent.click(within(group).getByRole("button", { name: "Unlink: DEV-42: round the tax" }));
+    await waitFor(() => expect(fake.links).toEqual([]));
+    expect(within(details()).queryByRole("list", { name: "Same work" })).not.toBeInTheDocument();
   });
 });
 

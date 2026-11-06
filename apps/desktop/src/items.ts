@@ -39,6 +39,8 @@ export type Item = {
   gh?: api.GithubItem;
   cu?: api.ClickupItem;
   mail?: api.Mail;
+  /** The other open items of the same piece of work, shown under this row (joinLinked). */
+  linked?: Item[];
 };
 
 export const taskKey = (id: string) => `task:${id}`;
@@ -208,6 +210,70 @@ export function buildItems(
     });
   }
   return out;
+}
+
+// ---------- One piece of work in many places (links.rs) ----------
+
+/** The most items in one piece of work, like links::MAX_GROUP. */
+export const MAX_GROUP = 10;
+
+const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** The groups of linked items, by main item. Each group has the main item
+ * first, then the other items in key order, like links.rs. This is the one
+ * place that reads groups from the links: the home list, the item panel,
+ * the link actions, and the test fake all use it. */
+export function linkGroups(links: api.ItemLink[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const l of [...links].sort((a, b) => byText(a.key, b.key))) out.set(l.main, [...(out.get(l.main) ?? [l.main]), l.key]);
+  return out;
+}
+
+/** The keys of the group of `key`, the main item first. Only `key` when it has no links. */
+export function groupOf(links: api.ItemLink[], key: string): string[] {
+  const head = links.find((l) => l.key === key)?.main ?? key;
+  return linkGroups(links).get(head) ?? [key];
+}
+
+/** The item of a group that shows as the row in the home list: the main
+ * item when it is open, else the first open item. */
+export function rowKey(group: string[], byKey: Map<string, Item>): string {
+  return group.find((k) => byKey.get(k)?.done === false) ?? group[0];
+}
+
+/** The rows of the home list: each piece of work in many places is one row.
+ * The row is rowKey() of the group. The other open items go in `linked`.
+ * The row has the earliest due day and the highest priority of its open
+ * items, so late work in a linked item is not hidden. For the same reason,
+ * the row starts later only when all its open items start later. Done
+ * items stay their own rows. */
+export function joinLinked(items: Item[], links: api.ItemLink[]): Item[] {
+  if (!links.length) return items;
+  const byKey = new Map(items.map((i) => [i.key, i]));
+  const rows = new Map<string, Item>();
+  const under = new Set<string>();
+  for (const keys of linkGroups(links).values()) {
+    const open = keys.map((k) => byKey.get(k)).filter((i): i is Item => !!i && !i.done);
+    if (open.length < 2) continue;
+    const [head, ...rest] = open;
+    const dues = open.map((i) => i.due).filter((d): d is string => !!d).sort();
+    const starts = open.map((i) => i.start);
+    const pri = open.map((i) => i.priority).filter((p): p is api.Priority => !!p).sort((a, b) => RANK[a] - RANK[b]);
+    const withWhy = open.find((i) => i.why);
+    rows.set(head.key, {
+      ...head,
+      due: dues[0] ?? null,
+      // An open item with no start day is work for now.
+      start: starts.some((d) => !d) ? null : (starts as string[]).sort()[0],
+      priority: pri[0] ?? null,
+      why: head.why ?? withWhy?.why,
+      goal: head.goal ?? withWhy?.goal,
+      isNew: open.some((i) => i.isNew),
+      linked: rest,
+    });
+    for (const i of rest) under.add(i.key);
+  }
+  return items.filter((i) => !under.has(i.key)).map((i) => rows.get(i.key) ?? i);
 }
 
 export type Groups = { now: Item[]; today: Item[]; isNew: Item[]; soon: Item[]; later: Item[]; done: Item[] };

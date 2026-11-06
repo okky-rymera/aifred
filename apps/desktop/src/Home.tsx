@@ -6,8 +6,9 @@ import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
 import { GoalTag, GoalsCard } from "./Goals";
 import { DayCheckCard, WeekReviewCard } from "./Review";
+import { LinksCard, srcText } from "./Links";
 import { WaitingCard } from "./Waiting";
-import { SRC_NAME, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, longDay, parseTask, shortDay, type Item } from "./items";
+import { SRC_NAME, addDays, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, type Item } from "./items";
 
 export function Check(props: { item: Item }) {
   const { toggleDone } = useApp();
@@ -133,10 +134,15 @@ function useTick(on: boolean) {
 function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: boolean }) {
   const { sel, open, sched, addToPlan, tomorrow, today, work, startWork } = useApp();
   const i = props.item;
-  const at = sched.at[i.key];
+  // A row of linked items is in the plan when one of its items is.
+  const keys = [i.key, ...(i.linked ?? []).map((l) => l.key)];
+  const at = keys.map((k) => sched.at[k]).find((t) => t !== undefined);
   const inPlan = at !== undefined;
   const acts = !i.done && !props.noActs;
-  const working = work?.key === i.key && !i.done;
+  // "Tomorrow" moves only your task. A linked item due before tomorrow keeps
+  // the row where it is, so the button would seem to do nothing.
+  const heldByLinked = (i.linked ?? []).some((l) => l.due !== null && l.due < addDays(today, 1));
+  const working = !!work && keys.includes(work.key) && !i.done;
   useTick(working);
   const sub = i.task?.checklist.length ? `${i.task.checklist.filter((c) => c.done).length}/${i.task.checklist.length} steps` : null;
   return (
@@ -159,6 +165,16 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
           <span className="t-title">{i.title}</span>
           <SrcLine item={i} extra={sub && <span>{sub}</span>} />
         </div>
+        {i.linked && i.linked.length > 0 && (
+          <div className="linked-src">
+            <span>Also in</span>
+            {i.linked.map((l) => (
+              <button key={l.key} className="linkbtn" title={l.title} aria-label={`Open details: ${l.title}`} onClick={() => open(l.key)}>
+                {srcText(l)}
+              </button>
+            ))}
+          </div>
+        )}
         {props.why && i.why && !i.done && <Why item={i} />}
       </div>
       <span className={`r-side${acts ? " has-acts" : ""}`}>
@@ -190,7 +206,7 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
                 + Plan
               </button>
             )}
-            {i.task && (
+            {i.task && !heldByLinked && (
               <button className="x" title="Move to tomorrow" onClick={() => tomorrow(i)}>
                 Tomorrow
               </button>
@@ -445,10 +461,10 @@ function HomeBox() {
 }
 
 export function Home() {
-  const { reviewCards, setReviewCard, items, today, githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
+  const { reviewCards, setReviewCard, items, links, today, githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
   const [showLater, setShowLater] = useState(false);
   const [showDone, setShowDone] = useState(false);
-  const g = groupItems(items, today);
+  const g = groupItems(joinLinked(items, links.links), today);
   const hour = new Date().getHours();
   const hello = hour < 12 ? "Good morning." : hour < 18 ? "Good afternoon." : "Good evening.";
   const nothing = !g.now.length && !g.today.length && !g.isNew.length && !g.soon.length;
@@ -465,6 +481,7 @@ export function Home() {
           <BriefCard needYou={g.now.length + g.today.length} />
           {reviewCards.week !== "hidden" && <WeekReviewCard force={reviewCards.week === "open"} onClose={() => setReviewCard("week", "hidden")} />}
           <WaitingCard />
+          <LinksCard />
           {tasksError && <div className="note-line err">Cannot load your tasks: {tasksError}</div>}
           {githubState === "loading" && <div className="note-line">Loading GitHub items…</div>}
           {githubWarning && githubState === "ok" && <div className="note-line warn">{githubWarning}</div>}
