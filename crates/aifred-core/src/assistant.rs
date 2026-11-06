@@ -939,6 +939,8 @@ impl<B: Backend> Assistant<B> {
             text: p.text,
             why: p.why,
             goal: p.goal,
+            next: p.next,
+            draft: p.draft,
         };
         // The saved brief, read again: it leaves out the items that the user
         // corrected today (learn.rs), also when the AI named them.
@@ -948,6 +950,23 @@ impl<B: Backend> Assistant<B> {
             Ok(crate::brief::get(dir, &d)?.unwrap_or(brief))
         })
         .await
+    }
+
+    /// Suggests steps for the item `key` (steps.rs), in one AI call with no
+    /// tools. It saves nothing: the user picks the steps to keep.
+    pub async fn suggest_steps(&self, key: &str) -> anyhow::Result<Vec<crate::steps::Step>> {
+        let k = key.to_string();
+        let prompt = self
+            .off_thread(move |dir| {
+                let facts = MemoryStore::new(dir).core_text()?;
+                crate::steps::prompt(dir, &k, &facts)
+            })
+            .await?;
+        let answer = self
+            .backend
+            .complete(crate::steps::RULES, &prompt, Some(crate::steps::MODEL))
+            .await?;
+        crate::steps::parse(&answer)
     }
 }
 
@@ -1045,6 +1064,11 @@ mod tests {
                 self.item_calls.lock().unwrap().push(prompt.to_string());
                 let b = self.brief.lock().unwrap().clone();
                 return Ok(b);
+            }
+            if system == crate::steps::RULES {
+                assert_eq!(model, Some(crate::steps::MODEL));
+                self.item_calls.lock().unwrap().push(prompt.to_string());
+                return Ok(self.brief.lock().unwrap().clone());
             }
             if system == crate::summaries::RULES {
                 assert_eq!(
@@ -1695,9 +1719,12 @@ mod tests {
         let t = a.tasks().add("Pay rent", "", "you").unwrap();
         let key = format!("task:{}", t.id);
         *a.backend.brief.lock().unwrap() =
-            serde_json::json!({ "text": format!("One thing: [rent](item:{key})."), "why": { &key: "Due today." }, "minutes": { &key: 15 } }).to_string();
+            serde_json::json!({ "text": format!("One thing: [rent](item:{key})."), "why": { &key: "Due today." }, "minutes": { &key: 15 },
+                "next": { &key: "Pay the rent online." }, "draft": { &key: "email" } }).to_string();
         let b = a.write_brief("2026-11-04").await.unwrap();
         assert_eq!(b.why[&key], "Due today.");
+        assert_eq!(b.next[&key], "Pay the rent online.");
+        assert_eq!(b.draft[&key], "email");
         assert_eq!(crate::brief::get(&d, "2026-11-04").unwrap(), Some(b));
         assert_eq!(crate::plan::estimates(&d).unwrap()[&key].minutes, 15);
         let prompt = a.backend.item_calls.lock().unwrap()[0].clone();
@@ -1707,6 +1734,33 @@ mod tests {
         );
         *a.backend.brief.lock().unwrap() = "not json".into();
         assert!(a.write_brief("2026-11-05").await.is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn suggested_steps_come_from_one_call_with_the_item() {
+        let d = temp("steps");
+        let a = Assistant::new(d.clone(), FakeBackend::default(), d.join("none")).unwrap();
+        let t = a
+            .tasks()
+            .add("Plan the trip", "Ask Ana about dates.", "you")
+            .unwrap();
+        let key = format!("task:{}", t.id);
+        *a.backend.brief.lock().unwrap() =
+            r#"{"steps": [{"text": "Email Ana about the dates", "draft": "email"}, "Book the hotel"]}"#.into();
+        let s = a.suggest_steps(&key).await.unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].draft.as_deref(), Some("email"));
+        assert_eq!(s[1].draft, None);
+        let prompt = a.backend.item_calls.lock().unwrap()[0].clone();
+        assert!(prompt.contains("Ask Ana about dates."), "{prompt}");
+        assert!(
+            a.tasks().load().unwrap()[0].checklist.is_empty(),
+            "nothing is saved"
+        );
+        *a.backend.brief.lock().unwrap() = "no".into();
+        assert!(a.suggest_steps(&key).await.is_err());
+        assert!(a.suggest_steps("task:none").await.is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

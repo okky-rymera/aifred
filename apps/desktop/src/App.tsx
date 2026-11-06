@@ -448,7 +448,7 @@ export default function App() {
       const t = goalText(id);
       if (t) goalOf[key] = t;
     }
-    return buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}, goalOf, mail.reply);
+    return buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}, goalOf, mail.reply, brief?.next, brief?.draft);
   }, [tasks, github.items, clickup.items, meta, est, brief, goalText, mail.reply]);
 
   const byKey = useMemo(() => new Map(items.map((i) => [i.key, i])), [items]);
@@ -736,6 +736,34 @@ export default function App() {
   );
 
   const editTask = useCallback((id: string, changes: api.TaskChanges) => run(api.editTask(id, changes), putTask), [run]);
+
+  const addSteps = useCallback(
+    (key: string, steps: string[]) =>
+      run(api.addSteps(key, steps), (a) => {
+        const t = a.task;
+        const loadLinks = () => api.itemLinks().then(setLinks).catch(() => {});
+        if (a.created) {
+          setTasks((all) => [...all, t]);
+          loadLinks();
+          toast(`Made the task "${t.title}" with ${a.added} step${a.added === 1 ? "" : "s"}, under this item`, () =>
+            run(api.deleteTask(t.id), () => {
+              setTasks((all) => all.filter((x) => x.id !== t.id));
+              loadLinks();
+            }),
+          );
+          return;
+        }
+        putTask(t);
+        if (!a.added) {
+          toast(`"${t.title}" has these steps already`);
+          return;
+        }
+        const added = t.checklist.slice(t.checklist.length - a.added).map((c) => c.text);
+        // Undo takes out the added steps that are not done, in one save. Other changes since then stay.
+        toast(`Added ${a.added} step${a.added === 1 ? "" : "s"} to "${t.title}"`, () => run(api.removeTaskSteps(t.id, added), putTask));
+      }),
+    [run, toast],
+  );
 
   const tickStep = useCallback(
     (id: string, index: number) => {
@@ -1324,6 +1352,7 @@ export default function App() {
     finishItem,
     correctBrief,
     addTask,
+    addSteps,
     homeMode,
     setHomeMode,
     editTask,

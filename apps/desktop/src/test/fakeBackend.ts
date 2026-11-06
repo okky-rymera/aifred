@@ -39,6 +39,7 @@ import type {
   UpdateStatus,
   Waiting,
   WorkDone,
+  Step,
 } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void, args: Record<string, any>) => Promise<Answer> | Answer;
@@ -59,6 +60,8 @@ export type Fake = {
   /** Runs after gmail_threads makes its list and before it answers. A test
    * can hold the answer with it, so the answer comes after a later change. */
   onGmailThreads?: () => Promise<void> | void;
+  /** Runs before add_steps saves. A test can hold the save with it, like a slow disk. */
+  onAddSteps?: () => Promise<void> | void;
   /** Runs before day_plan answers. A test can hold the plan load with it. */
   onDayPlan?: (day: string) => Promise<void> | void;
   /** Runs before connect_google answers, like a user in the browser. A
@@ -116,6 +119,8 @@ export type Fake = {
   /** AIfred's own jobs, and their runs (newest first). */
   jobs: Job[];
   jobRuns: JobRun[];
+  /** What suggest_steps gives for an item. Throw to fail it. */
+  onSuggestSteps: (key: string) => Promise<Step[]> | Step[];
   /** What write_brief makes. Throw to fail it. */
   onWriteBrief: (day: string) => Promise<Brief> | Brief;
   side: Record<string, SideTurn[]>;
@@ -325,6 +330,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     jobs: [],
     jobRuns: [],
     onWriteBrief: (day) => ({ day, written: nowSecs(), text: "Nothing urgent today.", why: {} }),
+    onSuggestSteps: () => [{ text: "Read the item" }],
     side: {},
     newKeys: [],
     summaries: {},
@@ -666,6 +672,13 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         step.done = args.done;
         return structuredClone(t);
       }
+      case "remove_task_steps": {
+        // Like tasks.rs: only the steps that are not done go.
+        const t = find(args.id);
+        const gone = new Set(args.steps as string[]);
+        t.checklist = t.checklist.filter((c) => c.done || !gone.has(c.text));
+        return structuredClone(t);
+      }
       case "set_task_done": {
         const t = find(args.id);
         // Like tasks.rs: the work of a task ends with it, or opens again.
@@ -738,6 +751,41 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         fake.mailHidden = fake.mailHidden.filter((x) => x !== id);
         if (args.hide) fake.mailHidden.push(id);
         return null;
+      }
+      case "suggest_steps":
+        if (!titlePlace(String(args.key))) throw `no item ${args.key}`;
+        return structuredClone(await fake.onSuggestSteps(String(args.key)));
+      case "add_steps": {
+        await fake.onAddSteps?.();
+        // Like steps::add: the open task of the group, else a new task under the main item.
+        const key = String(args.key);
+        // Like steps::clean: one line, no empty step, no step twice.
+        const seen = new Set<string>();
+        const steps = (args.steps as string[])
+          .map((x) => x.split(/\s+/).filter(Boolean).join(" "))
+          .filter((x) => x && !seen.has(x.toLowerCase()) && seen.add(x.toLowerCase()));
+        if (!steps.length) throw "no steps to add";
+        if (steps.length > 8) throw "at most 8 steps can be added at one time";
+        const g = groupOf(fake.links, key);
+        const order = [key, ...g.filter((k) => k !== key)];
+        const t = order.map((k) => fake.tasks.find((x) => `task:${x.id}` === k && !x.done)).find(Boolean);
+        if (t) {
+          let added = 0;
+          const has = new Set(t.checklist.map((c) => c.text.toLowerCase()));
+          for (const text of steps) {
+            if (has.has(text.toLowerCase())) continue;
+            has.add(text.toLowerCase());
+            t.checklist.push({ text, done: false });
+            added++;
+          }
+          return { task: structuredClone(t), added, created: false };
+        }
+        const item = titlePlace(key);
+        if (!item) throw `no item ${key}`;
+        const n = task(item[0], { added_by: "aifred", checklist: steps.map((text) => ({ text, done: false })) });
+        fake.tasks.push(n);
+        fake.links.push({ key: `task:${n.id}`, main: g[0] });
+        return { task: structuredClone(n), added: steps.length, created: true };
       }
       case "item_links":
         return linksNow();
@@ -930,6 +978,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         for (const c of fake.corrections.filter((c) => c.day === args.day)) {
           if (b) delete b.why[c.key];
           if (b?.goal) delete b.goal[c.key];
+          if (b?.next) delete b.next[c.key];
+          if (b?.draft) delete b.draft[c.key];
         }
         return b;
       }

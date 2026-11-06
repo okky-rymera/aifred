@@ -140,16 +140,8 @@ pub fn prompt(items: &[Pending]) -> String {
 /// Reads the answer of the AI: one summary for each item number. An item
 /// with no usable summary gets None. Fails only when there is no JSON object.
 pub fn parse(answer: &str, count: usize) -> anyhow::Result<Vec<Option<String>>> {
-    // The model can put the object in a code block or add text around it.
-    let start = answer
-        .find('{')
-        .context("the summary answer has no JSON object")?;
-    let end = answer
-        .rfind('}')
-        .filter(|&e| e > start)
-        .context("the summary answer has no JSON object")?;
-    let v: Value = serde_json::from_str(answer.get(start..=end).unwrap_or_default())
-        .context("the summary answer is not a JSON object")?;
+    let json = crate::text::json_object(answer).context("the summary answer has no JSON object")?;
+    let v: Value = serde_json::from_str(json).context("the summary answer is not a JSON object")?;
     Ok((1..=count)
         .map(|n| {
             let s = v[n.to_string()]

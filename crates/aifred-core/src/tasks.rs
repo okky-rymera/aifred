@@ -2,6 +2,7 @@
 //! Stored in the task table of the database (db.rs). The desktop app and the
 //! tasks tool server both use it.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -298,40 +299,13 @@ impl TaskStore {
 
     /// Adds a task with all the fields in `f`. The title is necessary.
     pub fn create(&self, f: TaskFields, added_by: &str) -> anyhow::Result<Task> {
-        let mut task = Task {
-            id: String::new(),
-            title: String::new(),
-            notes: String::new(),
-            done: false,
-            added_by: added_by.into(),
-            created: now(),
-            done_at: None,
-            due: None,
-            start: None,
-            priority: None,
-            tags: Vec::new(),
-            checklist: Vec::new(),
-            files: Vec::new(),
-        };
+        let mut task = blank(added_by);
         let files = self.files(&f)?;
         apply(&mut task, f)?;
         if let Some(files) = files {
             task.files = files;
         }
-        db::write(&self.dir, |tx| {
-            task.id = new_id();
-            while tx
-                .query_row("SELECT 1 FROM task WHERE id = ?1", [&task.id], |_| Ok(()))
-                .optional()?
-                .is_some()
-            {
-                task.id = new_id();
-            }
-            // insert() already writes the title and the description.
-            insert(tx, &task)?;
-            write_fields(tx, &task, false)?;
-            Ok(task)
-        })
+        db::write(&self.dir, |tx| save_new(tx, task))
     }
 
     /// Changes the fields in `f`. The other fields stay as they are.
@@ -355,6 +329,30 @@ impl TaskStore {
             }
             let text_changed = old_text != (task.title.clone(), task.notes.clone());
             write_fields(tx, &task, text_changed)?;
+            Ok(task)
+        })
+    }
+
+    /// Adds steps at the end of the checklist, in one write, so a change at
+    /// the same time is not lost. A step that the checklist has already (with
+    /// any case) is not added again. Returns the task and how many steps it added.
+    pub fn add_steps(&self, id: &str, steps: &[String]) -> anyhow::Result<(Task, usize)> {
+        db::write(&self.dir, |tx| add_steps_in(tx, id, steps))
+    }
+
+    /// The Undo of add_steps(): takes out the steps with these texts that
+    /// are not done, in one write. A step that the user ticked since then,
+    /// and all other changes, stay.
+    pub fn remove_steps(&self, id: &str, steps: &[String]) -> anyhow::Result<Task> {
+        db::write(&self.dir, |tx| {
+            let mut task = get_in(tx, id)?;
+            let gone: HashSet<&str> = steps.iter().map(String::as_str).collect();
+            let before = task.checklist.len();
+            task.checklist
+                .retain(|c| c.done || !gone.contains(c.text.as_str()));
+            if task.checklist.len() != before {
+                write_fields(tx, &task, false)?;
+            }
             Ok(task)
         })
     }
@@ -438,6 +436,114 @@ impl TaskStore {
             Ok(())
         })
     }
+}
+
+/// The task with this id, in a change that is open.
+fn get_in(tx: &Transaction, id: &str) -> anyhow::Result<Task> {
+    match tx
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+            [id],
+            from_row,
+        )
+        .optional()?
+    {
+        Some(t) => Ok(t),
+        None => bail!("no task with id {id}"),
+    }
+}
+
+/// Saves a new task with a new id, in a change that is open.
+fn save_new(tx: &Transaction, mut task: Task) -> anyhow::Result<Task> {
+    task.id = new_id();
+    while tx
+        .query_row("SELECT 1 FROM task WHERE id = ?1", [&task.id], |_| Ok(()))
+        .optional()?
+        .is_some()
+    {
+        task.id = new_id();
+    }
+    // insert() already writes the title and the description.
+    insert(tx, &task)?;
+    write_fields(tx, &task, false)?;
+    Ok(task)
+}
+
+/// A new task with no fields yet.
+fn blank(added_by: &str) -> Task {
+    Task {
+        id: String::new(),
+        title: String::new(),
+        notes: String::new(),
+        done: false,
+        added_by: added_by.into(),
+        created: now(),
+        done_at: None,
+        due: None,
+        start: None,
+        priority: None,
+        tags: Vec::new(),
+        checklist: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+/// A new task with a title and an open checklist, in a change that is open.
+/// For steps.rs: the task and its link must be in one save.
+pub(crate) fn create_with_steps_in(
+    tx: &Transaction,
+    title: &str,
+    steps: &[String],
+    added_by: &str,
+) -> anyhow::Result<Task> {
+    let mut task = blank(added_by);
+    apply(
+        &mut task,
+        TaskFields {
+            title: Some(title.into()),
+            checklist: Some(
+                steps
+                    .iter()
+                    .map(|s| StepFields {
+                        text: s.clone(),
+                        done: Some(false),
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
+    )?;
+    save_new(tx, task)
+}
+
+/// add_steps(), in a change that is open.
+pub(crate) fn add_steps_in(
+    tx: &Transaction,
+    id: &str,
+    steps: &[String],
+) -> anyhow::Result<(Task, usize)> {
+    let mut task = get_in(tx, id)?;
+    let mut has: HashSet<String> = task
+        .checklist
+        .iter()
+        .map(|c| c.text.to_lowercase())
+        .collect();
+    let mut added = 0;
+    for s in steps {
+        let text = s.trim();
+        if text.is_empty() || !has.insert(text.to_lowercase()) {
+            continue;
+        }
+        task.checklist.push(ChecklistItem {
+            text: text.into(),
+            done: false,
+        });
+        added += 1;
+    }
+    if added > 0 {
+        write_fields(tx, &task, false)?;
+    }
+    Ok((task, added))
 }
 
 /// set_done_work(), in a change that is open.
@@ -778,6 +884,54 @@ mod tests {
             .unwrap();
         assert!(!u.checklist[0].done, "a done value that is given wins");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn add_steps_appends_new_steps_only() {
+        let (s, d) = store("addsteps");
+        let t = s.add("Trip", "", "you").unwrap();
+        s.add_steps(&t.id, &["Book".into()]).unwrap();
+        s.set_step(&t.id, 0, "Book", true).unwrap();
+        let (u, n) = s
+            .add_steps(
+                &t.id,
+                &["book".into(), " Pack ".into(), "".into(), "Pack".into()],
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            u.checklist
+                .iter()
+                .map(|c| (c.text.as_str(), c.done))
+                .collect::<Vec<_>>(),
+            [("Book", true), ("Pack", false)],
+            "a step that is there keeps its tick"
+        );
+        assert!(s.add_steps("nope", &["x".into()]).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn remove_steps_keeps_ticked_steps_and_other_changes() {
+        let (s, d) = store("rmsteps");
+        let t = s.add("Trip", "", "you").unwrap();
+        s.add_steps(&t.id, &["Book".into()]).unwrap();
+        s.add_steps(&t.id, &["Pack".into(), "Pay".into()]).unwrap();
+        // The user ticks one added step before the Undo.
+        s.set_step(&t.id, 2, "Pay", true).unwrap();
+        let u = s
+            .remove_steps(&t.id, &["Pack".into(), "Pay".into()])
+            .unwrap();
+        assert_eq!(
+            u.checklist
+                .iter()
+                .map(|c| (c.text.as_str(), c.done))
+                .collect::<Vec<_>>(),
+            [("Book", false), ("Pay", true)]
+        );
+        assert_eq!(s.load().unwrap()[0].checklist, u.checklist, "it is saved");
+        assert!(s.remove_steps("nope", &["x".into()]).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

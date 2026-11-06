@@ -96,6 +96,17 @@ fn head_in(c: &Connection, key: &str) -> anyhow::Result<String> {
     )
 }
 
+/// All items of `key`'s group, the main item first. An item with no link
+/// is a group of one.
+pub fn group(dir: &Path, key: &str) -> anyhow::Result<Vec<String>> {
+    db::read(dir, |c| group_in(c, key))
+}
+
+/// group(), with a connection that is open.
+pub(crate) fn group_in(c: &Connection, key: &str) -> anyhow::Result<Vec<String>> {
+    members_in(c, &head_in(c, key)?)
+}
+
 /// All items of the group whose main item is `head`, the main item first.
 fn members_in(c: &Connection, head: &str) -> anyhow::Result<Vec<String>> {
     let mut q = c.prepare("SELECT key FROM item_link WHERE main = ?1 ORDER BY key")?;
@@ -117,7 +128,7 @@ pub fn link(dir: &Path, main: &str, key: &str, now: u64) -> anyhow::Result<Links
     get(dir)
 }
 
-fn link_in(tx: &Transaction, main: &str, key: &str, now: u64) -> anyhow::Result<()> {
+pub(crate) fn link_in(tx: &Transaction, main: &str, key: &str, now: u64) -> anyhow::Result<()> {
     split(main)?;
     split(key)?;
     if main == key {

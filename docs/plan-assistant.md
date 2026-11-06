@@ -118,9 +118,16 @@ Done: any open items from different sources can be one group, with one main item
 
 ### 7. Suggest the work
 
-- [ ] For an item, suggest the next action in one line ("reply to Ana with the price", "review PR #12").
-- [ ] Split a large item into steps (the task checklist already exists).
-- [ ] Say what AIfred can do for the user later, and what the user must do.
+- [x] For an item, suggest the next action in one line ("reply to Ana with the price", "review PR #12").
+- [x] Split a large item into steps (the task checklist already exists).
+- [x] Say what AIfred can do for the user later, and what the user must do.
+
+Done: the brief call also gives the next action of each item that it names, and the kind of draft that AIfred can make for it later: an email, Doc text, or a Sheet change (`crates/aifred-core/src/brief.rs`). The home row and the item panel show "Next:" with "You do this" or "AIfred can draft … later". "✦ Suggest steps" in the item panel is one AI call (`crates/aifred-core/src/steps.rs`, `apps/desktop/src/Steps.tsx`). The user picks the steps. They go on the open local task of the same work, or on a new task that AIfred links under the item. Undo takes them out. Not done yet:
+- Check with real use that the next actions are concrete, and that the draft labels are right.
+- Only the items that the brief names get a next action. The day plan and the plan chat do not get it.
+- The next action stays the same until AIfred writes the brief again. A finished step does not change it.
+- "Suggest steps" does not see the files of a task, or the full email thread (only Gmail's short preview).
+- The draft label is only a promise for step 8. AIfred cannot make the draft yet.
 
 ### 8. Actions in other apps (do this last)
 

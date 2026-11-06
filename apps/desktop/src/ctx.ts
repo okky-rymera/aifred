@@ -85,6 +85,8 @@ export type AppCtx = {
   /** You say that the brief is wrong about an item. */
   correctBrief: (i: Item, kind: api.CorrectionKind) => void;
   addTask: (fields: api.TaskChanges & { title: string }) => Promise<boolean>;
+  /** Puts the steps that you picked on the item's task, or on a new task under the item, with an undo. */
+  addSteps: (key: string, steps: string[]) => Promise<boolean>;
   /** The mode of the home box: a message to AIfred, or a new task with no AI call. */
   homeMode: "ask" | "task";
   setHomeMode: (m: "ask" | "task") => void;

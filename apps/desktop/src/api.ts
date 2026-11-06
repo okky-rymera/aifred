@@ -190,7 +190,20 @@ export type PlanItem = { key: string; why?: string; goal?: number };
 export type DayPlan = { day: string; mode: "ai" | "self" | "review"; items: PlanItem[]; updated: number };
 export type Estimate = { minutes: number; by: "you" | "aifred" };
 /** `goal`: the id of the goal that an item serves, by item key. */
-export type Brief = { day: string; written: number; text: string; why: Record<string, string>; goal?: Record<string, number> };
+/** The text that AIfred can draft for a step later: an email, text in a Google Doc, or a change in a Google Sheet. */
+export type DraftKind = "email" | "doc" | "sheet";
+
+export type Brief = {
+  day: string;
+  written: number;
+  text: string;
+  why: Record<string, string>;
+  goal?: Record<string, number>;
+  /** The next action for each item in `why`. */
+  next?: Record<string, string>;
+  /** The next actions that AIfred can draft later. A next action that is not here is for you. */
+  draft?: Record<string, DraftKind>;
+};
 
 /** One of the user's goals (goals.rs). */
 export type Goal = { id: number; text: string; created: number; updated: number };
@@ -345,6 +358,14 @@ export const jobRuns = (id: string | null, limit: number, skipped: boolean) => i
 export const setJobStatus = (id: string, status: "active" | "paused") => invoke<Job>("set_job_status", { id, status });
 export const deleteJob = (id: string) => invoke<void>("delete_job", { id });
 export const itemDetails = (key: string) => invoke<ItemDetails>("item_details", { key });
+/** One step that AIfred suggests for an item. `draft`: AIfred can draft its text later. */
+export type Step = { text: string; draft?: DraftKind };
+/** AIfred splits an item into steps (steps.rs). One AI call. It saves nothing. */
+export const suggestSteps = (key: string) => invoke<Step[]>("suggest_steps", { key });
+/** What addSteps did. `created`: AIfred made a new task under the item. */
+export type AddedSteps = { task: Task; added: number; created: boolean };
+/** Puts the steps on the open task of the item's group, or on a new task under the item. */
+export const addSteps = (key: string, steps: string[]) => invoke<AddedSteps>("add_steps", { key, steps });
 
 export const history = () => invoke<Turn[]>("history");
 /** All facts: the ones in use, then the forgotten ones. */
@@ -489,6 +510,8 @@ export const editTask = (id: string, changes: TaskChanges) => invoke<Task>("edit
  * text: the tick fails when the checklist changed after the list loaded. */
 export const setTaskStep = (id: string, index: number, text: string, done: boolean) =>
   invoke<Task>("set_task_step", { id, index, text, done });
+/** The Undo of addSteps: takes out the steps with these texts that are not done, in one save. */
+export const removeTaskSteps = (id: string, steps: string[]) => invoke<Task>("remove_task_steps", { id, steps });
 export const getSettings = () => invoke<Settings>("get_settings");
 export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");

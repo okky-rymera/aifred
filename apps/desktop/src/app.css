@@ -533,3 +533,12 @@ input.d-title:focus { border-color: var(--amber); outline: 0; background: var(--
   .d-ask .send { padding: 6px 10px; }
 }
 @media (prefers-reduced-motion: reduce) { .app * { animation: none !important; transition: none !important; } }
+/* Suggested work (Steps.tsx): the next action, and suggested steps. */
+.next-line { font-size: 12.5px; color: var(--ink); display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; padding-left: 16px; }
+.next-line .k { color: var(--muted); }
+.who { font-size: 11px; color: var(--muted); border: 1px dashed var(--line); border-radius: 6px; padding: 0 6px; white-space: nowrap; }
+.who.ai { color: var(--amber-ink); background: var(--amber-soft); border-color: transparent; }
+.suggest { display: flex; flex-direction: column; gap: 8px; }
+.suggest .steps { margin: 0; }
+.suggest-acts { display: flex; align-items: center; gap: 10px; }
+.detail .next-line { padding-left: 0; }

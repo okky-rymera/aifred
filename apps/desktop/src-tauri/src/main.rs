@@ -551,6 +551,40 @@ async fn edit_task(app: State<'_, App>, id: String, changes: TaskFields) -> CmdR
     Ok(t)
 }
 
+/// Suggests steps for an item (steps.rs). It is one AI call. It saves nothing.
+#[tauri::command]
+async fn suggest_steps(
+    app: State<'_, App>,
+    key: String,
+) -> CmdResult<Vec<aifred_core::steps::Step>> {
+    app.assistant.suggest_steps(&key).await.map_err(err)
+}
+
+/// Puts the steps that the user picked on the open task of the item's
+/// group, or on a new task under the item (steps.rs).
+#[tauri::command]
+async fn add_steps(
+    app: State<'_, App>,
+    key: String,
+    steps: Vec<String>,
+) -> CmdResult<aifred_core::steps::Added> {
+    let a = blocking(&app, move |a| {
+        aifred_core::steps::add(&a.dir, &key, &steps, now())
+    })
+    .await?;
+    if a.created {
+        app.fill_vectors();
+    }
+    Ok(a)
+}
+
+/// The Undo of add_steps: takes out the steps with these texts that are
+/// not done, in one save (tasks.rs). A tick since then stays.
+#[tauri::command]
+async fn remove_task_steps(app: State<'_, App>, id: String, steps: Vec<String>) -> CmdResult<Task> {
+    blocking(&app, move |a| a.tasks().remove_steps(&id, &steps)).await
+}
+
 /// Ticks or un-ticks one step. `text` must be the step's text, so a tick
 /// fails when the checklist changed after the list was loaded.
 #[tauri::command]
@@ -1430,6 +1464,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         add_task,
         edit_task,
         set_task_step,
+        remove_task_steps,
         set_task_done,
         delete_task,
         github_items,
@@ -1475,6 +1510,8 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         delete_job,
         item_meta,
         item_details,
+        suggest_steps,
+        add_steps,
         update_status,
         check_update,
         restart_to_update
@@ -1828,6 +1865,31 @@ mod tests {
         assert_eq!(
             call(&win, "item_details", json!({ "key": key })).unwrap()["details"],
             ""
+        );
+        let added = call(
+            &win,
+            "add_steps",
+            json!({ "key": key, "steps": ["Open the bank app", "Pay"] }),
+        )
+        .unwrap();
+        assert_eq!(
+            (added["added"].clone(), added["created"].clone()),
+            (json!(2), json!(false))
+        );
+        assert_eq!(added["task"]["checklist"][1]["text"], "Pay");
+        assert!(call(&win, "add_steps", json!({ "key": key, "steps": [] })).is_err());
+        let id = added["task"]["id"].clone();
+        assert_eq!(
+            call(
+                &win,
+                "remove_task_steps",
+                json!({ "id": id, "steps": ["Pay"] })
+            )
+            .unwrap()["checklist"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
         assert_eq!(
             call(

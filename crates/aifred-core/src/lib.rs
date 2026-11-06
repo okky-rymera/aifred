@@ -27,6 +27,7 @@ pub mod program;
 pub mod review;
 pub mod settings;
 pub mod side;
+pub mod steps;
 pub mod summaries;
 pub mod tasks;
 pub mod text;

@@ -1168,6 +1168,7 @@ mod tests {
                 text: "Hi.".into(),
                 why: BTreeMap::new(),
                 goal: BTreeMap::from([(a.clone(), g.id)]),
+                ..Default::default()
             },
             &BTreeMap::new(),
         )
@@ -1270,6 +1271,7 @@ mod tests {
                 text: "Hi.".into(),
                 why: BTreeMap::new(),
                 goal: BTreeMap::from([(a.clone(), g1.id), (b.clone(), g1.id)]),
+                ..Default::default()
             },
             &BTreeMap::new(),
         )

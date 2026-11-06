@@ -4,6 +4,9 @@
 //! The same call gives a reason for the items that need the user, and a time
 //! guess for each open item that has none (plan.rs), and the goal that each
 //! item serves (goals.rs).
+//! For each item that needs the user, the brief also gives the next step, and
+//! says when AIfred can draft the text of that step later (an email, a Google
+//! Doc, or a Google Sheet). The other steps are for the user.
 //!
 //! The user can correct the brief (learn.rs). The brief then shows no
 //! reason for the item on that day, and the next briefs get the corrections.
@@ -50,10 +53,18 @@ Also give:
 - why: for each item that needs the user today, one short reason, at most 15 words. Example: \"It waits for your review for 3 days.\"
 - minutes: for each open item in `needs_guess`, how many minutes the work takes, as a whole number from 5 to 600. When `time_history` is there, use it: guess like the real times of similar finished items, and when real_vs_guess is above 1, make the guesses that much longer. real_vs_guess comes only from your own guesses (guess_by \"aifred\"), not from the user's guesses.
 - goal: for each item in `why`, the id of the goal that it serves. Leave out an item that serves no goal. Use only goal ids from `goals`.
+- next: for each item in `why`, the next action that moves it forward, at most 12 words. Start with a verb, and name the person or the thing. Use the description, the checklist, and the state of the item. Examples: \"Reply to Ana with the price.\", \"Review PR #12 and approve or ask for changes.\", \"Write the first 3 steps of the checklist.\"
+- draft: for each item in `next` where the next action is to write text that AIfred can draft for the user to check: \"email\" (a reply or a new email), \"doc\" (text in a Google Doc), or \"sheet\" (a change in a Google Sheet). Leave out the actions that only the user can do: decisions, calls, meetings, code, reviews, and work in other apps.
 
-Answer with only a JSON object: {\"text\": \"...\", \"why\": {\"<key>\": \"...\"}, \"minutes\": {\"<key>\": 30}, \"goal\": {\"<key>\": 1}}";
+Answer with only a JSON object: {\"text\": \"...\", \"why\": {\"<key>\": \"...\"}, \"minutes\": {\"<key>\": 30}, \"goal\": {\"<key>\": 1}, \"next\": {\"<key>\": \"...\"}, \"draft\": {\"<key>\": \"email\"}}";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The kinds of text that AIfred can draft for a next step (plan-assistant.md, step 8).
+pub const DRAFTS: [&str; 3] = ["email", "doc", "sheet"];
+
+/// The longest next step that the brief keeps, in characters.
+const MAX_NEXT: usize = 120;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Brief {
     /// "YYYY-MM-DD".
     pub day: String,
@@ -68,6 +79,13 @@ pub struct Brief {
     /// item in `why` that is not here serves no goal.
     #[serde(default)]
     pub goal: BTreeMap<String, i64>,
+    /// The next action for each item in `why`, by item key.
+    #[serde(default)]
+    pub next: BTreeMap<String, String>,
+    /// The next actions that AIfred can draft later, by item key: one of
+    /// DRAFTS. A next action that is not here is for the user.
+    #[serde(default)]
+    pub draft: BTreeMap<String, String>,
 }
 
 /// The brief of `day`, or None when AIfred has not written it. An item that
@@ -75,24 +93,38 @@ pub struct Brief {
 pub fn get(dir: &Path, day: &str) -> anyhow::Result<Option<Brief>> {
     db::read(dir, |c| {
         let corrected = crate::learn::corrected_on(c, day)?;
-        let row: Option<(u64, String, String, String)> = c
+        type Row = (u64, String, String, String, String, String);
+        let row: Option<Row> = c
             .query_row(
-                "SELECT written, text, why, goal FROM brief WHERE day = ?1",
+                "SELECT written, text, why, goal, next, draft FROM brief WHERE day = ?1",
                 [day],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
         Ok(match row {
-            Some((written, text, why, goal)) => {
+            Some((written, text, why, goal, next, draft)) => {
                 let mut b = Brief {
                     day: day.into(),
                     written,
                     text,
                     why: serde_json::from_str(&why)?,
                     goal: serde_json::from_str(&goal)?,
+                    next: serde_json::from_str(&next)?,
+                    draft: serde_json::from_str(&draft)?,
                 };
                 b.why.retain(|k, _| !corrected.contains(k));
                 b.goal.retain(|k, _| !corrected.contains(k));
+                b.next.retain(|k, _| !corrected.contains(k));
+                b.draft.retain(|k, _| !corrected.contains(k));
                 Some(b)
             }
             None => None,
@@ -104,14 +136,16 @@ pub fn get(dir: &Path, day: &str) -> anyhow::Result<Option<Brief>> {
 pub fn save(dir: &Path, brief: &Brief, minutes: &BTreeMap<String, u32>) -> anyhow::Result<()> {
     db::write(dir, |tx| {
         tx.execute(
-            "INSERT INTO brief (day, written, text, why, goal) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (day) DO UPDATE SET written = ?2, text = ?3, why = ?4, goal = ?5",
+            "INSERT INTO brief (day, written, text, why, goal, next, draft) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (day) DO UPDATE SET written = ?2, text = ?3, why = ?4, goal = ?5, next = ?6, draft = ?7",
             rusqlite::params![
                 brief.day,
                 brief.written as i64,
                 brief.text,
                 serde_json::to_string(&brief.why)?,
-                serde_json::to_string(&brief.goal)?
+                serde_json::to_string(&brief.goal)?,
+                serde_json::to_string(&brief.next)?,
+                serde_json::to_string(&brief.draft)?
             ],
         )?;
         for (key, m) in minutes {
@@ -180,27 +214,23 @@ pub struct Parsed {
     pub why: BTreeMap<String, String>,
     pub minutes: BTreeMap<String, u32>,
     pub goal: BTreeMap<String, i64>,
+    pub next: BTreeMap<String, String>,
+    pub draft: BTreeMap<String, String>,
 }
 
-/// The brief, the reasons, the time guesses, and the goals from the AI's
-/// answer. Keys that are not in `known` and goal ids that are not in `goals`
-/// are dropped: the AI must not make up items or goals.
+/// The brief, the reasons, the time guesses, the goals, and the next steps
+/// from the AI's answer. Keys that are not in `known` and goal ids that are
+/// not in `goals` are dropped: the AI must not make up items or goals. A
+/// draft needs a next step and a kind from DRAFTS.
 pub fn parse(answer: &str, known: &[String], goals: &[i64]) -> anyhow::Result<Parsed> {
-    // The JSON object, also when the AI put a code fence or words around it.
-    let start = answer
-        .find('{')
-        .context("the brief answer has no JSON object")?;
-    let end = answer
-        .rfind('}')
-        .context("the brief answer has no JSON object")?;
-    let v: Value =
-        serde_json::from_str(&answer[start..=end]).context("the brief answer is not valid JSON")?;
+    let json = crate::text::json_object(answer).context("the brief answer has no JSON object")?;
+    let v: Value = serde_json::from_str(json).context("the brief answer is not valid JSON")?;
     let text = v["text"].as_str().unwrap_or_default().trim().to_string();
     if text.is_empty() {
         bail!("the brief answer has no text");
     }
     let known: HashSet<&str> = known.iter().map(String::as_str).collect();
-    let why = v["why"]
+    let why: BTreeMap<String, String> = v["why"]
         .as_object()
         .into_iter()
         .flatten()
@@ -226,11 +256,33 @@ pub fn parse(answer: &str, known: &[String], goals: &[i64]) -> anyhow::Result<Pa
         .filter_map(|(k, g)| g.as_i64().map(|g| (k.clone(), g)))
         .filter(|(_, g)| goals.contains(g))
         .collect();
+    let next: BTreeMap<String, String> = v["next"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        // Only the items with a reason get a next action, as RULES says.
+        .filter(|(k, _)| why.contains_key(k.as_str()))
+        .filter_map(|(k, n)| {
+            n.as_str()
+                .map(|n| (k.clone(), crate::text::one_line(n, MAX_NEXT)))
+        })
+        .filter(|(_, n)| !n.is_empty())
+        .collect();
+    let draft = v["draft"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| next.contains_key(k.as_str()))
+        .filter_map(|(k, d)| d.as_str().map(|d| (k.clone(), d.trim().to_lowercase())))
+        .filter(|(_, d)| DRAFTS.contains(&d.as_str()))
+        .collect();
     Ok(Parsed {
         text,
         why,
         minutes,
         goal,
+        next,
+        draft,
     })
 }
 
@@ -252,6 +304,7 @@ mod tests {
             why,
             minutes,
             goal,
+            ..
         } = parse(answer, &known, &[1, 2]).unwrap();
         assert!(text.starts_with("Two things"));
         assert_eq!(why.len(), 1, "an unknown key is dropped");
@@ -272,6 +325,50 @@ mod tests {
         assert!(parse("{\"text\": \"\"}", &known, &[]).is_err());
         let old = parse("{\"text\": \"Hi.\"}", &known, &[1]).unwrap();
         assert!(old.goal.is_empty(), "an answer with no goals is fine");
+        assert!(old.next.is_empty() && old.draft.is_empty());
+    }
+
+    #[test]
+    fn the_answer_gives_next_steps_and_drafts_only_for_known_items() {
+        let known = vec![
+            "task:t1".to_string(),
+            "gmail:a".to_string(),
+            "github:a/b#7".to_string(),
+            "task:t2".to_string(),
+        ];
+        let long = "Write ".repeat(40);
+        let answer = serde_json::json!({
+            "text": "Hi.",
+            "why": {"gmail:a": "Ana waits.", "task:t1": "Due.", "github:a/b#7": "Late."},
+            "next": {
+                "gmail:a": "  Reply to Ana\nwith the price. ",
+                "task:t1": long,
+                "github:a/b#7": " ",
+                "task:t2": "No reason, so no next action",
+                "task:nope": "made up"
+            },
+            "draft": {
+                "gmail:a": "Email",
+                "task:t1": "code",
+                "github:a/b#7": "doc",
+                "task:nope": "email"
+            }
+        })
+        .to_string();
+        let p = parse(&answer, &known, &[]).unwrap();
+        assert_eq!(p.next["gmail:a"], "Reply to Ana with the price.");
+        assert_eq!(p.next["task:t1"].chars().count(), MAX_NEXT);
+        assert!(p.next["task:t1"].ends_with('…'));
+        assert_eq!(
+            p.next.len(),
+            2,
+            "an empty step, an item with no reason, and an unknown key are dropped"
+        );
+        assert_eq!(
+            p.draft,
+            BTreeMap::from([("gmail:a".to_string(), "email".to_string())]),
+            "a draft needs a known kind and a next step"
+        );
     }
 
     #[test]
@@ -288,6 +385,8 @@ mod tests {
             text: "Hi.".into(),
             why: BTreeMap::from([(a.clone(), "Due".into()), (b.clone(), "Late".into())]),
             goal: BTreeMap::from([(a.clone(), 1)]),
+            next: BTreeMap::from([(a.clone(), "Do A".into()), (b.clone(), "Do B".into())]),
+            draft: BTreeMap::from([(a.clone(), "email".into())]),
         };
         save(&d, &brief("2026-11-06"), &BTreeMap::new()).unwrap();
         save(&d, &brief("2026-11-07"), &BTreeMap::new()).unwrap();
@@ -295,6 +394,8 @@ mod tests {
         let today = get(&d, "2026-11-06").unwrap().unwrap();
         assert_eq!(today.why.keys().collect::<Vec<_>>(), [&b]);
         assert!(today.goal.is_empty());
+        assert_eq!(today.next.keys().collect::<Vec<_>>(), [&b]);
+        assert!(today.draft.is_empty());
         assert_eq!(
             get(&d, "2026-11-07").unwrap().unwrap(),
             brief("2026-11-07"),
@@ -339,6 +440,8 @@ mod tests {
             text: "Hi.".into(),
             why: BTreeMap::new(),
             goal: BTreeMap::from([("task:t2".to_string(), 3)]),
+            next: BTreeMap::from([("task:t2".to_string(), "Call Bo.".to_string())]),
+            draft: BTreeMap::new(),
         };
         let m = BTreeMap::from([("task:t1".to_string(), 10), ("task:t2".to_string(), 25)]);
         save(&d, &b, &m).unwrap();

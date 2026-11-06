@@ -241,6 +241,18 @@ AIfred suggests links in the "Same work?" card on the home page. A suggestion ne
 
 The brief and the chat get the linked items as one piece of work (`same_work` in the overview).
 
+## Suggested work
+
+- For each item that the brief names, the brief also gives the next action, for example "Next: Reply to Ana with the price." It shows under the reason in the home list and in the item panel. It costs no extra AI call: the brief call writes it.
+- A label says who does the next action:
+  - "You do this": only you can do it, for example a decision, a call, code, or a review.
+  - "AIfred can draft the email later" (or the Doc text, or the Sheet change): AIfred cannot change other apps yet. When it can, it makes a draft for you to check. It sends nothing by itself.
+- "✦ Suggest steps" in the item panel splits an item into 2 to 8 steps. It is one AI call (Sonnet) on your Claude login. It saves nothing until you pick:
+  - Clear the box of a step that you do not want, then click "Add N steps".
+  - For your own task, the steps go at the end of its checklist. A step that the checklist has already is not added again.
+  - For a GitHub, ClickUp, or email item, the steps go on your linked task of the same work. When there is none, AIfred makes a new task with the item's title and links it under the item.
+  - The message after the add has an Undo. It takes out the added steps that are not done, or deletes the new task.
+
 ## Google (calendar and Gmail)
 
 - AIfred connects to Google itself. Each user makes their own Google registration once:

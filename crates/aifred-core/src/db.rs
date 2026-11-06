@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 16;
+const VERSION: i64 = 17;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -592,6 +592,13 @@ CREATE TABLE link_no (
 );
 ";
 
+/// The next step of each item in the brief, and the steps that AIfred can
+/// draft later (brief.rs).
+const SCHEMA_17: &str = "
+ALTER TABLE brief ADD COLUMN next  TEXT NOT NULL DEFAULT '{}'; -- {\"<item key>\": \"Reply to Ana\"}
+ALTER TABLE brief ADD COLUMN draft TEXT NOT NULL DEFAULT '{}'; -- {\"<item key>\": \"email\" | \"doc\" | \"sheet\"}
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -710,6 +717,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 16 {
         tx.execute_batch(SCHEMA_16)?;
+    }
+    if version < 17 {
+        tx.execute_batch(SCHEMA_17)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

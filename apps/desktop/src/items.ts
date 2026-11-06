@@ -33,6 +33,10 @@ export type Item = {
   why?: string;
   /** The goal that it serves, from the brief. */
   goal?: string;
+  /** The next action, from the brief. */
+  next?: string;
+  /** What AIfred can draft for the next action later. None: you do it. */
+  draft?: api.DraftKind;
   /** The summary of a long description, by AIfred. */
   summary?: string;
   task?: api.Task;
@@ -126,6 +130,8 @@ export function buildItems(
   why: Record<string, string>,
   goal: Record<string, string> = {},
   mail: api.Mail[] = [],
+  next: Record<string, string> = {},
+  draft: Record<string, api.DraftKind> = {},
 ): Item[] {
   const m = new Map(meta.map((x) => [x.key, x]));
   const extra = (key: string) => {
@@ -135,6 +141,8 @@ export function buildItems(
       minutesBy: e?.by ?? null,
       why: why[key],
       goal: goal[key],
+      next: next[key],
+      draft: draft[key],
       summary: m.get(key)?.summary,
       isNew: m.get(key)?.new ?? false,
     };
@@ -260,14 +268,18 @@ export function joinLinked(items: Item[], links: api.ItemLink[]): Item[] {
     const starts = open.map((i) => i.start);
     const pri = open.map((i) => i.priority).filter((p): p is api.Priority => !!p).sort((a, b) => RANK[a] - RANK[b]);
     const withWhy = open.find((i) => i.why);
+    // The reason and the next action come from the same item.
+    const ranked = head.why ? head : (withWhy ?? head);
     rows.set(head.key, {
       ...head,
       due: dues[0] ?? null,
       // An open item with no start day is work for now.
       start: starts.some((d) => !d) ? null : (starts as string[]).sort()[0],
       priority: pri[0] ?? null,
-      why: head.why ?? withWhy?.why,
+      why: ranked.why,
       goal: head.goal ?? withWhy?.goal,
+      next: ranked.next,
+      draft: ranked.draft,
       isNew: open.some((i) => i.isNew),
       linked: rest,
     });

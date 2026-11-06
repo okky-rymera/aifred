@@ -8,6 +8,7 @@ import { GoalTag, GoalsCard } from "./Goals";
 import { DayCheckCard, WeekReviewCard } from "./Review";
 import { LinksCard, srcText } from "./Links";
 import { WaitingCard } from "./Waiting";
+import { NextStep } from "./Steps";
 import { SRC_NAME, addDays, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, type Item } from "./items";
 
 export function Check(props: { item: Item }) {
@@ -144,7 +145,9 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
   const heldByLinked = (i.linked ?? []).some((l) => l.due !== null && l.due < addDays(today, 1));
   const working = !!work && keys.includes(work.key) && !i.done;
   useTick(working);
-  const sub = i.task?.checklist.length ? `${i.task.checklist.filter((c) => c.done).length}/${i.task.checklist.length} steps` : null;
+  // The steps of your task, also when the task is linked under this row.
+  const stepTask = i.task ?? (i.linked ?? []).find((l) => l.task)?.task;
+  const sub = stepTask?.checklist.length ? `${stepTask.checklist.filter((c) => c.done).length}/${stepTask.checklist.length} steps` : null;
   return (
     <li className={`row${i.done ? " done" : ""}${sel === i.key ? " sel" : ""}`} id={`row-${i.key}`}>
       <Check item={i} />
@@ -175,7 +178,12 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
             ))}
           </div>
         )}
-        {props.why && i.why && !i.done && <Why item={i} />}
+        {props.why && i.why && !i.done && (
+          <>
+            <Why item={i} />
+            <NextStep item={i} />
+          </>
+        )}
       </div>
       <span className={`r-side${acts ? " has-acts" : ""}`}>
         <span className="r-info">

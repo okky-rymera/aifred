@@ -432,6 +432,117 @@ describe("goals", () => {
   });
 });
 
+describe("suggested work", () => {
+  it("shows the next step from the brief, and who does it", async () => {
+    await startApp({
+      github: [githubItem(9, "review_requested", "Bulk edit"), githubItem(10, "review_requested", "Price list")],
+      newKeys: ["github:acme/shop#9", "github:acme/shop#10"],
+      briefs: {
+        [today()]: {
+          day: today(),
+          written: 1,
+          text: "Two things.",
+          why: { "github:acme/shop#9": "It blocks the release.", "github:acme/shop#10": "Ana asks for it." },
+          next: { "github:acme/shop#9": "Review the bulk edit and approve it.", "github:acme/shop#10": "Reply to Ana with the price." },
+          draft: { "github:acme/shop#10": "email" },
+        },
+      },
+    });
+    const list = await screen.findByRole("list", { name: "New" });
+    const bulk = within(list).getByText("Bulk edit").closest("li")!;
+    expect(within(bulk).getByText("Review the bulk edit and approve it.")).toBeInTheDocument();
+    expect(within(bulk).getByText("You do this")).toBeInTheDocument();
+    const price = within(list).getByText("Price list").closest("li")!;
+    expect(within(price).getByText("AIfred can draft the email later")).toBeInTheDocument();
+    await openItem("Price list");
+    expect(within(details()).getByText("Reply to Ana with the price.")).toBeInTheDocument();
+  });
+
+  it("adds the picked steps to the checklist of a task, with an undo", async () => {
+    const fake = await startApp({
+      tasks: [task("Plan the trip", { id: "t1", checklist: [{ text: "Pick dates", done: true }] })],
+      onSuggestSteps: () => [{ text: "Email Ana about the hotel", draft: "email" }, { text: "Book the train" }, { text: "Pack" }],
+    });
+    await openItem("Plan the trip");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest steps" }));
+    const box = await within(details()).findByRole("group", { name: "Suggested steps" });
+    expect(within(box).getByText("AIfred can draft the email later")).toBeInTheDocument();
+    expect(within(box).getByText(/the checklist of this task/)).toBeInTheDocument();
+    await userEvent.click(within(box).getByRole("checkbox", { name: "Keep step: Pack" }));
+    await userEvent.click(within(box).getByRole("button", { name: "Add 2 steps" }));
+    expect(await screen.findByText('Added 2 steps to "Plan the trip"')).toBeInTheDocument();
+    expect(fake.tasks[0].checklist.map((c) => c.text)).toEqual(["Pick dates", "Email Ana about the hotel", "Book the train"]);
+    expect(within(details()).queryByRole("group", { name: "Suggested steps" })).not.toBeInTheDocument();
+    // A step that you tick before the Undo stays.
+    fake.tasks[0].checklist[2].done = true;
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() =>
+      expect(fake.tasks[0].checklist).toEqual([
+        { text: "Pick dates", done: true },
+        { text: "Book the train", done: true },
+      ]),
+    );
+  });
+
+  it("puts steps for a ClickUp item on a new task under it", async () => {
+    const fake = await startApp({
+      clickupToken: "pk_test",
+      clickup: [clickupItem("86a", "Checkout totals")],
+      onSuggestSteps: () => [{ text: "Read the tax log" }, { text: "Fix the rounding" }],
+    });
+    await openItem("Checkout totals");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest steps" }));
+    const box = await within(details()).findByRole("group", { name: "Suggested steps" });
+    expect(within(box).getByText(/a new task of yours, under this item/)).toBeInTheDocument();
+    // A second click while the save runs does not save again.
+    const slow = deferred<void>();
+    fake.onAddSteps = () => slow.promise;
+    const add = within(box).getByRole("button", { name: "Add 2 steps" });
+    await userEvent.click(add);
+    expect(add).toBeDisabled();
+    await userEvent.click(add);
+    slow.resolve();
+    expect(await screen.findByText('Made the task "Checkout totals" with 2 steps, under this item')).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "add_steps")).toHaveLength(1);
+    expect(fake.tasks).toHaveLength(1);
+    expect(fake.links).toEqual([{ key: `task:${fake.tasks[0].id}`, main: "clickup:86a" }]);
+    const open = screen.getByRole("list", { name: "Open" });
+    await waitFor(() => expect(within(open).getByText("0/2 steps")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.tasks).toEqual([]));
+    await waitFor(() => expect(fake.links).toEqual([]));
+  });
+
+  it("names the open task of the same work as the place of the steps", async () => {
+    const fake = await startApp({
+      clickupToken: "pk_test",
+      clickup: [clickupItem("86a", "Checkout totals")],
+      tasks: [task("Fix totals", { id: "t1" })],
+      links: [{ key: "task:t1", main: "clickup:86a" }],
+      onSuggestSteps: () => [{ text: "Read the tax log" }],
+    });
+    await openItem("Checkout totals");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest steps" }));
+    const box = await within(details()).findByRole("group", { name: "Suggested steps" });
+    expect(within(box).getByText(/the checklist of your task "Fix totals"/)).toBeInTheDocument();
+    await userEvent.click(within(box).getByRole("button", { name: "Add 1 step" }));
+    expect(await screen.findByText('Added 1 step to "Fix totals"')).toBeInTheDocument();
+    expect(fake.tasks[0].checklist).toEqual([{ text: "Read the tax log", done: false }]);
+  });
+
+  it("shows an error when AIfred cannot suggest steps", async () => {
+    await startApp({
+      tasks: [task("Plan the trip")],
+      onSuggestSteps: () => {
+        throw "AIfred found no steps for this item";
+      },
+    });
+    await openItem("Plan the trip");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest steps" }));
+    expect(await within(details()).findByText("Cannot suggest steps: AIfred found no steps for this item")).toBeInTheDocument();
+  });
+});
+
 describe("corrections of the brief", () => {
   /** Three GitHub items from acme/shop, each with a reason from today's brief. */
   const ranked = () => ({
