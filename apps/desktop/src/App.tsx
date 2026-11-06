@@ -86,6 +86,13 @@ export default function App() {
   const [info, setInfo] = useState<api.Info | null>(null);
   const [loadError, setLoadError] = useState("");
   const [facts, setFacts] = useState<api.Fact[]>([]);
+  // The Google connection, read once here for all item panels. The Google
+  // part of Settings reads it again after each change.
+  const [google, setGoogle] = useState<api.GoogleStatus | null>(null);
+  const loadGoogle = useCallback(() => {
+    api.googleStatus().then(setGoogle).catch(() => {});
+  }, []);
+  useEffect(loadGoogle, [loadGoogle]);
   const [tasks, setTasks] = useState<api.Task[]>([]);
   const [tasksError, setTasksError] = useState("");
   const [tasksLoaded, setTasksLoaded] = useState(false);
@@ -1297,6 +1304,7 @@ export default function App() {
   }, [work, byKey, afterFinish]);
 
   const ctx: AppCtx = {
+    google,
     today,
     items,
     byKey,
@@ -1485,6 +1493,7 @@ export default function App() {
                   clickupToken={clickupToken}
                   onClickupTokenChanged={() => checkClickup(true)}
                   onGoogleChanged={() => {
+                    loadGoogle();
                     loadCalendar(true);
                     loadMail(true);
                   }}

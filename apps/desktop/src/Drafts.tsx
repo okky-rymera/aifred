@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { useApp } from "./ctx";
+import { GOOGLE_APPS } from "./googleApps";
 import type { Item } from "./items";
 
 const when = (secs: number) => new Date(secs * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -14,7 +15,7 @@ const running = new Map<number, Promise<api.Action>>();
 
 /** Calls Undo of an action. A second click while it runs (in the list or
  * in the toast) gets the same result: it does not start a second Undo. */
-function undo(id: number): Promise<api.Action> {
+export function undo(id: number): Promise<api.Action> {
   let p = running.get(id);
   if (!p) {
     p = api.undoAction(id).finally(() => running.delete(id));
@@ -29,17 +30,53 @@ function stateText(a: api.Action) {
   return a.note ? `Undo: ${a.note}` : `Undone ${when(a.undone_at)}`;
 }
 
-/** What an Undo did. The note says when AIfred deleted nothing (the draft was sent or gone). */
-export const undoneText = (a: api.Action) => a.note || "Deleted the draft in Gmail.";
+/** What an Undo did. The note says when AIfred deleted nothing (the draft was sent or gone, the suggestions were accepted or rejected). */
+export const undoneText = (a: api.Action) => a.note || GOOGLE_APPS[a.app].undone;
+
+/** Runs a save of an action. Then it shows `text` with an Undo button,
+ * and loads the action list again. It throws the error of the save. */
+export async function saveWithUndo(save: () => Promise<api.Action>, text: string, toast: ReturnType<typeof useApp>["toast"], load: () => void) {
+  try {
+    const a = await save();
+    toast(text, () => {
+      undo(a.id)
+        .then((u) => toast(undoneText(u)))
+        .catch((e) => toast(`Cannot undo: ${e}`, undefined, true))
+        .finally(load);
+    });
+  } finally {
+    load();
+  }
+}
+
+/** AIfred's actions on the item `key`, loaded once for all parts of the
+ * item panel. `reload` loads them again, for example after a save. */
+export function useItemActions(key: string) {
+  const [list, setList] = useState<api.Action[]>([]);
+  const shown = useRef(key);
+  shown.current = key;
+  const reload = useCallback(() => {
+    // A list that comes after you opened another item is dropped.
+    api
+      .actions(key)
+      .then((l) => shown.current === key && setList(l))
+      .catch(() => shown.current === key && setList([]));
+  }, [key]);
+  useEffect(() => {
+    setList([]);
+    reload();
+  }, [reload]);
+  return { list, reload };
+}
 
 /** The look of the list: in the item panel, or on the Settings page. */
 const LOOK = {
-  item: { list: "actions", row: "", title: "st", hint: "hintx", link: "linkbtn", button: "linkbtn", open: "Open in Gmail ↗" },
-  settings: { list: "space-y-1 text-sm", row: "flex flex-wrap items-baseline gap-x-2", title: "", hint: "text-stone-500", link: "underline", button: "underline", open: "Open in Gmail" },
+  item: { list: "actions", row: "", title: "st", hint: "hintx", link: "linkbtn", button: "linkbtn", arrow: " ↗" },
+  settings: { list: "space-y-1 text-sm", row: "flex flex-wrap items-baseline gap-x-2", title: "", hint: "text-stone-500", link: "underline", button: "underline", arrow: "" },
 };
 
 /** AIfred's actions, with Undo. `report` shows what an Undo did. */
-function ActionList(props: { list: api.Action[]; place: keyof typeof LOOK; label?: string; onChange: () => void; report: (text: string, error: boolean) => void }) {
+export function ActionList(props: { list: api.Action[]; place: keyof typeof LOOK; label?: string; onChange: () => void; report: (text: string, error: boolean) => void }) {
   const c = LOOK[props.place];
   // The actions whose Undo runs now: their button is off until it ends.
   const [busy, setBusy] = useState<number[]>([]);
@@ -61,11 +98,12 @@ function ActionList(props: { list: api.Action[]; place: keyof typeof LOOK; label
           <span className={c.hint}>{when(a.at)}</span>
           {a.url && (
             <a className={c.link} href={a.url}>
-              {c.open}
+              Open in {GOOGLE_APPS[a.app].name}
+              {c.arrow}
             </a>
           )}
           {a.undone_at === null ? (
-            <button className={c.button} disabled={busy.includes(a.id)} title="Deletes the draft in Gmail. AIfred does not delete a draft that you changed there." onClick={() => click(a.id)}>
+            <button className={c.button} disabled={busy.includes(a.id)} title={GOOGLE_APPS[a.app].undo} onClick={() => click(a.id)}>
               {busy.includes(a.id) ? "Undoing…" : "Undo"}
             </button>
           ) : (
@@ -83,31 +121,18 @@ type State =
   | { kind: "error"; text: string }
   | { kind: "edit"; draft: api.ReplyDraft; saving?: boolean; error?: string };
 
-/** "Write a reply" on an email item, and AIfred's drafts for it. */
-export function ReplyDraft({ item: i }: { item: Item }) {
+/** "Write a reply" on an email item, and AIfred's drafts for it. `log`:
+ * the Gmail actions of the item. `load` loads them again. */
+export function ReplyDraft({ item: i, log, load }: { item: Item; log: api.Action[]; load: () => void }) {
   const { toast } = useApp();
   const [s, setS] = useState<State>({ kind: "idle" });
   const [note, setNote] = useState(i.next ?? "");
-  const [log, setLog] = useState<api.Action[]>([]);
   const email = i.src === "gm";
-  const shown = useRef(i.key);
-  shown.current = i.key;
-  const load = useCallback(() => {
-    if (!email) return;
-    const key = i.key;
-    // A list that comes after you opened another item is dropped.
-    api
-      .actions(key)
-      .then((l) => shown.current === key && setLog(l))
-      .catch(() => shown.current === key && setLog([]));
-  }, [i.key, email]);
   // Another item in the panel starts with no reply.
   useEffect(() => {
     setS({ kind: "idle" });
     setNote(i.next ?? "");
-    setLog([]);
-    load();
-  }, [i.key, load]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [i.key]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!email) return null;
 
   const write = () => {
@@ -126,18 +151,11 @@ export function ReplyDraft({ item: i }: { item: Item }) {
     // you can open another item and write there in the meantime.
     const mine = (old: State) => old.kind === "edit" && !!old.saving && old.draft.key === draft.key;
     try {
-      const a = await api.saveReplyDraft(draft);
+      await saveWithUndo(() => api.saveReplyDraft(draft), "Saved the reply as a draft in Gmail. It is not sent.", toast, load);
       setS((old) => (mine(old) ? { kind: "idle" } : old));
-      toast("Saved the reply as a draft in Gmail. It is not sent.", () => {
-        undo(a.id)
-          .then((u) => toast(undoneText(u)))
-          .catch((e) => toast(`Cannot undo: ${e}`, undefined, true))
-          .finally(load);
-      });
     } catch (e) {
       setS((old) => (mine(old) ? { ...old, saving: false, error: String(e) } : old));
     }
-    load();
   };
 
   let body: React.ReactNode = null;
@@ -166,7 +184,7 @@ export function ReplyDraft({ item: i }: { item: Item }) {
         </span>
         {/* Read-only while it saves: the save sends the text of the click, so a change typed now would be lost. */}
         <textarea className="d-text reply" aria-label="Reply text" value={d.body} readOnly={s.saving} onChange={(e) => setS({ ...s, draft: { ...d, body: e.target.value } })} />
-        {!d.can_save && <span className="hintx">To save it in Gmail, tick "Use Gmail drafts" in Settings, then connect Google again. You can copy the text now.</span>}
+        {!d.can_save && <span className="hintx">To save it in Gmail, tick "Use {GOOGLE_APPS.gmail.feature}" in Settings, then connect Google again. You can copy the text now.</span>}
         {s.error && <span className="d-err">Cannot save: {s.error}</span>}
         <div className="suggest-acts">
           <button
@@ -219,7 +237,7 @@ export function ActionLogSection() {
     <section className="mt-8 space-y-2" aria-label="AIfred's actions">
       <h2 className="text-sm font-semibold">AIfred's actions</h2>
       <p className="text-sm text-stone-500">
-        Each change that AIfred made in another app, newest first. Now AIfred makes only Gmail drafts, and only when you click "Save as Gmail draft". Undo deletes the draft, when you did not change it in Gmail.
+        Each change that AIfred made in another app, newest first. AIfred makes Gmail drafts and suggestions in Google Docs, and only when you click "Save as Gmail draft" or "Save as suggestions". Undo deletes the draft when you did not change it in Gmail. For a Doc, Undo deletes the suggestions that nobody accepted or rejected yet.
       </p>
       {list && !list.length && <p className="text-sm text-stone-500">No actions yet.</p>}
       {list && list.length > 0 && <ActionList list={list} place="settings" onChange={load} report={(text, error) => setMessage({ text, error })} />}

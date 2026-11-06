@@ -586,6 +586,45 @@ async fn save_reply_draft(
         .map_err(err)
 }
 
+/// The first Google Doc link in the item's description, or in another item
+/// of the same work. None when there is none.
+#[tauri::command]
+async fn doc_link(app: State<'_, App>, key: String) -> CmdResult<Option<String>> {
+    app.assistant.doc_link(&key).await.map_err(err)
+}
+
+/// Suggests changes to a Google Doc for an item (docs.rs). It reads the Doc,
+/// and makes one AI call with no tools. It saves nothing: the window shows
+/// the changes first.
+#[tauri::command]
+async fn suggest_doc_changes(
+    app: State<'_, App>,
+    key: String,
+    link: String,
+    note: String,
+) -> CmdResult<aifred_core::docs::Proposal> {
+    app.assistant
+        .suggest_doc_changes(&key, &link, &note)
+        .await
+        .map_err(err)
+}
+
+/// Saves the changes that the user checked as suggestions in the Doc, and
+/// logs them. Only a click of the user calls it: no AI can.
+#[tauri::command]
+async fn save_doc_suggestions(
+    app: State<'_, App>,
+    key: String,
+    doc: String,
+    tab: String,
+    revision: String,
+    edits: Vec<aifred_core::docs::Edit>,
+) -> CmdResult<aifred_core::actions::Action> {
+    aifred_core::docs::save(&app.assistant.dir, &key, &doc, &tab, &revision, &edits, now())
+        .await
+        .map_err(err)
+}
+
 /// AIfred's actions in other apps, newest first. With `item`: only its actions.
 #[tauri::command]
 async fn actions(
@@ -598,10 +637,11 @@ async fn actions(
     .await
 }
 
-/// Undoes an action: deletes the Gmail draft when nobody changed it.
+/// Undoes an action: deletes the Gmail draft when nobody changed it, or
+/// the Doc suggestions that nobody accepted or rejected.
 #[tauri::command]
 async fn undo_action(app: State<'_, App>, id: i64) -> CmdResult<aifred_core::actions::Action> {
-    aifred_core::drafts::undo(&app.assistant.dir, id, now())
+    aifred_core::actions::undo(&app.assistant.dir, id, now())
         .await
         .map_err(err)
 }
@@ -1560,6 +1600,9 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         add_steps,
         write_reply,
         save_reply_draft,
+        doc_link,
+        suggest_doc_changes,
+        save_doc_suggestions,
         actions,
         undo_action,
         update_status,

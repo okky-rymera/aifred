@@ -10,7 +10,8 @@ import { Minutes } from "./Plan";
 import { PriPill } from "./Home";
 import { SameWork } from "./Links";
 import { NextStep, SuggestSteps } from "./Steps";
-import { ReplyDraft } from "./Drafts";
+import { DocSuggest } from "./Docs";
+import { ReplyDraft, useItemActions } from "./Drafts";
 
 /** Text that saves when you leave the box, or press Enter. */
 function useField(value: string, save: (v: string) => void) {
@@ -189,6 +190,7 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
   const { close, toggleDone, sched, addToPlan, removeFromPlan, plan, itemChat, askItem, models, setModel, open, byKey, deleteTask, today, editTask } = useApp();
   const i = props.item;
   const chat = itemChat(i.key);
+  const actions = useItemActions(i.key);
   const body = useRef<HTMLDivElement>(null);
   const at = sched.at[i.key];
   const why = plan?.items.find((p) => p.key === i.key)?.why ?? i.why;
@@ -313,7 +315,8 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
         {i.task && <Steps item={i} />}
         {!i.task && !i.done && <div className="d-sec">Steps</div>}
         <SuggestSteps item={i} />
-        <ReplyDraft item={i} />
+        <ReplyDraft item={i} log={actions.list.filter((a) => a.app === "gmail")} load={actions.reload} />
+        <DocSuggest item={i} log={actions.list.filter((a) => a.app === "docs")} load={actions.reload} />
         {i.task && i.task.files.length > 0 && (
           <>
             <div className="d-sec">

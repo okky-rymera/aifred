@@ -104,6 +104,8 @@ export type AppCtx = {
   startOver: () => void;
   writeBrief: () => void;
   toast: (text: string, undo?: () => void, error?: boolean) => void;
+  /** The Google connection. null: not read yet. */
+  google: api.GoogleStatus | null;
   /** How each review card shows (Review.tsx). "auto": at its time. "open": you
    * opened it with its button. "hidden": you closed it. It stays when you go to
    * another page, and goes back to "auto" on a new day. */

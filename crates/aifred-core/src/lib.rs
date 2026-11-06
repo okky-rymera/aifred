@@ -8,6 +8,7 @@ pub mod calendar;
 pub mod clickup;
 pub mod clickup_list;
 pub mod db;
+pub mod docs;
 pub mod drafts;
 pub mod embed;
 pub mod files;

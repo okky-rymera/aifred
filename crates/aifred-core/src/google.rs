@@ -35,6 +35,11 @@ pub const GMAIL: &str = "https://www.googleapis.com/auth/gmail.readonly";
 /// for drafts: this access can also send email. AIfred never sends: no
 /// code of AIfred calls Gmail's send.
 pub const GMAIL_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
+/// Read and change the user's Google Docs (docs.rs). The smaller access
+/// (drive.file) works only for Docs that the user picks in Google's file
+/// picker. AIfred only adds suggestions: no code of AIfred makes a direct
+/// edit.
+pub const DOCS: &str = "https://www.googleapis.com/auth/documents";
 /// The account's email, so the window can show which account is connected.
 const IDENTITY: &[&str] = &["openid", "email"];
 
@@ -85,7 +90,19 @@ pub const FEATURES: &[Feature] = &[
         // The drafts are in Gmail, and the log of AIfred's actions stays.
         forget: |_| Ok(()),
     },
+    Feature {
+        name: DOC_SUGGESTIONS,
+        scopes: &[DOCS],
+        optional: true,
+        starts_off: true,
+        needs: None,
+        // The suggestions are in the Docs, and the action log stays.
+        forget: |_| Ok(()),
+    },
 ];
+
+/// The name of the Google Docs suggestions feature.
+pub const DOC_SUGGESTIONS: &str = "Docs suggestions";
 
 /// The name of the Gmail drafts feature.
 pub const DRAFTS: &str = "Gmail drafts";
@@ -324,7 +341,12 @@ pub(crate) fn fake_login(dir: &Path, email: &str) {
             client_id: "123-abc.apps.googleusercontent.com".into(),
             client_secret: "sec".into(),
             refresh_token: Some(format!("refresh-{email}")),
-            scopes: vec![CALENDAR.into(), GMAIL.into(), GMAIL_COMPOSE.into()],
+            scopes: vec![
+                CALENDAR.into(),
+                GMAIL.into(),
+                GMAIL_COMPOSE.into(),
+                DOCS.into(),
+            ],
             email: Some(email.into()),
             ..Saved::default()
         },
@@ -854,6 +876,184 @@ pub async fn reject_access_token(dir: &Path, token: &str) -> anyhow::Result<()> 
     .await
 }
 
+/// Google did not accept the login (HTTP 401): it did not do the call.
+#[derive(Debug)]
+pub struct LoginRefused {
+    /// The name of the Google app, for example "Gmail".
+    pub app: &'static str,
+}
+
+impl std::fmt::Display for LoginRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} did not accept AIfred's login (HTTP 401). Try again, or connect Google again in Settings",
+            self.app
+        )
+    }
+}
+
+impl std::error::Error for LoginRefused {}
+
+/// The error of a call that a Google app (`app`, for example "Gmail") did
+/// not do: Google's message, or the HTTP status when it gave none.
+pub(crate) fn refused(
+    app: &str,
+    status: reqwest::StatusCode,
+    v: &serde_json::Value,
+) -> anyhow::Error {
+    match v["error"]["message"].as_str() {
+        Some(m) => anyhow::anyhow!("{app} said: {m}"),
+        None => anyhow::anyhow!("{app} said {status}"),
+    }
+}
+
+/// How many times send() sends a call when Google is busy.
+const TRIES: u32 = 4;
+
+/// Sends one call to a Google app (`app` names it in the errors), and
+/// gives the status and the body of the answer. When AIfred cannot reach
+/// Google, or Google is busy (a rate limit, or a server error), it waits
+/// and tries again, at most TRIES times. A call that can make a thing
+/// (POST) is sent again only when Google surely did not do it: no
+/// connection, or a rate limit (HTTP 429, or HTTP 403 with the reason
+/// rateLimitExceeded or userRateLimitExceeded).
+pub(crate) async fn send(
+    app: &str,
+    client: &reqwest::Client,
+    token: &str,
+    method: reqwest::Method,
+    url: &str,
+    query: &[(&str, &str)],
+    json: Option<&serde_json::Value>,
+) -> anyhow::Result<(reqwest::StatusCode, Vec<u8>)> {
+    let safe_again = matches!(method, reqwest::Method::GET | reqwest::Method::DELETE);
+    let mut wait = std::time::Duration::from_secs(1);
+    let mut tries = 1;
+    loop {
+        let mut req = client
+            .request(method.clone(), url)
+            .bearer_auth(token)
+            .query(query)
+            .timeout(std::time::Duration::from_secs(30));
+        if let Some(j) = json {
+            req = req.json(j);
+        }
+        let r = match req.send().await {
+            Err(e) if e.is_connect() && tries < TRIES => {
+                tokio::time::sleep(wait).await;
+                wait *= 2;
+                tries += 1;
+                continue;
+            }
+            r => r.with_context(|| format!("cannot reach {app}"))?,
+        };
+        let status = r.status();
+        let retry_after = r
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let body = r
+            .bytes()
+            .await
+            .with_context(|| format!("cannot read {app}'s answer"))?
+            .to_vec();
+        if !status.is_success() && tries < TRIES {
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if send_again(safe_again, status, &v) {
+                let w = retry_after
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(wait)
+                    .min(std::time::Duration::from_secs(30));
+                tokio::time::sleep(w).await;
+                wait *= 2;
+                tries += 1;
+                continue;
+            }
+        }
+        return Ok((status, body));
+    }
+}
+
+/// True when send() sends a call again. `safe_again`: the call makes
+/// nothing (GET or DELETE). A server error can come after Gmail did the
+/// call, so a POST is sent again only after a rate limit.
+fn send_again(safe_again: bool, status: reqwest::StatusCode, body: &serde_json::Value) -> bool {
+    busy(status, body) && (safe_again || !status.is_server_error())
+}
+
+/// True when Google refused a call only for now: a rate limit (HTTP 429,
+/// or 403 with a rate limit reason), or a server error.
+fn busy(status: reqwest::StatusCode, body: &serde_json::Value) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+        || (status == reqwest::StatusCode::FORBIDDEN
+            && body["error"]["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|e| {
+                    matches!(
+                        e["reason"].as_str(),
+                        Some("rateLimitExceeded" | "userRateLimitExceeded")
+                    )
+                }))
+}
+
+/// The calls of one action to one Google app (Gmail drafts, Docs
+/// suggestions), with one access token.
+pub struct Client {
+    /// The name of the app in the errors, for example "Google Docs".
+    pub app: &'static str,
+    base: String,
+    client: reqwest::Client,
+    token: String,
+}
+
+impl Client {
+    pub fn new(app: &'static str, base: &str, token: String) -> Self {
+        Client {
+            app,
+            base: base.to_string(),
+            client: reqwest::Client::new(),
+            token,
+        }
+    }
+
+    /// The status and the JSON of one call to `base/path` (send()
+    /// tries again when Google is busy). Fails when Google does not accept
+    /// the login (HTTP 401): the token is forgotten for the next try.
+    pub async fn call(
+        &self,
+        dir: &Path,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+        let url = format!("{}/{path}", self.base);
+        let (status, bytes) = send(
+            self.app,
+            &self.client,
+            &self.token,
+            method,
+            &url,
+            query,
+            body.as_ref(),
+        )
+        .await?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            reject_access_token(dir, &self.token).await?;
+            return Err(LoginRefused { app: self.app }.into());
+        }
+        Ok((
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        ))
+    }
+}
+
 /// Deletes a login that Google does not accept any more, so the window
 /// shows "Connect Google" again. The registration stays. Another AIfred
 /// program can have saved a new login meanwhile: that one stays.
@@ -915,6 +1115,26 @@ pub async fn disconnect(dir: &Path, ends: &Endpoints) -> anyhow::Result<GoogleSt
 mod tests {
     use super::*;
 
+    #[test]
+    fn google_is_busy_only_for_rate_limits_and_server_errors() {
+        use reqwest::StatusCode as S;
+        use serde_json::{Value, json};
+        let limit = json!({ "error": { "errors": [{ "reason": "userRateLimitExceeded" }] } });
+        let denied = json!({ "error": { "errors": [{ "reason": "insufficientPermissions" }] } });
+        assert!(busy(S::TOO_MANY_REQUESTS, &Value::Null));
+        assert!(busy(S::SERVICE_UNAVAILABLE, &Value::Null));
+        assert!(busy(S::FORBIDDEN, &limit));
+        assert!(!busy(S::FORBIDDEN, &denied));
+        assert!(!busy(S::BAD_REQUEST, &Value::Null));
+
+        // A POST goes again after a rate limit, not after a server error.
+        assert!(send_again(false, S::FORBIDDEN, &limit));
+        assert!(send_again(false, S::TOO_MANY_REQUESTS, &Value::Null));
+        assert!(!send_again(false, S::SERVICE_UNAVAILABLE, &Value::Null));
+        assert!(send_again(true, S::SERVICE_UNAVAILABLE, &Value::Null));
+        assert!(!send_again(true, S::FORBIDDEN, &denied));
+    }
+
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("aifred-google-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -967,6 +1187,19 @@ mod tests {
         assert!(set_feature(&d, "Calendar", false).is_err(), "not optional");
         assert!(set_feature(&d, "Docs", false).is_err());
 
+        // Docs suggestions is off until the user turns it on. It does not
+        // need Gmail. It is on here, so the lists below show only Gmail.
+        assert!(!allows(&d, DOCS).unwrap());
+        assert!(
+            status(&d)
+                .unwrap()
+                .off
+                .contains(&DOC_SUGGESTIONS.to_string())
+        );
+        assert!(!all_scopes(&status(&d).unwrap().off).contains(&DOCS));
+        let st = set_feature(&d, DOC_SUGGESTIONS, true).unwrap();
+        assert!(all_scopes(&st.off).contains(&DOCS));
+
         // Gmail drafts is off until the user turns it on, also when the
         // login allows it.
         assert!(!allows(&d, GMAIL_COMPOSE).unwrap());
@@ -980,7 +1213,7 @@ mod tests {
 
         let st = set_feature(&d, "Gmail", false).unwrap();
         assert_eq!(st.off, ["Gmail", DRAFTS]);
-        assert_eq!(st.optional, ["Gmail", DRAFTS]);
+        assert_eq!(st.optional, ["Gmail", DRAFTS, DOC_SUGGESTIONS]);
         assert!(
             !allows(&d, GMAIL).unwrap(),
             "off, also when the login allows it"
@@ -1034,7 +1267,8 @@ mod tests {
             [
                 ("Calendar".to_string(), false),
                 ("Gmail".to_string(), false),
-                (DRAFTS.to_string(), false)
+                (DRAFTS.to_string(), false),
+                (DOC_SUGGESTIONS.to_string(), false),
             ]
         );
         #[cfg(unix)]
@@ -1183,7 +1417,8 @@ mod tests {
             [
                 ("Calendar".to_string(), true),
                 ("Gmail".to_string(), false),
-                (DRAFTS.to_string(), false)
+                (DRAFTS.to_string(), false),
+                (DOC_SUGGESTIONS.to_string(), false),
             ]
         );
         assert!(allows(&d, CALENDAR).unwrap() && !allows(&d, GMAIL).unwrap());

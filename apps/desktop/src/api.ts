@@ -372,12 +372,23 @@ export type ReplyDraft = { key: string; to: string; to_name: string; subject: st
 /** AIfred writes a reply to an email item. One AI call with no tools. It saves nothing. */
 export const writeReply = (key: string, note: string) => invoke<ReplyDraft>("write_reply", { key, note });
 /** One action of AIfred in another app (actions.rs). `undone_at`: Undo ran. `note`: why Undo did not remove the change. */
-export type Action = { id: number; at: number; app: "gmail"; kind: "draft"; item: string; title: string; after: string; url: string; undone_at: number | null; note: string };
+export type Action = { id: number; at: number; app: "gmail" | "docs"; kind: "draft" | "suggestion"; item: string; title: string; after: string; url: string; undone_at: number | null; note: string };
 /** Saves the reply that you checked as a draft in its Gmail thread. It never sends. */
 export const saveReplyDraft = (d: ReplyDraft) => invoke<Action>("save_reply_draft", { key: d.key, to: d.to, lastMessage: d.last_message, body: d.body });
+/** One change in a Google Doc: `find` is text in the Doc, `replace` its new text. */
+export type DocEdit = { find: string; replace: string; why: string };
+/** Changes to a Google Doc that AIfred wrote (docs.rs), for you to check. `revision`: the save fails when the Doc changed.
+ * `tab`: the tab of the Doc with the changes (empty: a Doc with no tabs). */
+export type DocProposal = { key: string; doc: string; tab: string; title: string; url: string; revision: string; can_edit: boolean; edits: DocEdit[]; message: string };
+/** The first Google Doc link in the item's description, or in another item of the same work. */
+export const docLink = (key: string) => invoke<string | null>("doc_link", { key });
+/** Reads the Doc and suggests changes in one AI call. It saves nothing. */
+export const suggestDocChanges = (key: string, link: string, note: string) => invoke<DocProposal>("suggest_doc_changes", { key, link, note });
+/** Saves the changes that you checked as suggestions in the Doc. It never edits the Doc directly. */
+export const saveDocSuggestions = (p: DocProposal, edits: DocEdit[]) => invoke<Action>("save_doc_suggestions", { key: p.key, doc: p.doc, tab: p.tab, revision: p.revision, edits });
 /** AIfred's actions, newest first. With `item`: only the actions of that item. */
 export const actions = (item?: string) => invoke<Action[]>("actions", { item: item ?? null });
-/** Deletes the Gmail draft of an action, when nobody changed it in Gmail. */
+/** Undoes an action: deletes its Gmail draft, when nobody changed it in Gmail, or its Doc suggestions that are still open. */
 export const undoAction = (id: number) => invoke<Action>("undo_action", { id });
 
 export const history = () => invoke<Turn[]>("history");

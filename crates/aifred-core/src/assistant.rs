@@ -986,6 +986,59 @@ impl<B: Backend> Assistant<B> {
         let can_save = self.off_thread(crate::drafts::can_save).await?;
         Ok(reply.draft(key, body, can_save))
     }
+
+    /// Suggests changes to the Google Doc `link` for the item `key`
+    /// (docs.rs), in one AI call with no tools. The call gets only the Doc,
+    /// the title of the item, and the user's `note`. It saves nothing: the
+    /// user checks the changes, and saves them as suggestions in the Doc.
+    pub async fn suggest_doc_changes(
+        &self,
+        key: &str,
+        link: &str,
+        note: &str,
+    ) -> anyhow::Result<crate::docs::Proposal> {
+        let doc = crate::docs::read(&self.dir, link).await?;
+        let k = key.to_string();
+        let title = self
+            .off_thread(move |dir| crate::db::read(dir, |c| crate::items::title_place(c, &k)))
+            .await?
+            .map(|(t, _)| t)
+            .unwrap_or_default();
+        let answer = self
+            .backend
+            .complete(
+                crate::docs::RULES,
+                &crate::docs::prompt(&doc, &title, note),
+                Some(crate::docs::MODEL),
+            )
+            .await?;
+        let (edits, message) = crate::docs::parse(&answer)?;
+        Ok(crate::docs::proposal(key, &doc, edits, message))
+    }
+
+    /// The first Google Doc link in the description of the item `key`, or
+    /// of another item of the same work. None when there is none.
+    pub async fn doc_link(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let k = key.to_string();
+        self.off_thread(move |dir| {
+            let mut keys = vec![k.clone()];
+            keys.extend(
+                crate::links::group(dir, &k)?
+                    .into_iter()
+                    .filter(|g| g != &k),
+            );
+            for key in keys {
+                let Ok(d) = crate::items::details(dir, &key) else {
+                    continue;
+                };
+                if let Some(l) = crate::docs::find_link(&d.details) {
+                    return Ok(Some(l));
+                }
+            }
+            Ok(None)
+        })
+        .await
+    }
 }
 
 /// The short line under an answer: the time, the model, the lookups, and the cost.

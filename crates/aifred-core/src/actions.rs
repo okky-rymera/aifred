@@ -1,7 +1,8 @@
 //! The log of AIfred's actions in other apps (plan step 8 in
 //! docs/plan-assistant.md). Each change that AIfred makes outside the
 //! computer gets one row, with what it wrote and the ids that Undo needs.
-//! Now the only action is a Gmail draft (drafts.rs).
+//! The actions are Gmail drafts (drafts.rs) and suggestions in a Google
+//! Doc (docs.rs).
 
 use std::path::Path;
 
@@ -21,9 +22,9 @@ pub struct Action {
     pub id: i64,
     /// Unix seconds.
     pub at: u64,
-    /// "gmail".
+    /// "gmail" or "docs".
     pub app: String,
-    /// "draft".
+    /// "draft" (gmail) or "suggestion" (docs).
     pub kind: String,
     /// The key of the item that the action is for.
     pub item: String,
@@ -143,6 +144,46 @@ pub fn set_undone(dir: &Path, id: i64, note: &str, now: u64) -> anyhow::Result<A
         Ok(get_in(tx, id)?.expect("the action"))
     })
 }
+
+/// The checks of an Undo before it calls the app: the action is not undone
+/// yet, and it is of the app `app` and the kind `kind`.
+pub fn check_undo(a: &Action, app: &str, kind: &str) -> anyhow::Result<()> {
+    if a.undone_at.is_some() {
+        bail!("this action is undone already");
+    }
+    if (a.app.as_str(), a.kind.as_str()) != (app, kind) {
+        bail!("AIfred cannot undo this action");
+    }
+    Ok(())
+}
+
+/// The account of the action, when Google is now connected as another
+/// account. In another account, the app does not find the change, and
+/// Undo would wrongly say that it is gone. `now`: the connected account.
+/// Each app finds `now` in its own way: Gmail from the saved addresses,
+/// Google Docs from the Google login.
+pub fn other_account<'a>(a: &'a Action, now: &str) -> Option<&'a str> {
+    a.target["account"]
+        .as_str()
+        .filter(|s| !s.is_empty() && *s != now)
+}
+
+/// Undoes an action in its app: deletes the Gmail draft, or the Doc
+/// suggestions.
+pub async fn undo(dir: &Path, id: i64, now: u64) -> anyhow::Result<Action> {
+    // One Undo at a time. Two clicks at the same time must not both delete.
+    let _one = UNDO.lock().await;
+    let a = crate::files::off_thread(dir, move |d| get(d, id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("there is no such action"))?;
+    match a.app.as_str() {
+        "gmail" => crate::drafts::undo(dir, a, now).await,
+        "docs" => crate::docs::undo(dir, a, now).await,
+        app => bail!("AIfred cannot undo an action in \"{app}\" yet"),
+    }
+}
+
+static UNDO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 mod tests {

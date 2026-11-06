@@ -44,10 +44,8 @@ const INBOX_MAX: usize = 100;
 const SENT_MAX: usize = 50;
 /// How many threads AIfred reads from Google at the same time. Gmail allows
 /// each user 250 "quota units" per second, and one thread read costs 10.
-/// Fast answers can go over that limit: then send() waits and tries again.
+/// Fast answers can go over that limit: then google::send() waits and tries again.
 const PARALLEL: usize = 4;
-/// How many times send() sends a request when Gmail is busy.
-const TRIES: u32 = 4;
 /// Change this when classify() sorts threads in another way: then the
 /// saved threads are read again.
 const RULES: u32 = 4;
@@ -643,12 +641,8 @@ async fn call(api: &Api, path: &str, query: &[(&str, &str)]) -> anyhow::Result<O
     ))
 }
 
-/// Sends one Gmail call, and gives the status and the body of the answer.
-/// When AIfred cannot reach Gmail, or Gmail is busy (a rate limit, or a
-/// server error), it waits and tries again, at most TRIES times. A call
-/// that can make a thing (POST) is sent again only when Gmail surely did
-/// not do it: no connection, or a rate limit (HTTP 429, or HTTP 403 with
-/// the reason rateLimitExceeded or userRateLimitExceeded).
+/// Sends one Gmail call (google::send(), which tries again when Gmail is
+/// busy), and gives the status and the body of the answer.
 pub(crate) async fn send(
     client: &reqwest::Client,
     token: &str,
@@ -657,86 +651,12 @@ pub(crate) async fn send(
     query: &[(&str, &str)],
     json: Option<&Value>,
 ) -> anyhow::Result<(reqwest::StatusCode, Vec<u8>)> {
-    let safe_again = matches!(method, reqwest::Method::GET | reqwest::Method::DELETE);
-    let mut wait = std::time::Duration::from_secs(1);
-    let mut tries = 1;
-    loop {
-        let mut req = client
-            .request(method.clone(), url)
-            .bearer_auth(token)
-            .query(query)
-            .timeout(std::time::Duration::from_secs(30));
-        if let Some(j) = json {
-            req = req.json(j);
-        }
-        let r = match req.send().await {
-            Err(e) if e.is_connect() && tries < TRIES => {
-                tokio::time::sleep(wait).await;
-                wait *= 2;
-                tries += 1;
-                continue;
-            }
-            r => r.context("cannot reach Gmail")?,
-        };
-        let status = r.status();
-        let retry_after = r
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok());
-        let body = r
-            .bytes()
-            .await
-            .context("cannot read Gmail's answer")?
-            .to_vec();
-        if !status.is_success() && tries < TRIES {
-            let v: Value = serde_json::from_slice(&body).unwrap_or_default();
-            if send_again(safe_again, status, &v) {
-                let w = retry_after
-                    .map(std::time::Duration::from_secs)
-                    .unwrap_or(wait)
-                    .min(std::time::Duration::from_secs(30));
-                tokio::time::sleep(w).await;
-                wait *= 2;
-                tries += 1;
-                continue;
-            }
-        }
-        return Ok((status, body));
-    }
+    crate::google::send("Gmail", client, token, method, url, query, json).await
 }
 
 /// The error of a call that Gmail did not do.
 pub(crate) fn refused(status: reqwest::StatusCode, v: &Value) -> anyhow::Error {
-    match v["error"]["message"].as_str() {
-        Some(m) => anyhow::anyhow!("Gmail said: {m}"),
-        None => anyhow::anyhow!("Gmail said {status}"),
-    }
-}
-
-/// True when send() sends a call again. `safe_again`: the call makes
-/// nothing (GET or DELETE). A server error can come after Gmail did the
-/// call, so a POST is sent again only after a rate limit.
-fn send_again(safe_again: bool, status: reqwest::StatusCode, body: &Value) -> bool {
-    busy(status, body) && (safe_again || !status.is_server_error())
-}
-
-/// True when Gmail refused a call only for now: a rate limit (HTTP 429,
-/// or 403 with a rate limit reason), or a server error.
-fn busy(status: reqwest::StatusCode, body: &Value) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-        || (status == reqwest::StatusCode::FORBIDDEN
-            && body["error"]["errors"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|e| {
-                    matches!(
-                        e["reason"].as_str(),
-                        Some("rateLimitExceeded" | "userRateLimitExceeded")
-                    )
-                }))
+    crate::google::refused("Gmail", status, v)
 }
 
 /// The ids of the threads of a search, newest first, and true when there are more.
@@ -1846,25 +1766,6 @@ pub(crate) mod tests {
         let long = plain(&"word ".repeat(100));
         assert_eq!(long.chars().count(), SNIPPET_CHARS);
         assert!(long.ends_with("word…"), "{long}");
-    }
-
-    #[test]
-    fn gmail_is_busy_only_for_rate_limits_and_server_errors() {
-        use reqwest::StatusCode as S;
-        let limit = json!({ "error": { "errors": [{ "reason": "userRateLimitExceeded" }] } });
-        let denied = json!({ "error": { "errors": [{ "reason": "insufficientPermissions" }] } });
-        assert!(busy(S::TOO_MANY_REQUESTS, &Value::Null));
-        assert!(busy(S::SERVICE_UNAVAILABLE, &Value::Null));
-        assert!(busy(S::FORBIDDEN, &limit));
-        assert!(!busy(S::FORBIDDEN, &denied));
-        assert!(!busy(S::BAD_REQUEST, &Value::Null));
-
-        // A POST goes again after a rate limit, not after a server error.
-        assert!(send_again(false, S::FORBIDDEN, &limit));
-        assert!(send_again(false, S::TOO_MANY_REQUESTS, &Value::Null));
-        assert!(!send_again(false, S::SERVICE_UNAVAILABLE, &Value::Null));
-        assert!(send_again(true, S::SERVICE_UNAVAILABLE, &Value::Null));
-        assert!(!send_again(true, S::FORBIDDEN, &denied));
     }
 
     #[test]

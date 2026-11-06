@@ -273,59 +273,8 @@ pub fn message(r: &Reply, body: &str) -> String {
     m
 }
 
-/// Google did not accept the login (HTTP 401): it did not do the call.
-#[derive(Debug)]
-struct LoginRefused;
-
-impl std::fmt::Display for LoginRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "Gmail did not accept AIfred's login (HTTP 401). Try again, or connect Google again in Settings",
-        )
-    }
-}
-
-impl std::error::Error for LoginRefused {}
-
 /// The Gmail calls of one draft action.
-struct Gmail {
-    base: String,
-    client: reqwest::Client,
-    token: String,
-}
-
-impl Gmail {
-    /// The status and the JSON of one call (gmail::send tries again when
-    /// Gmail is busy). Fails when Google does not accept the login (HTTP
-    /// 401): the token is forgotten for the next try.
-    async fn call(
-        &self,
-        dir: &Path,
-        method: Method,
-        path: &str,
-        query: &[(&str, &str)],
-        body: Option<Value>,
-    ) -> anyhow::Result<(StatusCode, Value)> {
-        let url = format!("{}/{path}", self.base);
-        let (status, bytes) = crate::gmail::send(
-            &self.client,
-            &self.token,
-            method,
-            &url,
-            query,
-            body.as_ref(),
-        )
-        .await?;
-        if status == StatusCode::UNAUTHORIZED {
-            google::reject_access_token(dir, &self.token).await?;
-            return Err(LoginRefused.into());
-        }
-        Ok((
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        ))
-    }
-}
+type Gmail = google::Client;
 
 /// What a draft action needs of the Google login.
 #[derive(Clone, Copy, PartialEq)]
@@ -375,11 +324,7 @@ async fn connect(dir: &Path, base: &str, need: Need) -> anyhow::Result<Gmail> {
     let token = google::token_for(dir, scope, &ends)
         .await?
         .context("Google is not connected")?;
-    Ok(Gmail {
-        base: base.to_string(),
-        client: reqwest::Client::new(),
-        token,
-    })
+    Ok(Gmail::new("Gmail", base, token))
 }
 
 /// The Gmail thread id of an email item key.
@@ -521,7 +466,7 @@ async fn save_at(
 /// got no answer. False when AIfred could not connect (nothing was sent),
 /// or when Google refused the login.
 fn unclear(e: &anyhow::Error) -> bool {
-    if e.is::<LoginRefused>() {
+    if e.is::<google::LoginRefused>() {
         return false;
     }
     !e.chain().any(|c| {
@@ -600,38 +545,26 @@ async fn find_made(
 /// Undoes an action: deletes the Gmail draft. It does not delete a draft
 /// that the user changed in Gmail. A draft that is gone (sent or deleted)
 /// counts as undone, with a note.
-pub async fn undo(dir: &Path, id: i64, now: u64) -> anyhow::Result<Action> {
-    undo_at(dir, API, id, now).await
+pub async fn undo(dir: &Path, a: Action, now: u64) -> anyhow::Result<Action> {
+    undo_at(dir, API, a, now).await
 }
 
-/// One Undo at a time. Two Undo clicks at the same time could both delete,
-/// and the second one would see a draft that is gone.
-static UNDO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-async fn undo_at(dir: &Path, base: &str, id: i64, now: u64) -> anyhow::Result<Action> {
-    let _one = UNDO.lock().await;
-    let a = off_thread(dir, move |d| actions::get(d, id))
-        .await?
-        .context("there is no such action")?;
-    if a.undone_at.is_some() {
-        bail!("this action is undone already");
-    }
-    if (a.app.as_str(), a.kind.as_str()) != ("gmail", "draft") {
-        bail!("AIfred cannot undo this action");
-    }
+/// actions::undo() runs one Undo at a time: two Undo clicks at the same
+/// time could both delete, and the second one would see a draft that is gone.
+async fn undo_at(dir: &Path, base: &str, a: Action, now: u64) -> anyhow::Result<Action> {
+    let id = a.id;
+    actions::check_undo(&a, "gmail", "draft")?;
     let (Some(draft), Some(message)) = (a.target["draft"].as_str(), a.target["message"].as_str())
     else {
         bail!("the log has no draft id for this action");
     };
-    // In another account, the draft is not found, and Undo would wrongly
-    // say that the user sent it or deleted it.
-    if let Some(account) = a.target["account"].as_str().filter(|s| !s.is_empty()) {
+    if a.target["account"].as_str().is_some_and(|s| !s.is_empty()) {
         let now_account = off_thread(dir, crate::gmail::my_addresses_saved)
             .await?
             .into_iter()
             .next()
             .unwrap_or_default();
-        if now_account != account {
+        if let Some(account) = actions::other_account(&a, &now_account) {
             bail!(
                 "this draft is in the Gmail of {account}. Connect Google as {account} in Settings, then undo it"
             );
@@ -675,10 +608,16 @@ async fn undo_at(dir: &Path, base: &str, id: i64, now: u64) -> anyhow::Result<Ac
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::gmail::tests::temp;
     use std::sync::{Arc, Mutex};
+
+    /// Undo of the action `id`, as actions::undo() reads it.
+    async fn undo_id(d: &Path, base: &str, id: i64, now: u64) -> anyhow::Result<Action> {
+        let a = actions::get(d, id)?.context("there is no such action")?;
+        undo_at(d, base, a, now).await
+    }
 
     fn msg(id: &str, at: i64, from: &str, extra: &[(&str, &str)], labels: &[&str]) -> Value {
         let mut headers = vec![
@@ -928,7 +867,7 @@ mod tests {
 
     /// A fake Gmail server. It answers each call with `reply(method, path,
     /// body)`, and records "METHOD path" for each call.
-    async fn fake_gmail(
+    pub(crate) async fn fake_gmail(
         reply: impl Fn(&str, &str, &str) -> (u16, String) + Send + Sync + 'static,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1079,7 +1018,7 @@ mod tests {
         // The draft is in another account than the one that is connected
         // now: Undo does not look for it, and the action stays.
         db_set(&d, a.id, "account", "old@x.com");
-        let e = undo_at(&d, &base, a.id, 15).await.unwrap_err();
+        let e = undo_id(&d, &base, a.id, 15).await.unwrap_err();
         assert!(e.to_string().contains("Connect Google as old@x.com"), "{e}");
         assert!(!log.lock().unwrap().iter().any(|l| l.contains("/drafts/")));
         assert_eq!(actions::get(&d, a.id).unwrap().unwrap().undone_at, None);
@@ -1087,7 +1026,7 @@ mod tests {
 
         // The user changed the draft in Gmail: Undo does not delete it.
         *now_message.lock().unwrap() = "dm2".into();
-        let e = undo_at(&d, &base, a.id, 20).await.unwrap_err();
+        let e = undo_id(&d, &base, a.id, 20).await.unwrap_err();
         assert!(e.to_string().contains("you changed this draft"), "{e}");
         assert!(!log.lock().unwrap().iter().any(|l| l.starts_with("DELETE")));
         assert_eq!(actions::get(&d, a.id).unwrap().unwrap().undone_at, None);
@@ -1097,7 +1036,7 @@ mod tests {
         *now_message.lock().unwrap() = "dm1".into();
         google::set_feature(&d, "Gmail", false).unwrap();
         assert!(prepare_at(&d, &base, key).await.is_err());
-        let u = undo_at(&d, &base, a.id, 30).await.unwrap();
+        let u = undo_id(&d, &base, a.id, 30).await.unwrap();
         google::set_feature(&d, "Gmail", true).unwrap();
         google::set_feature(&d, google::DRAFTS, true).unwrap();
         assert_eq!((u.undone_at, u.note.as_str()), (Some(30), ""));
@@ -1107,7 +1046,7 @@ mod tests {
                 .iter()
                 .any(|l| l == "DELETE /drafts/dr1")
         );
-        assert!(undo_at(&d, &base, a.id, 40).await.is_err(), "only one Undo");
+        assert!(undo_id(&d, &base, a.id, 40).await.is_err(), "only one Undo");
 
         // A draft that the user sent or deleted counts as undone, with a note.
         let b = save_at(&d, &base, key, "ana@y.com", "m2", "Hi", 50)
@@ -1115,7 +1054,7 @@ mod tests {
             .unwrap();
         actions::get(&d, b.id).unwrap().unwrap();
         db_set(&d, b.id, "draft", "gone");
-        let u = undo_at(&d, &base, b.id, 60).await.unwrap();
+        let u = undo_id(&d, &base, b.id, 60).await.unwrap();
         assert!(u.note.contains("sent it or deleted it"), "{}", u.note);
 
         // The draft is gone when the delete runs: the same note, not
@@ -1124,7 +1063,7 @@ mod tests {
             .await
             .unwrap();
         db_set(&d, c.id, "draft", "late");
-        let u = undo_at(&d, &base, c.id, 80).await.unwrap();
+        let u = undo_id(&d, &base, c.id, 80).await.unwrap();
         assert!(u.note.contains("sent it or deleted it"), "{}", u.note);
 
         // A new login without Gmail drafts: Undo says how to get them back,
@@ -1134,7 +1073,7 @@ mod tests {
             .unwrap();
         google::fake_drop_scope(&d, GMAIL_COMPOSE);
         let calls = log.lock().unwrap().len();
-        let err = undo_at(&d, &base, e.id, 95).await.unwrap_err();
+        let err = undo_id(&d, &base, e.id, 95).await.unwrap_err();
         assert!(err.to_string().contains("Use Gmail drafts"), "{err}");
         assert_eq!(log.lock().unwrap().len(), calls);
         std::fs::remove_dir_all(&d).unwrap();

@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS } from "../api";
 import { MAX_GROUP, groupOf } from "../items";
 import type {
   Action,
+  DocEdit,
   Answer,
   Brief,
   CalEvent,
@@ -43,6 +44,8 @@ import type {
   Step,
 } from "../api";
 
+/** What suggest_doc_changes gives. `canEdit` false: the user can only comment on the Doc. */
+type DocAnswer = { edits: DocEdit[]; message?: string; canEdit?: boolean };
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void, args: Record<string, any>) => Promise<Answer> | Answer;
 
 export type Fake = {
@@ -124,6 +127,14 @@ export type Fake = {
   onSuggestSteps: (key: string) => Promise<Step[]> | Step[];
   /** The text of the reply that write_reply gives for an email item. Throw to fail it. */
   onWriteReply: (key: string, note: string) => Promise<string> | string;
+  /** The Doc link that doc_link finds for an item, by key. */
+  docLinks?: Record<string, string>;
+  /** Runs before doc_link answers: a test can hold the answer back. */
+  beforeDocLink?: () => Promise<void>;
+  /** What suggest_doc_changes gives: the changes and the message. Throw to fail it. */
+  onSuggestDoc?: (key: string, link: string, note: string) => Promise<DocAnswer> | DocAnswer;
+  /** The edits of the last save_doc_suggestions. */
+  savedDocEdits?: DocEdit[];
   /** AIfred's actions in other apps, like actions.rs, oldest first. */
   actions: Action[];
   /** True: the next Undo finds the draft gone from Gmail (sent or deleted). */
@@ -791,6 +802,43 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
           title: `Reply draft to ${m.email}: Re: ${m.subject}`,
           after: String(args.body).trim(),
           url: m.url,
+          undone_at: null,
+          note: "",
+        };
+        fake.actions.push(a);
+        return structuredClone(a);
+      }
+      case "doc_link":
+        await fake.beforeDocLink?.();
+        return fake.docLinks?.[String(args.key)] ?? null;
+      case "suggest_doc_changes": {
+        const key = String(args.key);
+        const link = String(args.link);
+        // Like docs::doc_id.
+        const id = /\/document\/d\/([\w-]{25,})/.exec(link)?.[1];
+        if (!id) throw "this is not the link of a Google Doc (docs.google.com/document/d/…)";
+        // Like docs::connect: no read before you turn on Docs suggestions.
+        const on = fake.google.features.some(([n, on]) => n === "Docs suggestions" && on) && !fake.google.off.includes("Docs suggestions");
+        if (!on) throw 'AIfred cannot use Google Docs yet. In Settings, tick "Use Docs suggestions", then connect Google again';
+        const r: DocAnswer = fake.onSuggestDoc ? await fake.onSuggestDoc(key, link, String(args.note)) : { edits: [] };
+        return { key, doc: id, tab: "", title: "Offer", url: `https://docs.google.com/document/d/${id}/edit`, revision: "r1", can_edit: r.canEdit ?? true, edits: r.edits, message: r.message ?? "" };
+      }
+      case "save_doc_suggestions": {
+        await fake.beforeSave?.();
+        if (args.revision !== "r1") throw "the Doc changed after AIfred read it. Suggest the changes again";
+        const edits = structuredClone(args.edits as DocEdit[]);
+        if (!edits.length) throw "there are no changes to save";
+        fake.savedDocEdits = edits;
+        const n = edits.length;
+        const a: Action = {
+          id: fake.actions.length + 1,
+          at: nowSecs(),
+          app: "docs",
+          kind: "suggestion",
+          item: String(args.key),
+          title: `Suggested ${n} change${n === 1 ? "" : "s"} in the Doc "Offer"`,
+          after: edits.map((e) => `− ${e.find}\n+ ${e.replace}`).join("\n\n"),
+          url: `https://docs.google.com/document/d/${args.doc}/edit`,
           undone_at: null,
           note: "",
         };

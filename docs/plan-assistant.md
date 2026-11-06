@@ -135,7 +135,7 @@ Warning: when AIfred reads email and can also change things, one bad email can m
 
 - [ ] Make drafts first, in the app's own review place: Gmail drafts, Google Docs suggestions, Sheets comments. The Docs API can add suggestions and comments since September 2026 ([Google](https://workspaceupdates.googleblog.com/2026/09/programmatic-comment-and-suggestion.html)). Google's Gmail tool for AI can make drafts, but it cannot send ([Google](https://developers.google.com/workspace/guides/configure-mcp-servers)).
   - [x] Gmail reply drafts.
-  - [ ] Google Docs suggestions.
+  - [x] Google Docs suggestions.
   - [ ] Sheets comments.
 - [x] Set approval by the damage that an action can do. Reading and drafting run freely. Sending, deleting, and changes that other people can see need a clear "yes".
 - [x] Do not accept a vague reply as a "yes".
@@ -149,7 +149,14 @@ Done: Gmail reply drafts (`crates/aifred-core/src/drafts.rs`, `apps/desktop/src/
 - The AI sees only Google's short preview of the email, not the full text. A reply to a long email can miss facts.
 - Only replies. AIfred cannot write a new email, and cannot add people in Cc.
 - The reply has no name at the end. The user adds it.
-- Google Docs suggestions and Sheets comments are not done.
+- Sheets comments are not done.
+
+Done: Google Docs suggestions (`crates/aifred-core/src/docs.rs`, `apps/desktop/src/Docs.tsx`). "Use Docs suggestions" in Settings is off until the user turns it on. It asks Google for the `documents` access. The smaller access (`drive.file`) works only for Docs that the user picks in Google's file picker, which AIfred does not have. The `documents` access can read and change all Docs. AIfred has no code that edits a Doc directly. The "Doc" part of the item panel takes a Doc link (AIfred fills it in from the item's description) and a note. "✦ Suggest changes" reads the tab of the link (or the first tab) and is one AI call with no tools. It gets only the Doc, the title of the item, and the note. The AI gives each change as old text and new text. AIfred finds the old text in the Doc itself (it must be there once), and suggests only the words that change. The user sees each change before and after, changes the new text, or takes the change out. Only the click on "Save as suggestions" saves them. The request is a normal Docs edit with the write mode `SUGGEST` ([Google](https://developers.google.com/workspace/docs/api/how-tos/suggestions)). The save fails when the Doc changed after the user saw the changes. The save request also carries the revision (`requiredRevisionId`), so Google saves nothing when somebody changes the Doc between the last read and the save ([Google](https://developers.google.com/workspace/docs/api/reference/rest/v1/documents/batchUpdate): the write mode is not in the same "only one" group as the revision). Each save goes in the action log. Undo deletes the suggestions that nobody accepted or rejected yet (`deleteSuggestion`). Not done yet:
+- Check with a real Google Doc: the suggestions show at the right places, and Undo removes them. The tests use a fake Docs server. The request format comes from Google's documents only.
+- A replacement is a suggested deletion and a suggested addition at the same place. Google can show the new text before the struck-out old text, or after it. This is not checked.
+- For a person who can only comment, Google gives no revision. Then AIfred compares the content of the Doc just before the save, and the save request has no revision. A change by another person between that read and the save is not found.
+- The AI gets at most 30,000 characters of the Doc.
+- When Google gives no ids for the suggestions, Undo cannot remove them. Undo then closes the action with a note, and the user rejects them in the Doc. The field with the ids (`suggestionResponses[].createdSuggestionIds`) is in Google's batchUpdate reference (https://developers.google.com/workspace/docs/api/reference/rest/v1/documents/batchUpdate). It is not checked with a real Doc yet.
 
 ## Not checked
 
@@ -157,4 +164,3 @@ The research could not check these items. This plan does not use them:
 
 - An HBR number: 8% more output with an executive assistant.
 - How Claude Cowork's memory works.
-- The exact request format for Google Docs suggestions.

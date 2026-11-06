@@ -1715,3 +1715,114 @@ describe("errors the window must show", () => {
     expect(await screen.findByText("Cannot load the conversation: bad history file")).toBeInTheDocument();
   });
 });
+
+describe("Doc suggestions", () => {
+  const ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123";
+  const LINK = `https://docs.google.com/document/d/${ID}/edit`;
+  const docsOn = { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", true], ["Gmail", true], ["Docs suggestions", true]] as [string, boolean][], optional: ["Gmail", "Docs suggestions"], off: [] };
+
+  it("shows the Doc part when Docs suggestions is ticked, and asks to connect again when the login does not allow it", async () => {
+    const ticked = { ...docsOn, features: [["Calendar", true], ["Gmail", true], ["Docs suggestions", false]] as [string, boolean][] };
+    await startApp({ google: ticked, tasks: [task("Write the plan", { id: "t2" })] });
+    await openItem("Write the plan");
+    expect(await within(details()).findByRole("textbox", { name: "Doc link" })).toHaveValue("");
+    expect(await within(details()).findByText(/connect Google again in Settings, and allow "Docs suggestions"/)).toBeInTheDocument();
+  });
+
+  it("shows the changes before and after, saves only the kept ones as suggestions, and logs them with an undo", async () => {
+    const fake = await startApp({
+      google: docsOn,
+      tasks: [task("Send the offer", { id: "t1" })],
+      docLinks: { "task:t1": LINK },
+      onSuggestDoc: (_k, _l, note) => ({
+        edits: [
+          { find: "Price: 10 dollars.", replace: `Price: ${note} dollars.`, why: "new price" },
+          { find: "Old line.", replace: "", why: "not true now" },
+        ],
+      }),
+    });
+    await openItem("Send the offer");
+    // The link comes from the item.
+    expect(await within(details()).findByRole("textbox", { name: "Doc link" })).toHaveValue(LINK);
+    await userEvent.type(within(details()).getByRole("textbox", { name: "What to change" }), "12");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest changes" }));
+    const box = await within(details()).findByRole("group", { name: "Doc changes" });
+    const one = within(box).getByRole("group", { name: "Change 1" });
+    expect(within(one).getByLabelText("Before")).toHaveTextContent("Price: 10 dollars.");
+    const after = within(one).getByRole("textbox", { name: "After" });
+    expect(after).toHaveValue("Price: 12 dollars.");
+    await userEvent.clear(after);
+    await userEvent.type(after, "Price: 12 dollars, tax included.");
+    // Take out the second change.
+    await userEvent.click(within(within(box).getByRole("group", { name: "Change 2" })).getByRole("checkbox"));
+    // Nothing is in the Doc before the click.
+    expect(fake.actions).toEqual([]);
+    await userEvent.click(within(box).getByRole("button", { name: "Save as suggestions" }));
+    expect(await screen.findByText(/Saved the changes as suggestions in the Doc/)).toBeInTheDocument();
+    expect(fake.savedDocEdits).toEqual([{ find: "Price: 10 dollars.", replace: "Price: 12 dollars, tax included.", why: "new price" }]);
+    const log = await within(details()).findByRole("list", { name: "AIfred's suggestions on this item" });
+    expect(within(log).getByText('Suggested 1 change in the Doc "Offer"')).toBeInTheDocument();
+    expect(within(log).getByRole("link", { name: "Open in the Doc ↗" })).toHaveAttribute("href", LINK);
+    await userEvent.click(within(log).getByRole("button", { name: "Undo" }));
+    expect(await within(log).findByText(/^Undone/)).toBeInTheDocument();
+    expect(fake.actions[0].undone_at).not.toBeNull();
+  });
+
+  it("cannot read the Doc before you turn on Docs suggestions, and hides the section on items with no Doc", async () => {
+    const off = { ...docsOn, features: [["Calendar", true], ["Gmail", true], ["Docs suggestions", false]] as [string, boolean][], off: ["Docs suggestions"] };
+    const fake = await startApp({
+      google: off,
+      tasks: [task("Send the offer", { id: "t1" }), task("Water the plants", { id: "t2" })],
+      docLinks: { "task:t1": LINK },
+      onSuggestDoc: () => ({ edits: [{ find: "A.", replace: "B.", why: "" }] }),
+    });
+    await openItem("Water the plants");
+    expect(within(details()).queryByRole("button", { name: "✦ Suggest changes" })).not.toBeInTheDocument();
+    await openItem("Send the offer");
+    await userEvent.click(await within(details()).findByRole("button", { name: "✦ Suggest changes" }));
+    expect(await within(details()).findByText(/AIfred cannot use Google Docs yet\. In Settings, tick "Use Docs suggestions"/)).toBeInTheDocument();
+    expect(within(details()).queryByRole("group", { name: "Doc changes" })).not.toBeInTheDocument();
+    expect(fake.actions).toEqual([]);
+  });
+
+  it("keeps a link that you typed before AIfred found the link of the item", async () => {
+    let answer = () => {};
+    const held = new Promise<void>((r) => (answer = r));
+    await startApp({ google: docsOn, tasks: [task("Send the offer", { id: "t1" })], docLinks: { "task:t1": LINK }, beforeDocLink: () => held });
+    await openItem("Send the offer");
+    const mine = `https://docs.google.com/document/d/${"Z".repeat(30)}/edit`;
+    const box = await within(details()).findByRole("textbox", { name: "Doc link" });
+    await userEvent.type(box, mine);
+    answer();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(box).toHaveValue(mine);
+  });
+
+  it("keeps the link and the note when you mark the item done and not done", async () => {
+    await startApp({ google: docsOn, tasks: [task("Send the offer", { id: "t1" })] });
+    await openItem("Send the offer");
+    const mine = `https://docs.google.com/document/d/${"Z".repeat(30)}/edit`;
+    await userEvent.type(await within(details()).findByRole("textbox", { name: "Doc link" }), mine);
+    await userEvent.type(within(details()).getByRole("textbox", { name: "What to change" }), "make it 12");
+    await userEvent.click(within(details()).getByRole("button", { name: "Mark as finished" }));
+    await userEvent.click(await within(details()).findByRole("button", { name: "✓ Finished" }));
+    expect(await within(details()).findByRole("textbox", { name: "Doc link" })).toHaveValue(mine);
+    expect(within(details()).getByRole("textbox", { name: "What to change" })).toHaveValue("make it 12");
+  });
+
+  it("warns when you can only comment on the Doc", async () => {
+    await startApp({ google: docsOn, tasks: [task("Send the offer", { id: "t1" })], docLinks: { "task:t1": LINK }, onSuggestDoc: () => ({ edits: [{ find: "A.", replace: "B.", why: "" }], canEdit: false }) });
+    await openItem("Send the offer");
+    await within(details()).findByDisplayValue(LINK);
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest changes" }));
+    expect(await within(details()).findByText(/You can only comment on this Doc/)).toBeInTheDocument();
+  });
+
+  it("shows an error for a link that is not a Google Doc", async () => {
+    await startApp({ google: docsOn, tasks: [task("Send the offer", { id: "t1" })] });
+    await openItem("Send the offer");
+    await userEvent.type(await within(details()).findByRole("textbox", { name: "Doc link" }), "https://example.com/x");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest changes" }));
+    expect(await within(details()).findByText(/Cannot suggest changes: this is not the link of a Google Doc/)).toBeInTheDocument();
+  });
+});

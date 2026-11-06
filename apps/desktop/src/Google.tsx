@@ -1,21 +1,14 @@
 // The Google connection on the Settings page. Each user makes their own
 // Google registration (a "Desktop app" client) and pastes it here. One
-// connection serves all Google features: the calendar, Gmail, and Gmail
-// drafts now, Docs later.
+// connection serves all Google features: the calendar, Gmail, Gmail
+// drafts, and Docs suggestions.
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
+import { offText } from "./googleApps";
 
 const BTN = "rounded-lg border border-stone-300 px-3 py-1.5 text-sm hover:bg-stone-200 disabled:opacity-40 dark:border-stone-700 dark:hover:bg-stone-800";
 const PRI = "rounded-lg bg-[#252e4a] px-4 py-2 text-sm font-medium text-stone-50 hover:bg-[#323d62] disabled:opacity-40";
 const INPUT = "w-full max-w-md rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm dark:border-stone-700 dark:bg-stone-900";
-
-/** What turning a feature off did. Gmail drafts removes nothing: the drafts
- * are in Gmail, and the action log stays. Undo works until the next login,
- * because a new login does not ask for drafts. */
-const offText = (name: string) =>
-  name === "Gmail drafts"
-    ? `${name} is off. AIfred makes no new drafts. Your drafts stay in Gmail. "AIfred's actions" below lets you undo them until you connect Google again.`
-    : `${name} is off. AIfred removed the saved data of ${name}.`;
 
 /** How to make the registration in Google Cloud Console. */
 function Steps() {
@@ -26,7 +19,8 @@ function Steps() {
       </li>
       <li>
         Turn on the <a href="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com" className="underline">Google Calendar API</a> and the{" "}
-        <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" className="underline">Gmail API</a> in that project.
+        <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" className="underline">Gmail API</a> in that project. For Docs suggestions, also turn on the{" "}
+        <a href="https://console.cloud.google.com/apis/library/docs.googleapis.com" className="underline">Google Docs API</a>.
       </li>
       <li>
         Open <a href="https://console.cloud.google.com/auth/overview" className="underline">Google Auth Platform</a> and set it up. For Audience, pick Internal when your account is in a company Google Workspace. Else pick External, and then click Publish app: in Testing, Google ends the login every 7 days. Google then shows "Google hasn't verified this app" at the login: this is your own registration, so click Advanced and continue.
@@ -117,7 +111,7 @@ export function GoogleSection(props: { onChanged: () => void }) {
     <section className="mt-8 space-y-2" aria-label="Google">
       <h2 className="text-sm font-semibold">Google</h2>
       <p className="text-sm text-stone-500">
-        AIfred reads your Google Calendar, so the day plan goes around your meetings. It reads your Gmail, so it finds the emails that wait for your answer and the emails where you wait for an answer. It reads only the sender, the subject, and Google's short preview of each email. It cannot change the calendar. With "Use Gmail drafts", AIfred can save a reply that you checked as a draft in Gmail, when you click. It never sends. Google gives no smaller access for drafts, so this access could also send email: AIfred has no code that sends. Later Google features, like Docs, use the same connection.
+        AIfred reads your Google Calendar, so the day plan goes around your meetings. It reads your Gmail, so it finds the emails that wait for your answer and the emails where you wait for an answer. It reads only the sender, the subject, and Google's short preview of each email. It cannot change the calendar. With "Use Gmail drafts", AIfred can save a reply that you checked as a draft in Gmail, when you click. It never sends. Google gives no smaller access for drafts, so this access could also send email: AIfred has no code that sends. With "Use Docs suggestions", AIfred can read a Google Doc that you link to an item, and save the changes that you checked as suggestions in that Doc, when you click. The owner of the Doc accepts or rejects them. Google gives no smaller access for this, so this access could read and change all your Docs: AIfred has no code that changes a Doc directly.
       </p>
       {/* Off during a login too: the login already asked Google for the
           features, and a change now would not be in it. */}
