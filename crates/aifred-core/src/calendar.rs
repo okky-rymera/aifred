@@ -238,7 +238,7 @@ fn parse_page(json: &[u8]) -> anyhow::Result<(Vec<Event>, Option<String>)> {
 
 /// The start of a local day. On a day when the clocks change at
 /// midnight, the first time that exists.
-fn local_midnight(d: NaiveDate) -> anyhow::Result<DateTime<Local>> {
+pub(crate) fn local_midnight(d: NaiveDate) -> anyhow::Result<DateTime<Local>> {
     let midnight = d.and_hms_opt(0, 0, 0).context("no midnight")?;
     Local
         .from_local_datetime(&midnight)

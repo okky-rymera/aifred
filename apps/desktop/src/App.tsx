@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
 import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
-import { Ctx, useApp, type AppCtx, type ChatState, type ListState } from "./ctx";
+import { Ctx, useApp, type AppCtx, type CardMode, type ChatState, type ListState } from "./ctx";
 import { Detail } from "./Detail";
 import { Home } from "./Home";
 import { addDays, buildItems, dayOf, dur, meetingsOn, schedule, type Item } from "./items";
@@ -113,6 +113,9 @@ export default function App() {
   const [work, setWork] = useState<api.Running | null>(null);
   // The mode of the home box stays when you go to another page.
   const [homeMode, setHomeMode] = useState<"ask" | "task">("ask");
+  const [reviewCards, setReviewCards] = useState<{ day: CardMode; week: CardMode }>({ day: "auto", week: "auto" });
+  // A card that you closed comes back on a new day.
+  useEffect(() => setReviewCards({ day: "auto", week: "auto" }), [today]);
   const [plan, setPlan] = useState<api.DayPlan | null>(null);
   // The day whose plan is loaded. Until today's plan loads, a change must
   // not save: it would use the plan of the day before.
@@ -803,7 +806,8 @@ export default function App() {
         const p = old_.get(key);
         return { key, ...(p?.why ? { why: p.why } : {}), ...(p?.goal !== undefined ? { goal: p.goal } : {}) };
       });
-      const mode = plan?.mode ?? "self";
+      // A change by hand makes a plan from a review your own plan.
+      const mode = plan?.mode === "ai" ? "ai" : "self";
       setPlan({ day, mode, items: next, updated: Date.now() / 1000 });
       api
         .setDayPlan(day, mode, next)
@@ -990,7 +994,13 @@ export default function App() {
       return;
     }
     setPlanChatOpen(true);
-    sendPlan(plan?.items.length ? "Plan my day again from the start." : "Plan my day.");
+    sendPlan(
+      plan?.mode === "review" && plan.items.length
+        ? "Plan my day. Keep the items that are in the plan now: I moved them here in a review."
+        : plan?.items.length
+          ? "Plan my day again from the start."
+          : "Plan my day.",
+    );
   };
 
   const startOver = () => {
@@ -1267,6 +1277,12 @@ export default function App() {
     startOver,
     writeBrief,
     toast,
+    reviewCards,
+    setReviewCard: (card, mode) => setReviewCards((c) => ({ ...c, [card]: mode })),
+    reload: () => {
+      reloadAfterAnswer();
+      loadWaiting();
+    },
     goPlan,
   };
 

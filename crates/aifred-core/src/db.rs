@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 14;
+const VERSION: i64 = 15;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -535,6 +535,44 @@ CREATE TABLE work_done (
 );
 ";
 
+/// The reviews (review.rs): the end-of-day check, the weekly review, the
+/// user's pick for each item in the weekly review, and the last change of
+/// each local task.
+const SCHEMA_15: &str = "
+-- One row for each day that the user finished the end-of-day check.
+CREATE TABLE day_review (
+  day   TEXT PRIMARY KEY,             -- YYYY-MM-DD
+  moved TEXT NOT NULL DEFAULT '[]',   -- the item keys that went to the next day's plan
+  ts    INTEGER NOT NULL
+);
+
+-- One row for each weekly review that the user finished.
+CREATE TABLE week_review (
+  day TEXT PRIMARY KEY,               -- YYYY-MM-DD: the day of the review
+  ts  INTEGER NOT NULL
+);
+
+-- What the user picked for an item in the weekly review.
+CREATE TABLE review_pick (
+  id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  key   TEXT NOT NULL,                -- the item key
+  pick  TEXT NOT NULL,                -- 'do', 'plan', 'delegate', or 'drop'
+  title TEXT NOT NULL,
+  place TEXT NOT NULL DEFAULT '',
+  note  TEXT NOT NULL DEFAULT '',     -- plan: the day; delegate: the person
+  undo  TEXT NOT NULL DEFAULT '{}',   -- what the undo puts back
+  ts    INTEGER NOT NULL
+);
+CREATE INDEX review_pick_by_key ON review_pick(key, ts);
+
+-- The last change of a local task, in Unix seconds. 0: no change after it was added.
+ALTER TABLE task ADD COLUMN updated INTEGER NOT NULL DEFAULT 0;
+-- The old versions did not keep the last change. A task can have changed
+-- yesterday, so the upgrade counts as a change of each task. Else the first
+-- weekly review shows active tasks as stale.
+UPDATE task SET updated = CAST(strftime('%s', 'now') AS INTEGER);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -647,6 +685,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 14 {
         tx.execute_batch(SCHEMA_14)?;
+    }
+    if version < 15 {
+        tx.execute_batch(SCHEMA_15)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

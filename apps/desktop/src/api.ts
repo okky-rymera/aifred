@@ -186,7 +186,8 @@ export const DEFAULT_SETTINGS: Settings = {
 
 /** One item of a day plan. `key` names the item (items.rs). */
 export type PlanItem = { key: string; why?: string; goal?: number };
-export type DayPlan = { day: string; mode: "ai" | "self"; items: PlanItem[]; updated: number };
+/** `mode` "review": a review put items in a day with no plan. You did not pick yet how to plan the day. */
+export type DayPlan = { day: string; mode: "ai" | "self" | "review"; items: PlanItem[]; updated: number };
 export type Estimate = { minutes: number; by: "you" | "aifred" };
 /** `goal`: the id of the goal that an item serves, by item key. */
 export type Brief = { day: string; written: number; text: string; why: Record<string, string>; goal?: Record<string, number> };
@@ -261,6 +262,28 @@ export const undoCorrection = (id: number) => invoke<void>("undo_correction", { 
 
 /** The item that you work on now (worktime.rs). `before`: seconds from earlier sessions of the item. */
 export type Running = { key: string; title: string; started: number; before: number };
+/** An item in the end-of-day check (review.rs). `minutes`: the real time of a finished item. */
+export type DayItem = { key: string; title: string; place: string; minutes?: number };
+/** The end-of-day check of one day. `left`: still open, from the plan and the tasks due that day. */
+export type DayCheck = { day: string; done: DayItem[]; left: DayItem[]; finished: boolean; moved: string[] };
+/** An open item with no change for 3 weeks. `last`: Unix seconds. */
+export type StaleItem = { key: string; title: string; place: string; last: number; days: number };
+/** A goal and the finished items that served it in the last 7 days. */
+export type GoalWeek = { id: number; text: string; done: number };
+export type WeekReview = { due: boolean; last: string | null; items: StaleItem[]; more: number; goals: GoalWeek[]; goals_stale: boolean };
+export type PickKind = "do" | "plan" | "delegate" | "drop";
+/** A pick in the weekly review. `note`: the day for "plan", the person for "delegate". */
+export type ReviewPick = { id: number; key: string; pick: PickKind; title: string; place: string; note: string; ts: number };
+/** The weekly review comes this many days after the last one (review.rs). */
+export const WEEK_DAYS = 7;
+export const dayCheck = (day: string) => invoke<DayCheck>("day_check", { day });
+/** The items in `moved` go into the plan of the next day. */
+export const finishDay = (day: string, moved: string[]) => invoke<DayCheck>("finish_day", { day, moved });
+export const weekReview = (today: string) => invoke<WeekReview>("week_review", { today });
+export const finishWeekReview = (today: string) => invoke<WeekReview>("finish_week_review", { today });
+export const reviewPick = (key: string, pick: PickKind, note: string, today: string) => invoke<ReviewPick>("review_pick", { key, pick, note, today });
+export const undoReviewPick = (id: number) => invoke<void>("undo_review_pick", { id });
+
 /** A finished item: the real time next to the time guess, in minutes.
  * `minutes` 0: only forgotten timers. `skipped`: the timers of more than 10 hours, which do not count. */
 export type WorkDone = { key: string; title: string; minutes: number; guess: number | null; skipped: number };

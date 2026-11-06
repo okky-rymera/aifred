@@ -13,7 +13,8 @@
 //!
 //! The overview also has what AIfred learned from the user: the recent
 //! corrections of the brief (learn.rs) and the real times of finished work
-//! next to the time guesses (worktime.rs).
+//! next to the time guesses (worktime.rs), and the user's picks in the
+//! weekly review (review.rs).
 
 use std::path::Path;
 
@@ -138,6 +139,11 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
         let corrections = crate::learn::for_ai(c, crate::files::now())?;
         if !corrections.is_empty() {
             out["corrections"] = corrections.into();
+        }
+        // The user's picks in the weekly review (review.rs).
+        let picks = crate::review::for_ai(c, crate::files::now())?;
+        if !picks.is_empty() {
+            out["review_picks"] = picks.into();
         }
         if let Some(t) = crate::worktime::for_ai(c)? {
             out["time_history"] = t;

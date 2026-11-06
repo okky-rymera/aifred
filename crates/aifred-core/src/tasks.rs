@@ -379,8 +379,8 @@ impl TaskStore {
                 _ => bail!("the checklist changed. Reload the list and try again"),
             }
             tx.execute(
-                "UPDATE task SET checklist = ?1 WHERE id = ?2",
-                rusqlite::params![serde_json::to_string(&task.checklist)?, id],
+                "UPDATE task SET checklist = ?1, updated = ?2 WHERE id = ?3",
+                rusqlite::params![serde_json::to_string(&task.checklist)?, now() as i64, id],
             )?;
             Ok(task)
         })
@@ -397,36 +397,7 @@ impl TaskStore {
         id: &str,
         done: bool,
     ) -> anyhow::Result<(Task, Option<crate::worktime::Done>)> {
-        db::write(&self.dir, |tx| {
-            let done_at = done.then(|| now() as i64);
-            let was_done: Option<bool> = tx
-                .query_row("SELECT done FROM task WHERE id = ?1", [id], |r| r.get(0))
-                .optional()?;
-            let Some(was_done) = was_done else {
-                bail!("no task with id {id}");
-            };
-            tx.execute(
-                "UPDATE task SET done = ?1, done_at = ?2 WHERE id = ?3",
-                rusqlite::params![done, done_at, id],
-            )?;
-            // A task that is done now starts the jobs that wait for it (jobs.rs).
-            // Its work stops and AIfred keeps its real time (worktime.rs), also
-            // when the AI closes the task in a chat.
-            let key = format!("task:{id}");
-            let mut work = None;
-            if done && !was_done {
-                crate::jobs::record_event(tx, crate::jobs::TASK_DONE)?;
-                work = crate::worktime::finish_in(tx, &key, now())?;
-            } else if !done && was_done {
-                crate::worktime::unfinish_in(tx, &key)?;
-            }
-            let task = tx.query_row(
-                &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
-                [id],
-                from_row,
-            )?;
-            Ok((task, work))
-        })
+        db::write(&self.dir, |tx| set_done_in(tx, id, done))
     }
 
     /// Tasks that match `query` by words or by meaning in the title or the
@@ -468,6 +439,42 @@ impl TaskStore {
     }
 }
 
+/// set_done_work(), in a change that is open.
+fn set_done_in(
+    tx: &Transaction,
+    id: &str,
+    done: bool,
+) -> anyhow::Result<(Task, Option<crate::worktime::Done>)> {
+    let done_at = done.then(|| now() as i64);
+    let was_done: Option<bool> = tx
+        .query_row("SELECT done FROM task WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?;
+    let Some(was_done) = was_done else {
+        bail!("no task with id {id}");
+    };
+    tx.execute(
+        "UPDATE task SET done = ?1, done_at = ?2, updated = ?3 WHERE id = ?4",
+        rusqlite::params![done, done_at, now() as i64, id],
+    )?;
+    // A task that is done now starts the jobs that wait for it (jobs.rs).
+    // Its work stops and AIfred keeps its real time (worktime.rs), also
+    // when the AI closes the task in a chat.
+    let key = format!("task:{id}");
+    let mut work = None;
+    if done && !was_done {
+        crate::jobs::record_event(tx, crate::jobs::TASK_DONE)?;
+        work = crate::worktime::finish_in(tx, &key, now())?;
+    } else if !done && was_done {
+        crate::worktime::unfinish_in(tx, &key)?;
+    }
+    let task = tx.query_row(
+        &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+        [id],
+        from_row,
+    )?;
+    Ok((task, work))
+}
+
 /// Writes the fields that the user can change. The title and the
 /// description are written only when `text_changed` is true: each write of
 /// them runs the word-search trigger (db.rs), which indexes the task again.
@@ -479,7 +486,7 @@ fn write_fields(tx: &Transaction, t: &Task, text_changed: bool) -> anyhow::Resul
         )?;
     }
     tx.execute(
-        "UPDATE task SET due = ?1, start = ?2, priority = ?3, tags = ?4, checklist = ?5, files = ?6 WHERE id = ?7",
+        "UPDATE task SET due = ?1, start = ?2, priority = ?3, tags = ?4, checklist = ?5, files = ?6, updated = ?7 WHERE id = ?8",
         rusqlite::params![
             t.due,
             t.start,
@@ -487,6 +494,7 @@ fn write_fields(tx: &Transaction, t: &Task, text_changed: bool) -> anyhow::Resul
             serde_json::to_string(&t.tags)?,
             serde_json::to_string(&t.checklist)?,
             serde_json::to_string(&t.files)?,
+            now() as i64,
             t.id
         ],
     )?;

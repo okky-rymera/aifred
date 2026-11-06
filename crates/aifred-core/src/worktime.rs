@@ -138,6 +138,16 @@ pub fn stop(dir: &Path, now: u64) -> anyhow::Result<()> {
     db::write(dir, |tx| end_running(tx, now))
 }
 
+/// Stops the work on `key` when it runs now. AIfred does not keep a real
+/// time: the item is not finished. For an item that the user drops or gives
+/// away in the weekly review (review.rs).
+pub(crate) fn stop_in(tx: &Transaction, key: &str, now: u64) -> anyhow::Result<()> {
+    if running_session(tx)?.is_some_and(|(k, _)| k == key) {
+        end_running(tx, now)?;
+    }
+    Ok(())
+}
+
 /// The item `key` is finished. Its work stops, and AIfred keeps the real time
 /// next to the time guess. None when the item has no work time at all.
 pub fn finish(dir: &Path, key: &str, now: u64) -> anyhow::Result<Option<Done>> {

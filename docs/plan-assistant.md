@@ -90,9 +90,17 @@ Done: each reason in the brief has "Not today" and "Wrong priority" (`crates/aif
 
 Why: in GTD (Getting Things Done), the weekly review keeps the list trustworthy. Most people skip it ([Thomas Frank](https://thomasjfrank.com/productivity/the-5-minute-guide-to-gtd-getting-things-done/)).
 
-- [ ] End-of-day check: what is done, what moves to tomorrow.
-- [ ] Weekly review: a list of items that did not move in 3 weeks. For each item, the user picks one: do, plan, give to someone, or drop.
-- [ ] Ask about goals in the weekly review.
+- [x] End-of-day check: what is done, what moves to tomorrow.
+- [x] Weekly review: a list of items that did not move in 3 weeks. For each item, the user picks one: do, plan, give to someone, or drop.
+- [x] Ask about goals in the weekly review.
+
+Done: the "End of the day" card and the "Weekly review" card on the home page (`crates/aifred-core/src/review.rs`, `apps/desktop/src/Review.tsx`). Both need no AI call. The end-of-day check puts the ticked open items in tomorrow's plan. The weekly review asks about the goals, with the finished items of each goal in the last 7 days, and takes one pick for each item with no change for 21 days. Each pick has an Undo. The brief and the plan chat get the picks. Not done yet:
+- Check with real use that 21 days is the right age, and that the cards come at good times.
+- No notification for the reviews. The cards show only when the user opens the home page.
+- When tomorrow has no plan, the moved items wait in a plan with the mode "review", and the app still asks how to plan the day. "Plan it for me" asks the AI to keep them, but the AI can still drop them.
+- Each edit of a task counts as a change, also a new due day. So a task that the user moves again and again is never in the weekly review.
+- A dropped GitHub or ClickUp item stays in the home list. Only the brief and the reviews stop counting it.
+- The weekly review day is 7 days after the last review. The user cannot pick a day of the week.
 
 ### 6. One task for one piece of work
 

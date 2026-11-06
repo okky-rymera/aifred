@@ -26,7 +26,9 @@ export function Minutes({ item }: { item: Item }) {
 }
 
 function Chooser() {
-  const { items, today, startPlan, planChat } = useApp();
+  const { items, today, plan, startPlan, planChat } = useApp();
+  // Items that a review put in today's plan. Both ways keep them.
+  const fromReview = plan?.mode === "review" ? plan.items.length : 0;
   const open = items.filter((i) => !i.done && !(i.start && i.start > today));
   const todayN = open.filter((i) => i.due !== null && i.due <= today).length;
   const urgent = open.filter((i) => i.priority === "urgent" || (i.due !== null && i.due < today)).length;
@@ -37,6 +39,11 @@ function Chooser() {
         <p>
           You have {open.length} open items. {todayN} {todayN === 1 ? "is" : "are"} due today or late, and {urgent} {urgent === 1 ? "is" : "are"} urgent or late.
         </p>
+        {fromReview > 0 && (
+          <p>
+            Your review put {fromReview} item{fromReview > 1 ? "s" : ""} in today's plan. Both ways keep {fromReview > 1 ? "them" : "it"}.
+          </p>
+        )}
         <div className="choices">
           <button className="choice ai" disabled={planChat.busy} onClick={() => startPlan("ai")}>
             <span className="n">{ICON.spark}Plan it for me</span>
@@ -450,7 +457,7 @@ function Timeline() {
 
 export function PlanView(props: { onChat: () => void }) {
   const { plan, planItems, sched, today, sendPlan, startPlan, startOver, planChat } = useApp();
-  if (!plan) {
+  if (!plan || plan.mode === "review") {
     return (
       <div className="c-mid only">
         <Chooser />
@@ -513,7 +520,7 @@ export function PlanChat() {
   useEffect(() => {
     msgs.current?.scrollTo({ top: msgs.current.scrollHeight });
   }, [planChat.msgs.length, planChat.busy, planChat.progress.length]);
-  const intro = !plan
+  const intro = !plan || plan.mode === "review"
     ? "Pick one of the two ways on the left. You can also type here, for example “plan my day, but keep the afternoon free”."
     : plan.mode === "self" && !planChat.msgs.length
       ? "Add items from the list under the timeline, or drag them in. I place them around lunch. Change the time with − and +.\n\nWhen you want help, ask me to fill the rest or to check the plan."

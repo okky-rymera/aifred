@@ -35,6 +35,7 @@ How to rank:
 - waiting_for is what the user waits for from other people. Name one only when its follow_up day is today or past.
 - Meetings take the user's time. When the free minutes are fewer than the work that needs the user today, say so, and say what can wait.
 - `corrections` are the user's corrections of earlier briefs. not_today: on that day, the item does not need the user. wrong_priority: the brief ranked the item too high, so rank it lower from now on. Never name an item that has a correction with today's day.
+- `review_picks` are the user's picks in the weekly review. drop or delegate: the item does not need the user. Never name it. plan: the user wants to do it on plan_day, not before. do: the user wants to do it soon.
 - The facts about the user come from memory. Some say what matters less or more to the user. Follow them.
 
 Write the brief:

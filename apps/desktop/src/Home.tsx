@@ -5,6 +5,7 @@ import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
 import { GoalTag, GoalsCard } from "./Goals";
+import { DayCheckCard, WeekReviewCard } from "./Review";
 import { WaitingCard } from "./Waiting";
 import { SRC_NAME, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, longDay, parseTask, shortDay, type Item } from "./items";
 
@@ -261,13 +262,16 @@ function WorkBar() {
 /** The day plan in one line: the next task, the end of the day, and a bar. */
 function PlanStrip() {
   const { plan, planItems, sched, byKey, settings, startPlan, goPlan } = useApp();
-  if (!plan || !planItems.length) {
+  // A plan from a review only: you did not pick yet how to plan the day.
+  const fromReview = plan?.mode === "review" ? planItems.length : 0;
+  if (!plan || plan.mode === "review" || !planItems.length) {
     return (
       <div className="strip">
         <span className="ic">{ICON.cal}</span>
         <span className="txt">
           <span>No plan for today yet.</span>
           <small>
+            {fromReview > 0 && `Your review put ${fromReview} item${fromReview > 1 ? "s" : ""} in it. `}
             AIfred can put your tasks in order and place them around lunch{settings.lunch_minutes ? ` at ${settings.lunch_start}` : ""}.
           </small>
         </span>
@@ -441,7 +445,7 @@ function HomeBox() {
 }
 
 export function Home() {
-  const { items, today, githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
+  const { reviewCards, setReviewCard, items, today, githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
   const [showLater, setShowLater] = useState(false);
   const [showDone, setShowDone] = useState(false);
   const g = groupItems(items, today);
@@ -456,8 +460,10 @@ export function Home() {
             {hello} <span>{longDay(today)}</span>
           </h2>
           <WorkBar />
+          {reviewCards.day !== "hidden" && <DayCheckCard force={reviewCards.day === "open"} onClose={() => setReviewCard("day", "hidden")} />}
           <GoalsCard />
           <BriefCard needYou={g.now.length + g.today.length} />
+          {reviewCards.week !== "hidden" && <WeekReviewCard force={reviewCards.week === "open"} onClose={() => setReviewCard("week", "hidden")} />}
           <WaitingCard />
           {tasksError && <div className="note-line err">Cannot load your tasks: {tasksError}</div>}
           {githubState === "loading" && <div className="note-line">Loading GitHub items…</div>}
@@ -476,6 +482,12 @@ export function Home() {
             <div className="empty">{g.later.length ? "Nothing to do today. Some tasks start later." : "Nothing to do. Add a task in the box below."}</div>
           )}
           <div className="more">
+            <button className="linkbtn" onClick={() => setReviewCard("day", "open")} title="What you finished today, and what moves to tomorrow">
+              End the day
+            </button>
+            <button className="linkbtn" onClick={() => setReviewCard("week", "open")} title="Check your goals and the items that did not move for 3 weeks">
+              Weekly review
+            </button>
             {g.later.length > 0 && (
               <button className="linkbtn" onClick={() => setShowLater((s) => !s)} title="Tasks with a start day after today">
                 {showLater ? "Hide" : "Show"} later ({g.later.length})

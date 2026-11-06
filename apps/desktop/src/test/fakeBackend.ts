@@ -10,6 +10,8 @@ import type {
   CalendarList,
   ClickupItem,
   Correction,
+  DayCheck,
+  DayItem,
   DayPlan,
   Estimate,
   Fact,
@@ -23,9 +25,11 @@ import type {
   Mail,
   MailList,
   ProgressEvent,
+  ReviewPick,
   Running,
   Settings,
   SideTurn,
+  StaleItem,
   Task,
   TaskChanges,
   Turn,
@@ -131,6 +135,18 @@ export type Fake = {
   failFinishWork?: string;
   /** The clock of the work timer, in Unix seconds. A test can move it. */
   now: () => number;
+  /** The finished end-of-day checks: the moved keys, by day (review.rs). */
+  dayReviews: Record<string, string[]>;
+  /** The days of the finished weekly reviews. */
+  weekReviews: string[];
+  /** The items with no change for 3 weeks. The fake does not count the weeks: a test sets them. */
+  stale: StaleItem[];
+  /** The weekly review shows at most this many items (review::STALE_MAX). */
+  staleMax: number;
+  /** The picks of the weekly review, with what the undo puts back. */
+  picks: (ReviewPick & { undo: { plan?: string; start?: string | null; setStart?: boolean; waiting?: number; closed?: boolean } })[];
+  /** The finished items of the last 7 days that served each goal, by goal id. */
+  goalDone: Record<number, number>;
 };
 
 let nextId = 1;
@@ -310,6 +326,12 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     sessions: [],
     workDone: {},
     now: nowSecs,
+    dayReviews: {},
+    weekReviews: [],
+    stale: [],
+    staleMax: 30,
+    picks: [],
+    goalDone: {},
     ...init,
   };
 
@@ -391,7 +413,134 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       if (secs) fake.workDone[key] = d;
       return d;
     };
+    /** Like review.rs: the day after "YYYY-MM-DD". */
+    const nextDay = (day: string) => {
+      const d = new Date(`${day}T12:00:00`);
+      d.setDate(d.getDate() + 1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+    const localDay = (secs: number) => {
+      const d = new Date(secs * 1000);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+    /** Keys that the user gave away or dropped in a weekly review. */
+    const hidden = () => new Set(fake.picks.filter((p) => p.pick === "delegate" || p.pick === "drop").map((p) => p.key));
+    const dayItem = (key: string, minutes?: number): DayItem => {
+      const [title, place] = titlePlace(key) ?? [key, ""];
+      return minutes ? { key, title, place, minutes } : { key, title, place };
+    };
+    /** Like review::day_check_in. */
+    const dayCheck = (day: string): DayCheck => {
+      const h = hidden();
+      const done = fake.tasks
+        .filter((t) => t.done && t.done_at && localDay(t.done_at) === day && !h.has(`task:${t.id}`))
+        .map((t) => dayItem(`task:${t.id}`, fake.workDone[`task:${t.id}`]?.minutes));
+      const doneKeys = new Set(done.map((d) => d.key));
+      const keys = [
+        ...(fake.plans[day]?.items ?? []).map((i) => i.key),
+        ...fake.tasks.filter((t) => !t.done && t.due === day && (!t.start || t.start <= day)).map((t) => `task:${t.id}`),
+      ];
+      const left = [...new Set(keys)].filter((k) => !h.has(k) && !doneKeys.has(k) && isOpen(k)).map((k) => dayItem(k));
+      return { day, done, left, finished: day in fake.dayReviews, moved: fake.dayReviews[day] ?? [] };
+    };
+    /** Like review::add_to_plan. True when the key was in the plan. */
+    const addToPlan = (day: string, key: string) => {
+      const p = fake.plans[day] ?? { day, mode: "review" as const, items: [], updated: nowSecs() };
+      if (p.items.some((i) => i.key === key)) return true;
+      fake.plans[day] = { ...p, items: [...p.items, { key }], updated: nowSecs() };
+      return false;
+    };
+    const weekReview = (today: string) => {
+      const last = fake.weekReviews.length ? [...fake.weekReviews].sort().at(-1)! : null;
+      const days = (a: string, b: string) => Math.round((new Date(`${b}T12:00:00`).getTime() - new Date(`${a}T12:00:00`).getTime()) / 86_400_000);
+      const due = last ? days(last, today) >= 7 : new Date(`${today}T12:00:00`).getDay() % 6 === 0 || new Date(`${today}T12:00:00`).getDay() === 5;
+      const h = hidden();
+      const picked = new Set(fake.picks.map((p) => p.key));
+      const all = fake.stale.filter((i) => !h.has(i.key) && !picked.has(i.key) && isOpen(i.key));
+      return {
+        due,
+        last,
+        items: structuredClone(all.slice(0, fake.staleMax)),
+        more: Math.max(0, all.length - fake.staleMax),
+        goals: fake.goals.goals.map((g) => ({ id: g.id, text: g.text, done: fake.goalDone[g.id] ?? 0 })),
+        goals_stale: fake.goals.stale,
+      };
+    };
     switch (cmd) {
+      case "day_check":
+        return dayCheck(args.day);
+      case "finish_day": {
+        const next = nextDay(args.day);
+        const moved: string[] = [];
+        for (const k of args.moved as string[]) {
+          if (!isOpen(k)) continue;
+          addToPlan(next, k);
+          const t = fake.tasks.find((t) => `task:${t.id}` === k);
+          if (t && t.due === args.day) t.due = next;
+          moved.push(k);
+        }
+        fake.dayReviews[args.day] = [...new Set([...(fake.dayReviews[args.day] ?? []), ...moved])];
+        return dayCheck(args.day);
+      }
+      case "week_review":
+        return weekReview(args.today);
+      case "finish_week_review":
+        fake.weekReviews.push(args.today);
+        return weekReview(args.today);
+      case "review_pick": {
+        const { key, pick, today } = args as { key: string; pick: string; today: string };
+        const note = String(args.note).split(/\s+/).filter(Boolean).join(" ");
+        if (!["do", "plan", "delegate", "drop"].includes(pick)) throw `a pick is "do", "plan", "delegate", or "drop", not "${pick}"`;
+        if (!isOpen(key)) throw `the item ${key} is not open any more`;
+        const [title, place] = titlePlace(key) ?? [key, ""];
+        const t = fake.tasks.find((t) => `task:${t.id}` === key);
+        const undo: Fake["picks"][number]["undo"] = {};
+        if (pick === "do" && !addToPlan(today, key)) undo.plan = today;
+        if (pick === "plan") {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(note)) throw `the day "${note}" is not in the form YYYY-MM-DD`;
+          if (note <= today) throw `pick a day after today. To work on it today, pick "do"`;
+          if (!addToPlan(note, key)) undo.plan = note;
+          if (t && (!t.due || t.due >= note)) {
+            undo.setStart = true;
+            undo.start = t.start;
+            t.start = note;
+          }
+        }
+        if (pick === "delegate") {
+          if (!note) throw "say who does it";
+          const id = fake.waiting.reduce((a, x) => Math.max(a, x.id), 0) + 1;
+          fake.waiting.push({ id, what: title, who: note, since: today, follow_up: null, told: false, thread: null, url: null, done: false, done_why: "", created: nowSecs(), updated: nowSecs() });
+          undo.waiting = id;
+        }
+        if ((pick === "delegate" || pick === "drop") && t) {
+          t.done = true;
+          t.done_at = nowSecs();
+          undo.closed = true;
+        }
+        const p = { id: nextId++, key, pick: pick as ReviewPick["pick"], title, place, note: pick === "plan" || pick === "delegate" ? note : "", ts: nowSecs(), undo };
+        fake.picks.push(p);
+        const { undo: _, ...out } = p;
+        return structuredClone(out);
+      }
+      case "undo_review_pick": {
+        const p = fake.picks.find((x) => x.id === args.id);
+        if (!p) throw `no pick with id ${args.id}`;
+        const t = fake.tasks.find((t) => `task:${t.id}` === p.key);
+        if (p.undo.closed && t) {
+          t.done = false;
+          t.done_at = null;
+        }
+        if (p.undo.plan && fake.plans[p.undo.plan]) {
+          const pl = fake.plans[p.undo.plan];
+          const items = pl.items.filter((i) => i.key !== p.key);
+          if (pl.mode === "review" && !items.length) delete fake.plans[p.undo.plan];
+          else fake.plans[p.undo.plan] = { ...pl, items };
+        }
+        if (p.undo.setStart && t && t.start === p.note) t.start = p.undo.start ?? null;
+        if (p.undo.waiting) fake.waiting = fake.waiting.filter((w) => w.id !== p.undo.waiting);
+        fake.picks = fake.picks.filter((x) => x !== p);
+        return null;
+      }
       case "info":
         return { data_dir: "/fake/aifred", backend: "Claude (your login)", github_owners: null, api_key_set: false, meaning_search: "on" };
       case "history":
@@ -697,7 +846,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         await fake.onDayPlan?.(args.day);
         return structuredClone(fake.plans[args.day] ?? null);
       case "set_day_plan": {
-        if (!["ai", "self"].includes(args.mode)) throw `the plan mode must be "ai" or "self"`;
+        if (!["ai", "self", "review"].includes(args.mode)) throw `the plan mode must be "ai" or "self"`;
         // Like plan.rs: a key that was in the plan before stays, also when its item is not open.
         const old = new Set((fake.plans[args.day]?.items ?? []).map((i) => i.key));
         const seen = new Set<string>();

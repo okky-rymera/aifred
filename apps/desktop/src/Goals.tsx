@@ -14,7 +14,7 @@ export function GoalTag({ goal, ranked }: { goal?: string; ranked: boolean }) {
   return null;
 }
 
-function GoalEditor() {
+export function GoalEditor() {
   const { goals, changeGoals } = useApp();
   const [text, setText] = useState("");
   // True while a new goal is saved: a second Enter (or a held key) must not add it again.

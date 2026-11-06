@@ -282,6 +282,33 @@ AIfred learns from what you change (`crates/aifred-core/src/learn.rs`, `worktime
 - A session longer than 10 hours does not count. AIfred thinks that you forgot the timer.
 - The brief and the plan chat get the real times of the last 20 finished items, and the middle value of real time divided by guess. They use them for new time guesses. They do not change a guess that exists.
 
+## Reviews
+
+Two reviews keep the list right (`crates/aifred-core/src/review.rs`). They need no AI call and send no notification.
+
+### End-of-day check
+
+- The "End of the day" card shows on the home page from 30 minutes before your work day ends (Settings). "End the day" under the list opens it at any time.
+- It shows what you finished today, with the real time from the timer.
+- It shows what is still open: the items of today's plan, and your tasks due today.
+- Each open item has a tick. "Finish the day" puts the ticked items in tomorrow's plan. A task due today gets tomorrow as its due day.
+- When tomorrow has no plan, these items wait in it. The app still asks how to plan the day: "Plan it for me" or "I plan it myself". Both keep the items.
+- After "Finish the day", the card does not show again that day.
+
+### Weekly review
+
+- The "Weekly review" card shows under the brief 7 days after the last review. The first one comes on a Friday, Saturday, or Sunday. "Weekly review" under the list opens it at any time. "Later" hides it until tomorrow.
+- First it asks if your goals are still right. Each goal shows how many items that served it you finished in the last 7 days. The goal of an item comes from the briefs and plans of the last 14 days.
+- Then it lists the open items with no change for 3 weeks (at most 30, oldest first). A change is an edit in AIfred, GitHub, or ClickUp, work on the timer, or an earlier pick. Emails and tasks that start later are not in the list.
+- For each item, pick one. Each pick has an Undo.
+  - "Do": the item goes into today's plan.
+  - "Plan": pick a later day. The item goes into that day's plan. Your own task also waits until that day (its start day).
+  - "Give to…": type who does it. The item goes on the "Waiting for" list. Your own task closes.
+  - "Drop": your own task closes. A GitHub or ClickUp item does not change there: AIfred only stops counting it in the brief and the reviews.
+  - A task that closes with "Give to…" or "Drop" is not finished work. No "task done" job starts, and its timer time is not kept.
+  - An item that you gave away or dropped counts again when it changes after the pick. For example, you open the task again, or the GitHub item has new activity.
+- The brief and the plan chat get your "Do" and "Plan" picks of the last 30 days. They also get each "Give to…" and "Drop" pick that still hides an open item.
+
 ## Check the app without a window on your screen
 
 ```bash

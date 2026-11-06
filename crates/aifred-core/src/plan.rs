@@ -29,7 +29,9 @@ pub struct PlanItem {
 pub struct DayPlan {
     /// "YYYY-MM-DD".
     pub day: String,
-    /// "ai": AIfred made the plan. "self": the user made it.
+    /// "ai": AIfred made the plan. "self": the user made it. REVIEW: a
+    /// review put items in a day with no plan (review.rs). The user did not
+    /// pick yet how to plan the day, so the app still asks.
     pub mode: String,
     /// The first item first.
     pub items: Vec<PlanItem>,
@@ -44,6 +46,9 @@ pub struct Estimate {
     /// "you" or "aifred".
     pub by: String,
 }
+
+/// The plan mode of a day that has only items from the reviews (DayPlan::mode).
+pub const REVIEW: &str = "review";
 
 /// The shortest and the longest time guess, in minutes.
 pub const MIN_MINUTES: u32 = 5;
@@ -112,10 +117,21 @@ pub fn set(
     strict: bool,
 ) -> anyhow::Result<DayPlan> {
     check_day(day)?;
-    if mode != "ai" && mode != "self" {
+    if mode != "ai" && mode != "self" && mode != REVIEW {
         bail!("the plan mode must be \"ai\" or \"self\", not \"{mode}\"");
     }
-    db::write(dir, |tx| {
+    db::write(dir, |tx| set_in(tx, day, mode, items, strict))
+}
+
+/// set(), in a change that is open. Also for the reviews (review.rs).
+pub(crate) fn set_in(
+    tx: &rusqlite::Transaction,
+    day: &str,
+    mode: &str,
+    items: Vec<PlanItem>,
+    strict: bool,
+) -> anyhow::Result<DayPlan> {
+    {
         let old: HashSet<String> = tx
             .query_row("SELECT items FROM day_plan WHERE day = ?1", [day], |r| {
                 r.get::<_, String>(0)
@@ -181,7 +197,22 @@ pub fn set(
             ],
         )?;
         Ok(plan)
-    })
+    }
+}
+
+/// The mode and the items of the plan of `day`, or None when the day has no plan.
+pub(crate) fn items_in(
+    c: &rusqlite::Connection,
+    day: &str,
+) -> anyhow::Result<Option<(String, Vec<PlanItem>)>> {
+    c.query_row(
+        "SELECT mode, items FROM day_plan WHERE day = ?1",
+        [day],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .optional()?
+    .map(|(mode, items)| Ok((mode, serde_json::from_str(&items)?)))
+    .transpose()
 }
 
 /// Removes the plan of `day`. The plan chat of the day stays.

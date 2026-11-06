@@ -4,6 +4,8 @@ import type * as api from "./api";
 import type { ChatMsg } from "./Chat";
 import type { Item, Schedule } from "./items";
 
+export type CardMode = "auto" | "open" | "hidden";
+
 export type ListState = "loading" | "ok" | "off" | string;
 
 /** A chat: its messages, and the work in progress. */
@@ -92,6 +94,13 @@ export type AppCtx = {
   startOver: () => void;
   writeBrief: () => void;
   toast: (text: string, undo?: () => void, error?: boolean) => void;
+  /** How each review card shows (Review.tsx). "auto": at its time. "open": you
+   * opened it with its button. "hidden": you closed it. It stays when you go to
+   * another page, and goes back to "auto" on a new day. */
+  reviewCards: { day: CardMode; week: CardMode };
+  setReviewCard: (card: "day" | "week", mode: CardMode) => void;
+  /** Loads the tasks, the plan, the goals, and the "waiting for" list again, after a change that touches them all. */
+  reload: () => void;
   goPlan: () => void;
 };
 

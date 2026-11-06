@@ -190,7 +190,17 @@ fn shorten(text: &str) -> String {
 }
 
 pub fn add(dir: &Path, n: NewWaiting, now: u64) -> anyhow::Result<Waiting> {
-    db::write(dir, |tx| {
+    db::write(dir, |tx| add_in(dir, tx, n, now))
+}
+
+/// add(), in a change that is open. Also for the weekly review (review.rs).
+pub(crate) fn add_in(
+    dir: &Path,
+    tx: &rusqlite::Transaction,
+    n: NewWaiting,
+    now: u64,
+) -> anyhow::Result<Waiting> {
+    {
         check_room(tx)?;
         let mut what = n.what.clone();
         let mut who = n.who.clone();
@@ -239,7 +249,7 @@ pub fn add(dir: &Path, n: NewWaiting, now: u64) -> anyhow::Result<Waiting> {
             rusqlite::params![what, who, since, follow_up, thread, sent_at, url, wait_for, now as i64],
         )?;
         get(tx, tx.last_insert_rowid())
-    })
+    }
 }
 
 pub fn update(dir: &Path, id: i64, ch: WaitingChange, now: u64) -> anyhow::Result<Waiting> {

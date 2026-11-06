@@ -23,6 +23,7 @@ pub mod memory;
 pub mod overview;
 pub mod plan;
 pub mod program;
+pub mod review;
 pub mod settings;
 pub mod side;
 pub mod summaries;

@@ -16,9 +16,15 @@ const homeBox = () => screen.getByRole("textbox", { name: "Add a task or ask AIf
 const homeForm = () => homeBox().closest(".composer") as HTMLElement;
 const today = () => dayOf(new Date());
 
-/** Starts the window. The brief does not write itself, unless the test sets auto_brief. */
+/** Starts the window. The brief does not write itself, unless the test sets auto_brief.
+ * The reviews of today are done, so their cards do not show, unless the test says else. */
 async function startApp(init: Parameters<typeof fakeBackend>[0] = {}) {
-  const fake = fakeBackend({ ...init, settings: { ...DEFAULT_SETTINGS, auto_brief: false, ...init.settings } });
+  const fake = fakeBackend({
+    dayReviews: { [today()]: [] },
+    weekReviews: [today()],
+    ...init,
+    settings: { ...DEFAULT_SETTINGS, auto_brief: false, ...init.settings },
+  });
   render(<App />);
   await screen.findByText("Claude (your login)"); // the first load is done
   return fake;
@@ -107,6 +113,134 @@ describe("home", () => {
     await waitFor(() => expect(fake.tasks[0].due).toBe(addDays(today(), 1)));
     await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(fake.tasks[0].due).toBe(today()));
+  });
+});
+
+describe("reviews", () => {
+  /** "HH:MM" `m` minutes from now, at most 23:59. */
+  const hhmm = (m: number) => {
+    const d = new Date(Date.now() + m * 60_000);
+    if (d.getDate() !== new Date().getDate()) return "23:59";
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+
+  it("the end-of-day check shows before the work day ends, and moves the ticked items to tomorrow", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const a = task("Send invoice", { done: true, done_at: now });
+    const b = task("Pay rent", { due: today() });
+    const c = task("Write notes");
+    const fake = await startApp({
+      tasks: [a, b, c],
+      dayReviews: {},
+      plans: { [today()]: { day: today(), mode: "self", items: [{ key: `task:${c.id}` }], updated: 1 } },
+      settings: { ...DEFAULT_SETTINGS, auto_brief: false, work_start: "00:00", work_end: hhmm(10) },
+    });
+    const card = await screen.findByRole("region", { name: "End of the day" });
+    expect(within(card).getByText("Send invoice")).toBeInTheDocument();
+    const rent = within(card).getByRole("checkbox", { name: "Move to tomorrow: Pay rent" });
+    const notes = within(card).getByRole("checkbox", { name: "Move to tomorrow: Write notes" });
+    expect(rent).toBeChecked();
+    await userEvent.click(notes);
+    await userEvent.click(within(card).getByRole("button", { name: "Finish the day" }));
+    const next = addDays(today(), 1);
+    await waitFor(() => expect(fake.plans[next]?.items).toEqual([{ key: `task:${b.id}` }]));
+    expect(fake.tasks.find((t) => t.id === b.id)!.due).toBe(next);
+    expect(await screen.findByText("Day finished. 1 item is in tomorrow's plan.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "End of the day" })).not.toBeInTheDocument();
+  });
+
+  it("End the day opens the check before its time, and Close hides it", async () => {
+    await startApp({ tasks: [task("Pay rent", { due: today() })], dayReviews: {}, settings: { ...DEFAULT_SETTINGS, auto_brief: false, work_end: "23:59" } });
+    await userEvent.click(screen.getByRole("button", { name: "End the day" }));
+    const card = await screen.findByRole("region", { name: "End of the day" });
+    expect(within(card).getByText("Nothing finished today.")).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("region", { name: "End of the day" })).not.toBeInTheDocument();
+  });
+
+  it("the weekly review checks the goals and takes a pick for each item that did not move, with an undo", async () => {
+    const t = task("Update the docs");
+    const d = task("Old idea");
+    const gh = githubItem(5, "assigned", "Old bug");
+    const stale = (key: string, title: string, place = "") => ({ key, title, place, last: 1, days: 30 });
+    const goals = [
+      { id: 980, text: "Ship 2.0", created: 1, updated: 1 },
+      { id: 981, text: "Hire a designer", created: 1, updated: 1 },
+    ];
+    const fake = await startApp({
+      tasks: [t, d],
+      github: [gh],
+      goals: { goals, checked: 1, stale: false },
+      goalDone: { 980: 2 },
+      weekReviews: [addDays(today(), -7)],
+      stale: [stale(`task:${t.id}`, t.title), stale(`task:${d.id}`, d.title), stale(`github:${gh.id}`, gh.title, "GitHub acme/shop")],
+    });
+    const card = await screen.findByRole("region", { name: "Weekly review" });
+    expect(within(card).getByText("2 items done this week")).toBeInTheDocument();
+    expect(within(card).getByText("Nothing done for it this week")).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Still right" }));
+    await waitFor(() => expect(fake.calls.some((c) => c.cmd === "confirm_goals")).toBe(true));
+
+    // Plan: the task waits until that day, and goes into its plan. Undo puts it back.
+    const row = (title: string) => within(card).getByText(title).closest("li") as HTMLElement;
+    await userEvent.click(within(row("Update the docs")).getByRole("button", { name: "Plan" }));
+    const day = addDays(today(), 3);
+    fireEvent.change(within(card).getByLabelText("Day for: Update the docs"), { target: { value: day } });
+    await userEvent.click(within(card).getByRole("button", { name: "OK" }));
+    await waitFor(() => expect(fake.tasks[0].start).toBe(day));
+    expect(fake.plans[day].items).toEqual([{ key: `task:${t.id}` }]);
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.tasks[0].start).toBe(null));
+    expect(fake.plans[day], "the pick made the plan, so the undo takes it away").toBeUndefined();
+    expect(await within(card).findByText("Update the docs")).toBeInTheDocument();
+
+    // Give to someone: it goes on the waiting-for list. GitHub does not change.
+    await userEvent.click(within(row("Old bug")).getByRole("button", { name: "Give to…" }));
+    await userEvent.type(within(card).getByRole("textbox", { name: "Who does it: Old bug" }), "Ana{Enter}");
+    await waitFor(() => expect(fake.waiting.map((w) => [w.what, w.who])).toEqual([["Old bug", "Ana"]]));
+    expect(fake.github).toHaveLength(1);
+    await waitFor(() => expect(within(card).queryByText("Old bug")).not.toBeInTheDocument());
+
+    // Drop closes a local task.
+    await userEvent.click(within(row("Old idea")).getByRole("button", { name: "Drop" }));
+    await waitFor(() => expect(fake.tasks[1].done).toBe(true));
+
+    await userEvent.click(within(card).getByRole("button", { name: "Finish the review" }));
+    await waitFor(() => expect(fake.weekReviews).toContain(today()));
+    expect(await screen.findByText(/Weekly review done. The next one is on/)).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Weekly review" })).not.toBeInTheDocument();
+  });
+
+  it("a pick brings in the next item when the review has more items than it shows", async () => {
+    const a = task("First old task");
+    const b = task("Second old task");
+    const stale = (t: ReturnType<typeof task>) => ({ key: `task:${t.id}`, title: t.title, place: "", last: 1, days: 30 });
+    await startApp({ tasks: [a, b], weekReviews: [addDays(today(), -7)], stale: [stale(a), stale(b)], staleMax: 1 });
+    const card = await screen.findByRole("region", { name: "Weekly review" });
+    expect(within(card).getByText("1 more. They come in the next review.")).toBeInTheDocument();
+    expect(within(card).queryByText("Second old task")).not.toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Do" }));
+    expect(await within(card).findByText("Second old task")).toBeInTheDocument();
+    expect(within(card).queryByText("First old task")).not.toBeInTheDocument();
+    expect(within(card).queryByText(/more\. They come/)).not.toBeInTheDocument();
+  });
+
+  it("a plan that only a review made still asks how to plan the day, and keeps its items", async () => {
+    const t = task("Moved from yesterday");
+    const fake = await startApp({ tasks: [t], plans: { [today()]: { day: today(), mode: "review", items: [{ key: `task:${t.id}` }], updated: 1 } } });
+    expect(screen.getByText("No plan for today yet.")).toBeInTheDocument();
+    expect(screen.getByText(/Your review put 1 item in it\./)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "I plan it myself" }));
+    await waitFor(() => expect(fake.plans[today()]).toMatchObject({ mode: "self", items: [{ key: `task:${t.id}` }] }));
+  });
+
+  it("the weekly review does not show when it is not due, and its button opens it", async () => {
+    await startApp();
+    expect(screen.queryByRole("region", { name: "Weekly review" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Weekly review" }));
+    const card = await screen.findByRole("region", { name: "Weekly review" });
+    expect(within(card).getByText(/Nothing is stuck/)).toBeInTheDocument();
+    expect(within(card).getByText(/You have no goals/)).toBeInTheDocument();
   });
 });
 

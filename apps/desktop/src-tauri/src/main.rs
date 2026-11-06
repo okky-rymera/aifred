@@ -33,6 +33,7 @@ use aifred_core::jobs::{Job, JobChange, Run};
 use aifred_core::learn::{self, Corrected};
 use aifred_core::memory::Fact;
 use aifred_core::plan::{DayPlan, Estimate, PlanItem};
+use aifred_core::review::{self, DayCheck, Pick, WeekReview};
 use aifred_core::settings::{self, Settings};
 use aifred_core::side::SideTurn;
 use aifred_core::tasks::{Task, TaskFields};
@@ -1219,6 +1220,52 @@ async fn undo_correction(app: State<'_, App>, id: i64) -> CmdResult<()> {
     blocking(&app, move |a| learn::undo(&a.dir, id)).await
 }
 
+/// The end-of-day check of `day` (review.rs).
+#[tauri::command]
+async fn day_check(app: State<'_, App>, day: String) -> CmdResult<DayCheck> {
+    blocking(&app, move |a| review::day_check(&a.dir, &day)).await
+}
+
+/// The user finished the end-of-day check. The items in `moved` go into the next day's plan.
+#[tauri::command]
+async fn finish_day(app: State<'_, App>, day: String, moved: Vec<String>) -> CmdResult<DayCheck> {
+    blocking(&app, move |a| {
+        review::finish_day(&a.dir, &day, &moved, now())
+    })
+    .await
+}
+
+/// The weekly review on `today` (review.rs).
+#[tauri::command]
+async fn week_review(app: State<'_, App>, today: String) -> CmdResult<WeekReview> {
+    blocking(&app, move |a| review::week(&a.dir, &today, now())).await
+}
+
+#[tauri::command]
+async fn finish_week_review(app: State<'_, App>, today: String) -> CmdResult<WeekReview> {
+    blocking(&app, move |a| review::finish_week(&a.dir, &today, now())).await
+}
+
+/// The user's pick for an item in the weekly review: "do", "plan", "delegate", or "drop".
+#[tauri::command]
+async fn review_pick(
+    app: State<'_, App>,
+    key: String,
+    pick: String,
+    note: String,
+    today: String,
+) -> CmdResult<Pick> {
+    blocking(&app, move |a| {
+        review::pick(&a.dir, &key, &pick, &note, &today, now())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn undo_review_pick(app: State<'_, App>, id: i64) -> CmdResult<()> {
+    blocking(&app, move |a| review::undo_pick(&a.dir, id, now())).await
+}
+
 /// The item that the user works on now (worktime.rs).
 #[tauri::command]
 async fn work_running(app: State<'_, App>) -> CmdResult<Option<Running>> {
@@ -1381,6 +1428,12 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         set_estimate,
         correct_brief,
         undo_correction,
+        day_check,
+        finish_day,
+        week_review,
+        finish_week_review,
+        review_pick,
+        undo_review_pick,
         work_running,
         start_work,
         stop_work,
@@ -1975,6 +2028,58 @@ mod tests {
         let g = call(&win, "remove_goal", json!({ "id": id })).unwrap();
         assert_eq!(g["goals"], json!([]));
         assert!(call(&win, "add_goal", json!({ "text": " " })).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn review_commands_move_items_and_take_picks_back() {
+        let (_app, win, dir) = window("review");
+        let today = aifred_core::plan::today();
+        let t = call(
+            &win,
+            "add_task",
+            json!({ "task": { "title": "Pay rent", "due": today } }),
+        )
+        .unwrap();
+        let key = format!("task:{}", t["id"].as_str().unwrap());
+        let c = call(&win, "day_check", json!({ "day": today })).unwrap();
+        assert_eq!(c["left"][0]["key"], json!(key));
+        assert_eq!(c["finished"], false);
+        let c = call(&win, "finish_day", json!({ "day": today, "moved": [key] })).unwrap();
+        assert_eq!(c["moved"], json!([key]));
+        let next = review::next_day(&today).unwrap();
+        assert_eq!(
+            call(&win, "day_plan", json!({ "day": next })).unwrap()["items"][0]["key"],
+            json!(key)
+        );
+
+        let w = call(&win, "week_review", json!({ "today": today })).unwrap();
+        assert_eq!(w["items"], json!([]), "a new task moved today");
+        let p = call(
+            &win,
+            "review_pick",
+            json!({ "key": key, "pick": "delegate", "note": "Ana", "today": today }),
+        )
+        .unwrap();
+        assert_eq!(
+            call(&win, "waiting_items", json!({})).unwrap()[0]["who"],
+            "Ana"
+        );
+        call(&win, "undo_review_pick", json!({ "id": p["id"] })).unwrap();
+        assert_eq!(call(&win, "waiting_items", json!({})).unwrap(), json!([]));
+        assert!(
+            call(
+                &win,
+                "review_pick",
+                json!({ "key": key, "pick": "later", "note": "", "today": today })
+            )
+            .is_err()
+        );
+        let w = call(&win, "finish_week_review", json!({ "today": today })).unwrap();
+        assert_eq!(
+            (w["due"].clone(), w["last"].clone()),
+            (json!(false), json!(today))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

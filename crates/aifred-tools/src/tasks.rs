@@ -225,7 +225,11 @@ impl TaskTools {
         Ok(serde_json::json!({
             "day": day,
             "work_day": settings::day_text(&s),
-            "made_by": p.as_ref().map(|p| if p.mode == "ai" { "AIfred" } else { "the user" }),
+            "made_by": p.as_ref().map(|p| match p.mode.as_str() {
+                "ai" => "AIfred",
+                aifred_core::plan::REVIEW => "the reviews: items that the user moved to this day. The user did not plan the day yet",
+                _ => "the user",
+            }),
             "items": items,
             "planned_minutes": planned,
             "work_minutes": cal["free_minutes"],
@@ -239,7 +243,7 @@ impl TaskTools {
 #[tool_router]
 impl TaskTools {
     #[tool(
-        description = "Everything on the user's plate in one call: the user's goals, the open local to-do tasks, the open GitHub items (assigned issues, review requests, and the user's own pull requests), the open ClickUp tasks, the calendar events of the next 7 days when the calendar is connected, the emails that wait for the user's answer and the emails where the user waits for an answer when Gmail is connected, and the user's waiting-for list. Each item has a short summary of its description. Use this first when the user asks what to do, what is open, or for a plan. Then use item_details or task_details only for the few items that need a closer look. The goals (at most 5) say what matters most to the user now: an item that serves a goal is more important. fetched_at is when each list came from GitHub or ClickUp (Unix seconds)."
+        description = "Everything on the user's plate in one call: the user's goals, the open local to-do tasks, the open GitHub items (assigned issues, review requests, and the user's own pull requests), the open ClickUp tasks, the calendar events of the next 7 days when the calendar is connected, the emails that wait for the user's answer and the emails where the user waits for an answer when Gmail is connected, and the user's waiting-for list. Each item has a short summary of its description. Use this first when the user asks what to do, what is open, or for a plan. Then use item_details or task_details only for the few items that need a closer look. The goals (at most 5) say what matters most to the user now: an item that serves a goal is more important. fetched_at is when each list came from GitHub or ClickUp (Unix seconds). review_picks are the user's picks in the weekly review: an item with drop or delegate does not need the user; an item with plan waits until plan_day."
     )]
     async fn overview(&self) -> Result<CallToolResult, ErrorData> {
         // Both downloads at the same time: each can take some seconds.
