@@ -249,6 +249,30 @@ export const brief = (day: string) => invoke<Brief | null>("brief", { day });
 export const writeBrief = (day: string) => invoke<Brief>("write_brief", { day });
 export const itemMeta = () => invoke<ItemMeta[]>("item_meta");
 
+/** "not_today": the item does not need you today. "wrong_priority": the brief ranked it too high. */
+export type CorrectionKind = "not_today" | "wrong_priority";
+export type Correction = { id: number; key: string; kind: CorrectionKind; day: string; title: string; place: string; ts: number };
+/** `learned`: the memory fact that AIfred saved from this and earlier corrections. */
+export type Corrected = { correction: Correction; learned?: Fact };
+/** Your correction of the brief of `day` (learn.rs). The brief stops showing a reason for the item that day. */
+export const correctBrief = (key: string, kind: CorrectionKind, day: string) => invoke<Corrected>("correct_brief", { key, kind, day });
+/** Removes a correction. A fact that it made is forgotten. */
+export const undoCorrection = (id: number) => invoke<void>("undo_correction", { id });
+
+/** The item that you work on now (worktime.rs). `before`: seconds from earlier sessions of the item. */
+export type Running = { key: string; title: string; started: number; before: number };
+/** A finished item: the real time next to the time guess, in minutes.
+ * `minutes` 0: only forgotten timers. `skipped`: the timers of more than 10 hours, which do not count. */
+export type WorkDone = { key: string; title: string; minutes: number; guess: number | null; skipped: number };
+export const workRunning = () => invoke<Running | null>("work_running");
+/** Starts work on an item. The work on another item stops. */
+export const startWork = (key: string) => invoke<Running>("start_work", { key });
+export const stopWork = () => invoke<void>("stop_work");
+/** The item is finished. null: it has no work time. */
+export const finishWork = (key: string) => invoke<WorkDone | null>("finish_work", { key });
+/** The item is open again: its real time does not count. */
+export const unfinishWork = (key: string) => invoke<void>("unfinish_work", { key });
+
 /** When a job runs. Times are local, "YYYY-MM-DDTHH:MM". */
 export type Trigger =
   | { kind: "once"; at: string }
@@ -313,7 +337,10 @@ export const tasks = () => invoke<Task[]>("tasks");
 export const addTask = (title: string, notes = "") => invoke<Task>("add_task", { task: { title, notes } });
 /** Adds a task with all the fields in `fields`. The title is necessary. */
 export const createTask = (fields: TaskChanges & { title: string }) => invoke<Task>("add_task", { task: fields });
-export const setTaskDone = (id: string, done: boolean) => invoke<Task>("set_task_done", { id, done });
+/** `work`: the real time that AIfred kept when the task is done now. null: no work time, or the task is open again. */
+export type TaskDone = { task: Task; work: WorkDone | null };
+/** The backend ends the work of a task that is done, and keeps its real time (tasks.rs). */
+export const setTaskDone = (id: string, done: boolean) => invoke<TaskDone>("set_task_done", { id, done });
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
 /** One event of the user's Google Calendar (calendar.rs). Times in Unix seconds. */
 export type CalEvent = {

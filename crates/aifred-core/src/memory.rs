@@ -69,6 +69,32 @@ fn get(c: &Connection, id: i64) -> anyhow::Result<Fact> {
     }
 }
 
+/// Adds one fact at the end, in a change that is open.
+pub(crate) fn add_in(
+    tx: &Transaction,
+    text: &str,
+    added_by: &str,
+    core: bool,
+) -> anyhow::Result<Fact> {
+    let text = clean(text)?;
+    tx.execute(
+        "INSERT INTO memory (text, style, pos, core, added_by, created, updated)
+         VALUES (?1, 'item', (SELECT COALESCE(MAX(pos), -1) + 1 FROM memory), ?2, ?3, ?4, ?4)",
+        rusqlite::params![text, core, added_by, now() as i64],
+    )?;
+    get(tx, tx.last_insert_rowid())
+}
+
+/// Takes a fact out of use, in a change that is open. A fact that is
+/// already forgotten keeps its time.
+pub(crate) fn forget_in(tx: &Transaction, id: i64) -> anyhow::Result<()> {
+    tx.execute(
+        "UPDATE memory SET forgotten = COALESCE(forgotten, ?2), updated = ?2 WHERE id = ?1",
+        rusqlite::params![id, now() as i64],
+    )?;
+    Ok(())
+}
+
 /// One line of text: a line break would make two facts in the old text form.
 fn clean(text: &str) -> anyhow::Result<String> {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -164,15 +190,7 @@ impl MemoryStore {
 
     /// Adds one fact at the end.
     pub fn add(&self, text: &str, added_by: &str, core: bool) -> anyhow::Result<Fact> {
-        let text = clean(text)?;
-        db::write(&self.dir, |tx| {
-            tx.execute(
-                "INSERT INTO memory (text, style, pos, core, added_by, created, updated)
-                 VALUES (?1, 'item', (SELECT COALESCE(MAX(pos), -1) + 1 FROM memory), ?2, ?3, ?4, ?4)",
-                rusqlite::params![text, core, added_by, now() as i64],
-            )?;
-            get(tx, tx.last_insert_rowid())
-        })
+        db::write(&self.dir, |tx| add_in(tx, text, added_by, core))
     }
 
     /// Changes the text of a fact. A "text" fact (a block from memory.md,

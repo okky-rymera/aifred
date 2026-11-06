@@ -65,6 +65,15 @@ export type AppCtx = {
   setModel: (box: "main" | "plan" | "item", m: string | null) => void;
 
   toggleDone: (i: Item) => void;
+  /** The item that you work on now, or null. */
+  work: api.Running | null;
+  /** Starts work on an item. The work on another item stops. */
+  startWork: (key: string) => void;
+  stopWork: () => void;
+  /** The "Done" button of the work timer, for the item `key`. */
+  finishItem: (key: string) => void;
+  /** You say that the brief is wrong about an item. */
+  correctBrief: (i: Item, kind: api.CorrectionKind) => void;
   addTask: (fields: api.TaskChanges & { title: string }) => Promise<boolean>;
   /** The mode of the home box: a message to AIfred, or a new task with no AI call. */
   homeMode: "ask" | "task";

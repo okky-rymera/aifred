@@ -18,6 +18,7 @@ pub mod history;
 mod import;
 pub mod items;
 pub mod jobs;
+pub mod learn;
 pub mod memory;
 pub mod overview;
 pub mod plan;
@@ -30,5 +31,6 @@ pub mod text;
 pub mod update;
 pub mod uploads;
 pub mod waiting;
+pub mod worktime;
 
 pub use assistant::{Answer, Assistant, default_data_dir};

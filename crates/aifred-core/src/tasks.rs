@@ -387,6 +387,16 @@ impl TaskStore {
     }
 
     pub fn set_done(&self, id: &str, done: bool) -> anyhow::Result<Task> {
+        Ok(self.set_done_work(id, done)?.0)
+    }
+
+    /// set_done(), and the real time that AIfred kept when the task is done
+    /// now. None: the task has no work time, or it is not done now.
+    pub fn set_done_work(
+        &self,
+        id: &str,
+        done: bool,
+    ) -> anyhow::Result<(Task, Option<crate::worktime::Done>)> {
         db::write(&self.dir, |tx| {
             let done_at = done.then(|| now() as i64);
             let was_done: Option<bool> = tx
@@ -400,14 +410,22 @@ impl TaskStore {
                 rusqlite::params![done, done_at, id],
             )?;
             // A task that is done now starts the jobs that wait for it (jobs.rs).
+            // Its work stops and AIfred keeps its real time (worktime.rs), also
+            // when the AI closes the task in a chat.
+            let key = format!("task:{id}");
+            let mut work = None;
             if done && !was_done {
                 crate::jobs::record_event(tx, crate::jobs::TASK_DONE)?;
+                work = crate::worktime::finish_in(tx, &key, now())?;
+            } else if !done && was_done {
+                crate::worktime::unfinish_in(tx, &key)?;
             }
-            Ok(tx.query_row(
+            let task = tx.query_row(
                 &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
                 [id],
                 from_row,
-            )?)
+            )?;
+            Ok((task, work))
         })
     }
 
@@ -444,6 +462,7 @@ impl TaskStore {
             if tx.execute("DELETE FROM task WHERE id = ?1", [id])? == 0 {
                 bail!("no task with id {id}");
             }
+            crate::worktime::forget_in(tx, &format!("task:{id}"))?;
             Ok(())
         })
     }

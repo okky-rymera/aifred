@@ -156,8 +156,8 @@ pub struct Assistant<B: Backend> {
 /// (no prompt cache hit). The current time goes into each message.
 /// `small` is from memory_is_small: ask checks it once for each message.
 fn system_prompt(dir: &Path, small: bool) -> anyhow::Result<String> {
-    // A large memory: only the core facts, so a new fact that is not
-    // core does not change this text.
+    // A large memory: only the core facts, so a new fact that is not core
+    // does not change this text.
     let memory = MemoryStore::new(dir);
     let facts = if small {
         memory.all_text()?
@@ -911,8 +911,18 @@ impl<B: Backend> Assistant<B> {
                 for n in [cal_note, mail_note].into_iter().flatten() {
                     day_text.push_str(&format!(". {n}"));
                 }
-                let prompt =
-                    crate::brief::prompt(&overview, &Self::now(), &day_text, &plan, &needs);
+                // Only the core facts: the learned facts (learn.rs) are core,
+                // and the other facts rarely change a ranking. So a large
+                // memory does not make each brief cost more.
+                let facts = MemoryStore::new(dir).core_text()?;
+                let prompt = crate::brief::prompt(
+                    &overview,
+                    &Self::now(),
+                    &day_text,
+                    &plan,
+                    &needs,
+                    &facts,
+                );
                 Ok((prompt, known, goals))
             })
             .await?;
@@ -929,10 +939,14 @@ impl<B: Backend> Assistant<B> {
             why: p.why,
             goal: p.goal,
         };
-        let b = brief.clone();
-        self.off_thread(move |dir| crate::brief::save(dir, &b, &minutes))
-            .await?;
-        Ok(brief)
+        // The saved brief, read again: it leaves out the items that the user
+        // corrected today (learn.rs), also when the AI named them.
+        let d = day.to_string();
+        self.off_thread(move |dir| {
+            crate::brief::save(dir, &brief, &minutes)?;
+            Ok(crate::brief::get(dir, &d)?.unwrap_or(brief))
+        })
+        .await
     }
 }
 

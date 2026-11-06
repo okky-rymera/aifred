@@ -9,6 +9,7 @@ import type {
   CalEvent,
   CalendarList,
   ClickupItem,
+  Correction,
   DayPlan,
   Estimate,
   Fact,
@@ -22,6 +23,7 @@ import type {
   Mail,
   MailList,
   ProgressEvent,
+  Running,
   Settings,
   SideTurn,
   Task,
@@ -29,6 +31,7 @@ import type {
   Turn,
   UpdateStatus,
   Waiting,
+  WorkDone,
 } from "../api";
 
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void, args: Record<string, any>) => Promise<Answer> | Answer;
@@ -116,6 +119,18 @@ export type Fake = {
   uploads: FileRef[];
   /** The name of the next file that the window sends. The fake cannot see the header. */
   uploadName: string;
+  /** Corrections of the brief, like learn.rs. */
+  corrections: Correction[];
+  /** Like the learned table: the fact id, the time, and the text that AIfred wrote, by place. A place stays after its fact is forgotten. */
+  learned: Record<string, { fact: number; ts: number; text: string }>;
+  /** Work sessions, like worktime.rs. `ended` null: the running one. */
+  sessions: { key: string; started: number; ended: number | null }[];
+  /** Finished items with a real time, by key. */
+  workDone: Record<string, WorkDone>;
+  /** When set, finish_work fails with this text. */
+  failFinishWork?: string;
+  /** The clock of the work timer, in Unix seconds. A test can move it. */
+  now: () => number;
 };
 
 let nextId = 1;
@@ -290,6 +305,11 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     details: {},
     uploads: [],
     uploadName: "file.txt",
+    corrections: [],
+    learned: {},
+    sessions: [],
+    workDone: {},
+    now: nowSecs,
     ...init,
   };
 
@@ -325,6 +345,51 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       const t = fake.tasks.find((t) => t.id === id);
       if (!t) throw `no task with id ${id}`;
       return t;
+    };
+    /** Like items::title_place in Rust. */
+    const titlePlace = (key: string): [string, string] | null => {
+      const t = fake.tasks.find((t) => `task:${t.id}` === key);
+      if (t) return [t.title, t.tags[0] ? `Your tasks with #${t.tags[0]}` : ""];
+      const g = fake.github.find((g) => `github:${g.id}` === key);
+      if (g) return [g.title, `GitHub ${g.repo}`];
+      const c = fake.clickup.find((c) => `clickup:${c.id}` === key);
+      if (c) return [c.title, `ClickUp ${c.workspace} / ${c.list}`];
+      const m = fake.mail?.reply.find((m) => `gmail:${m.id}` === key);
+      // Like items::title_place: an item with no known place has the place "".
+      const p = m?.people[0]?.trim();
+      if (m) return [m.subject, p ? `Email from ${p}` : ""];
+      return null;
+    };
+    /** Like learn.rs: the different items with a "wrong priority" correction from `place`, in the 60 days before `now`. */
+    const counted = (place: string, now: number) =>
+      new Set(fake.corrections.filter((x) => x.kind === "wrong_priority" && x.place === place && x.ts >= now - 60 * 86400).map((x) => x.key)).size;
+    /** Like learn::fact_text. */
+    const learnedText = (place: string, n: number) =>
+      `${place}: these items are less important to the user than they look. Rank them lower. (AIfred learned this from ${n} "wrong priority" corrections in the brief.)`;
+    const running = (): Running | null => {
+      const r = fake.sessions.find((x) => x.ended === null);
+      if (!r) return null;
+      // Like worktime::running_in: a forgotten timer (more than 10 hours) does not count.
+      const before = fake.sessions
+        .filter((x) => x.key === r.key && x.ended !== null && x.ended - x.started <= 10 * 3600)
+        .reduce((n, x) => n + x.ended! - x.started, 0);
+      return { key: r.key, title: titlePlace(r.key)?.[0] ?? r.key, started: r.started, before };
+    };
+    /** Like worktime::finish_in in Rust. A session of more than 10 hours does not count. */
+    const finishWork = (key: string): WorkDone | null => {
+      const r = fake.sessions.find((x) => x.ended === null);
+      if (r && r.key === key) r.ended = fake.now();
+      let secs = 0;
+      let skipped = 0;
+      for (const x of fake.sessions.filter((x) => x.key === key && x.ended !== null)) {
+        const n = x.ended! - x.started;
+        if (n > 10 * 3600) skipped++;
+        else secs += n;
+      }
+      if (!secs && !skipped) return null;
+      const d: WorkDone = { key, title: titlePlace(key)?.[0] ?? key, minutes: secs ? Math.max(1, Math.round(secs / 60)) : 0, guess: fake.estimates[key]?.minutes ?? null, skipped };
+      if (secs) fake.workDone[key] = d;
+      return d;
     };
     switch (cmd) {
       case "info":
@@ -419,13 +484,18 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       }
       case "set_task_done": {
         const t = find(args.id);
+        // Like tasks.rs: the work of a task ends with it, or opens again.
+        let work: WorkDone | null = null;
+        if (args.done && !t.done) work = finishWork(`task:${t.id}`);
+        else if (!args.done && t.done) delete fake.workDone[`task:${t.id}`];
         t.done = args.done;
         t.done_at = args.done ? nowSecs() : null;
-        return t;
+        return { task: t, work: structuredClone(work) };
       }
       case "delete_task":
         find(args.id);
         fake.tasks = fake.tasks.filter((t) => t.id !== args.id);
+        fake.sessions = fake.sessions.filter((x) => x.key !== `task:${args.id}`);
         return null;
       case "google_status":
         return structuredClone(fake.google);
@@ -644,8 +714,70 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         if (args.minutes == null) delete fake.estimates[args.key];
         else fake.estimates[args.key] = { minutes: Math.min(600, Math.max(5, args.minutes)), by: "you" };
         return null;
-      case "brief":
-        return structuredClone(fake.briefs[args.day] ?? null);
+      case "brief": {
+        // Like brief::get: an item corrected on that day has no reason and no goal.
+        const b = structuredClone(fake.briefs[args.day] ?? null);
+        for (const c of fake.corrections.filter((c) => c.day === args.day)) {
+          if (b) delete b.why[c.key];
+          if (b?.goal) delete b.goal[c.key];
+        }
+        return b;
+      }
+      case "correct_brief": {
+        const item = titlePlace(args.key);
+        if (!item) throw `AIfred does not know the item ${args.key}`;
+        const old = fake.corrections.find((c) => c.key === args.key && c.kind === args.kind && c.day === args.day);
+        if (old) return { correction: structuredClone(old) };
+        const c: Correction = { id: nextId++, key: args.key, kind: args.kind, day: args.day, title: item[0], place: item[1], ts: nowSecs() };
+        fake.corrections.push(c);
+        // Like learn.rs: 3 different items from one place in 60 days make one
+        // fact. AIfred learns each place once.
+        if (c.kind === "wrong_priority" && c.place && !fake.learned[c.place]) {
+          const n = counted(c.place, c.ts);
+          if (n >= 3) {
+            const f = fact(learnedText(c.place, n), { added_by: "aifred" });
+            fake.memory.push(f);
+            fake.learned[c.place] = { fact: f.id, ts: c.ts, text: f.text };
+            return { correction: structuredClone(c), learned: structuredClone(f) };
+          }
+        }
+        return { correction: structuredClone(c) };
+      }
+      case "undo_correction": {
+        const c = fake.corrections.find((x) => x.id === args.id);
+        if (!c) throw `no correction with id ${args.id}`;
+        fake.corrections = fake.corrections.filter((x) => x !== c);
+        // Like learn::undo: the fact goes when fewer than 3 corrections are
+        // left, and the user did not change or forget it.
+        const l = c.kind === "wrong_priority" && c.place ? fake.learned[c.place] : undefined;
+        if (l && counted(c.place, l.ts) < 3) {
+          const f = fake.memory.find((x) => x.id === l.fact);
+          if (f && f.forgotten === null && f.text === l.text) {
+            f.forgotten = nowSecs();
+            delete fake.learned[c.place];
+          }
+        }
+        return null;
+      }
+      case "work_running":
+        return running();
+      case "start_work": {
+        if (!titlePlace(args.key)) throw `AIfred does not know the item ${args.key}`;
+        const r = fake.sessions.find((x) => x.ended === null);
+        if (r?.key === args.key) return running();
+        if (r) r.ended = fake.now();
+        fake.sessions.push({ key: args.key, started: fake.now(), ended: null });
+        return running();
+      }
+      case "stop_work":
+        for (const x of fake.sessions) if (x.ended === null) x.ended = fake.now();
+        return null;
+      case "finish_work":
+        if (fake.failFinishWork) throw fake.failFinishWork;
+        return structuredClone(finishWork(args.key));
+      case "unfinish_work":
+        delete fake.workDone[args.key];
+        return null;
       case "write_brief": {
         const b = await fake.onWriteBrief(args.day);
         fake.briefs[args.day] = b;

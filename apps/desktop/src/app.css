@@ -117,6 +117,20 @@ body { background: var(--win); color: var(--ink); font-family: var(--f-body); fo
 .tagc { color: var(--muted); }
 .tagc.late { color: var(--red); }
 .why { font-size: 12.5px; color: var(--muted); display: flex; gap: 6px; }
+.t-col { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.why-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.why-line .fix { display: flex; gap: 2px; }
+.why-line .fix .linkbtn { color: var(--faint); font-size: 11.5px; padding: 0 4px; }
+.why-line .fix .linkbtn:hover, .why-line .fix .linkbtn:focus-visible { color: var(--amber-ink); }
+.planned.working { color: var(--green); }
+.workbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--raise); font-size: 13px; }
+.workbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); flex: none; animation: workpulse 2s ease-in-out infinite; }
+.workbar .txt { min-width: 0; flex: 1 1 220px; display: flex; flex-direction: column; }
+.workbar .txt small { color: var(--muted); font-size: 12px; }
+.workbar .ttl { padding: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
+.workbar .btns { display: flex; gap: 6px; }
+@keyframes workpulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .workbar .dot { animation: none; } }
 .why::before { content: "✦"; color: var(--amber); font-size: 10px; margin-top: 2px; }
 .pill { font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 99px; background: var(--pane); border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .pill.urgent { background: var(--red-soft); color: var(--red); border-color: transparent; }

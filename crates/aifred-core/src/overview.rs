@@ -10,6 +10,10 @@
 //! When Gmail is connected, it has the emails that wait for the user's
 //! answer, the emails where the user waits for an answer (gmail.rs), and
 //! the "waiting for" list (waiting.rs).
+//!
+//! The overview also has what AIfred learned from the user: the recent
+//! corrections of the brief (learn.rs) and the real times of finished work
+//! next to the time guesses (worktime.rs).
 
 use std::path::Path;
 
@@ -127,6 +131,16 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             .collect();
         if !waiting.is_empty() {
             out["waiting_for"] = waiting.into();
+        }
+
+        // What AIfred learned from the user: the corrections of the brief
+        // (learn.rs) and the real times of finished work (worktime.rs).
+        let corrections = crate::learn::for_ai(c, crate::files::now())?;
+        if !corrections.is_empty() {
+            out["corrections"] = corrections.into();
+        }
+        if let Some(t) = crate::worktime::for_ai(c)? {
+            out["time_history"] = t;
         }
 
         if let Some(account) = clickup_account {

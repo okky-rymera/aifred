@@ -1,6 +1,6 @@
 // Home: the brief from AIfred, the day plan in one line, and the list in
 // groups. The box at the bottom adds a task or asks AIfred.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
@@ -84,39 +84,89 @@ export function DueChip({ day }: { day: string | null }) {
   return <span className={`due ${d.cls}`}>{d.text}</span>;
 }
 
+/** The reason from the brief, and two buttons to correct it. AIfred learns from the corrections. */
+function Why({ item: i }: { item: Item }) {
+  const { correctBrief } = useApp();
+  return (
+    <div className="why-line">
+      <span className="why">
+        {i.why} <GoalTag goal={i.goal} ranked />
+      </span>
+      <span className="fix">
+        <button
+          className="linkbtn"
+          aria-label={`Not today: ${i.title}`}
+          title="This does not need you today. The brief stops counting it for today."
+          onClick={() => correctBrief(i, "not_today")}
+        >
+          Not today
+        </button>
+        <button
+          className="linkbtn"
+          aria-label={`Wrong priority: ${i.title}`}
+          title="The brief ranked this too high. AIfred ranks it lower from now on, and learns from repeated corrections."
+          onClick={() => correctBrief(i, "wrong_priority")}
+        >
+          Wrong priority
+        </button>
+      </span>
+    </div>
+  );
+}
+
+/** Minutes of work on the running item: the earlier sessions and this one. */
+export function workMinutes(w: api.Running, nowSecs = Date.now() / 1000): number {
+  return Math.max(0, Math.round((w.before + nowSecs - w.started) / 60));
+}
+
+/** Draws the parent again every 15 seconds while `on` is true, so a timer moves. */
+function useTick(on: boolean) {
+  const [, setN] = useState(0);
+  useEffect(() => {
+    if (!on) return;
+    const t = setInterval(() => setN((n) => n + 1), 15_000);
+    return () => clearInterval(t);
+  }, [on]);
+}
+
 function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: boolean }) {
-  const { sel, open, sched, addToPlan, tomorrow, today } = useApp();
+  const { sel, open, sched, addToPlan, tomorrow, today, work, startWork } = useApp();
   const i = props.item;
   const at = sched.at[i.key];
   const inPlan = at !== undefined;
   const acts = !i.done && !props.noActs;
+  const working = work?.key === i.key && !i.done;
+  useTick(working);
   const sub = i.task?.checklist.length ? `${i.task.checklist.filter((c) => c.done).length}/${i.task.checklist.length} steps` : null;
   return (
     <li className={`row${i.done ? " done" : ""}${sel === i.key ? " sel" : ""}`} id={`row-${i.key}`}>
       <Check item={i} />
-      <div
-        className="t-main"
-        role="button"
-        tabIndex={0}
-        aria-label={`Open details: ${i.title}`}
-        onClick={() => open(i.key)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            open(i.key);
-          }
-        }}
-      >
-        <span className="t-title">{i.title}</span>
-        <SrcLine item={i} extra={sub && <span>{sub}</span>} />
-        {props.why && i.why && !i.done && (
-          <span className="why">
-            {i.why} <GoalTag goal={i.goal} ranked />
-          </span>
-        )}
+      <div className="t-col">
+        <div
+          className="t-main"
+          role="button"
+          tabIndex={0}
+          aria-label={`Open details: ${i.title}`}
+          onClick={() => open(i.key)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              open(i.key);
+            }
+          }}
+        >
+          <span className="t-title">{i.title}</span>
+          <SrcLine item={i} extra={sub && <span>{sub}</span>} />
+        </div>
+        {props.why && i.why && !i.done && <Why item={i} />}
       </div>
       <span className={`r-side${acts ? " has-acts" : ""}`}>
         <span className="r-info">
+          {working && (
+            <span className="planned working" title="You work on this now">
+              Working {dur(workMinutes(work!))}
+            </span>
+          )}
           {inPlan ? (
             <span className="planned" title="In today's plan">
               Planned {fmtTime(at)}
@@ -129,6 +179,11 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
         </span>
         {acts && (
           <span className="row-acts">
+            {!working && (
+              <button className="x" title="Start work on this. AIfred keeps the real time, to make better time guesses." onClick={() => startWork(i.key)}>
+                Start
+              </button>
+            )}
             {!inPlan && (
               <button className="x" title="Add to today's plan" onClick={() => addToPlan(i.key)}>
                 + Plan
@@ -159,6 +214,47 @@ function Group(props: { title: string; list: Item[]; alert?: boolean; why?: bool
         ))}
       </ul>
     </>
+  );
+}
+
+/** The item that you work on now: the time so far, the guess, Stop, and Done. */
+function WorkBar() {
+  const { work, byKey, stopWork, finishItem, open } = useApp();
+  useTick(!!work);
+  if (!work) return null;
+  const i = byKey.get(work.key);
+  const m = workMinutes(work);
+  return (
+    <section className="workbar" aria-label="Working on">
+      <span className="dot" aria-hidden />
+      <span className="txt">
+        <span>
+          Working on{" "}
+          <button className="linkbtn ttl" onClick={() => open(work.key)}>
+            {i?.title ?? work.title}
+          </button>
+        </span>
+        <small>
+          {dur(m)}
+          {/* An item with no guess has the default time in `minutes`, which nobody guessed. */}
+          {i && i.minutesBy !== null ? ` of ${dur(i.minutes)} guessed${m > i.minutes ? `, ${dur(m - i.minutes)} over` : ""}` : ""}
+        </small>
+      </span>
+      <span className="btns">
+        <button className="btn" onClick={stopWork} title="Stop the timer. The item stays open.">
+          Stop
+        </button>
+        {!i?.done && (
+          <button
+            className="btn pri"
+            onClick={() => finishItem(work.key)}
+            title={!i ? "The work is done. The item is not in the list now." : i.gh ? "The work is done. The item leaves the list when it closes on GitHub." : "The work is done"}
+          >
+            Done
+          </button>
+        )}
+      </span>
+    </section>
   );
 }
 
@@ -359,6 +455,7 @@ export function Home() {
           <h2 className="hello">
             {hello} <span>{longDay(today)}</span>
           </h2>
+          <WorkBar />
           <GoalsCard />
           <BriefCard needYou={g.now.length + g.today.length} />
           <WaitingCard />

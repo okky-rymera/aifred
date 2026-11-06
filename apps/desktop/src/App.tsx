@@ -5,7 +5,7 @@ import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
 import { Ctx, useApp, type AppCtx, type ChatState, type ListState } from "./ctx";
 import { Detail } from "./Detail";
 import { Home } from "./Home";
-import { addDays, buildItems, dayOf, meetingsOn, schedule, type Item } from "./items";
+import { addDays, buildItems, dayOf, dur, meetingsOn, schedule, type Item } from "./items";
 import { JobsPage } from "./Jobs";
 import { MemoryList } from "./Memory";
 import { PlanChat, PlanView } from "./Plan";
@@ -63,6 +63,20 @@ const withFiles = (text: string, files: unknown[]) => (text.trim() || !files.len
 /** Puts an email back in its list, newest first (for Undo). */
 const putBack = (list: api.Mail[], m: api.Mail) => [m, ...list.filter((x) => x.id !== m.id)].sort((a, b) => b.last_at - a.last_at);
 
+/** The real time of a finished item for a toast, with a space first:
+ * " It took 12 m, the guess was 10 m." A forgotten timer (more than 10
+ * hours) does not count, and the text says so. "" for no work time. */
+const tookText = (d: api.WorkDone | null) => {
+  if (!d) return "";
+  const took = d.minutes ? ` It took ${dur(d.minutes)}${d.guess ? `, the guess was ${dur(d.guess)}` : ""}.` : "";
+  const skipped = !d.skipped
+    ? ""
+    : d.skipped === 1
+      ? " One timer ran for more than 10 hours, so AIfred did not count it."
+      : ` ${d.skipped} timers ran for more than 10 hours, so AIfred did not count them.`;
+  return took + skipped;
+};
+
 const turnMsgs = (turns: (api.Turn | api.SideTurn)[]): ChatMsg[] =>
   turns.map((t) => ({ role: t.role, text: t.text, files: t.files, info: "info" in t ? t.info : undefined }));
 
@@ -95,6 +109,8 @@ export default function App() {
   const [goals, setGoals] = useState<api.Goals | null>(null);
   const [briefLoaded, setBriefLoaded] = useState("");
   const [briefState, setBriefState] = useState("idle");
+  /** The item that you work on now, with its timer. */
+  const [work, setWork] = useState<api.Running | null>(null);
   // The mode of the home box stays when you go to another page.
   const [homeMode, setHomeMode] = useState<"ask" | "task">("ask");
   const [plan, setPlan] = useState<api.DayPlan | null>(null);
@@ -289,6 +305,7 @@ export default function App() {
       .catch(failed("the conversation"));
     api.info().then(setInfo).catch(failed("app info"));
     api.memoryFacts().then(setFacts).catch(failed("memory"));
+    api.workRunning().then(setWork).catch(() => {});
     api
       .getSettings()
       .then((s) => setSettings({ ...api.DEFAULT_SETTINGS, ...s }))
@@ -481,38 +498,118 @@ export default function App() {
 
   const putTask = (t: api.Task) => setTasks((all) => all.map((x) => (x.id === t.id ? t : x)));
 
+  // ---------- Work time ----------
+
+  /** Ends the work on a finished item, and keeps its real time next to the
+   * time guess (worktime.rs). The timer leaves the screen only when the
+   * save worked, so a failed save never hides a timer that still runs.
+   * Throws when the save fails. */
+  const endWork = useCallback(async (key: string) => {
+    const d = await api.finishWork(key);
+    setWork((w) => (w?.key === key ? null : w));
+    return d;
+  }, []);
+
+  /** The toast for a finished item, with its real time `d` that is already
+   * kept. `text` null: no toast when the item has no work time. `undo`
+   * opens the item again. With `forgetsTime`, the undo itself makes the
+   * backend forget the real time, so the screen does not ask for it. */
+  const finishedToast = useCallback(
+    (key: string, text: string | null, d: api.WorkDone | null, undo?: () => void, forgetsTime = false) => {
+      if (text === null && !d) return;
+      const msg = text === null ? `Finished: ${d!.title}.${tookText(d)}` : d ? `${text}.${tookText(d)}` : text;
+      toast(
+        msg,
+        undo &&
+          (() => {
+            if (d && !forgetsTime) api.unfinishWork(key).catch(() => {});
+            undo();
+          }),
+      );
+    },
+    [toast],
+  );
+
+  /** Stops the work on a finished item, keeps its real time, and shows
+   * the toast of finishedToast(). */
+  const afterFinish = useCallback(
+    async (key: string, text: string | null, undo?: () => void) => {
+      let d: api.WorkDone | null;
+      try {
+        d = await endWork(key);
+      } catch (e) {
+        // The timer stays on screen, so you can click Done again.
+        toast(`${text ? `${text}. ` : ""}The work time is not saved: ${e}`, undo, true);
+        return;
+      }
+      finishedToast(key, text, d, undo);
+    },
+    [toast, endWork, finishedToast],
+  );
+
   /**
    * Hides an email in AIfred, with Undo. The email in Gmail does not change.
-   * `list`: the list that the email leaves, "reply" or "sent".
+   * `list`: the list that the email leaves, "reply" or "sent". `workKey`:
+   * the email is finished, so its work ends too. Its real time goes into the
+   * same toast, and Undo opens both again: a second toast would replace
+   * the Undo of the hide.
    */
   const hideMail = useCallback(
-    (m: api.Mail, list: "reply" | "sent", text: string): Promise<boolean> => {
-      if (mailBusy.current.has(m.id)) return Promise.resolve(false);
+    async (m: api.Mail, list: "reply" | "sent", text: string, workKey?: string): Promise<boolean> => {
+      if (mailBusy.current.has(m.id)) return false;
       mailBusy.current.add(m.id);
-      return run(api.hideEmail(m.id, true), () => {
-        mailEdits.current++;
-        setMail((l) => ({ ...l, [list]: l[list].filter((x) => x.id !== m.id) }));
-        toast(text, () =>
+      try {
+        const ok = await run(api.hideEmail(m.id, true), () => {
+          mailEdits.current++;
+          setMail((l) => ({ ...l, [list]: l[list].filter((x) => x.id !== m.id) }));
+        });
+        if (!ok) return false;
+        let d: api.WorkDone | null = null;
+        let note = "";
+        if (workKey) {
+          try {
+            d = await endWork(workKey);
+          } catch (e) {
+            note = ` The work time is not saved: ${e}`;
+          }
+        }
+        toast(`${text}${tookText(d)}${note}`, () =>
           run(api.hideEmail(m.id, false), () => {
             mailEdits.current++;
             setMail((l) => ({ ...l, [list]: putBack(l[list], m) }));
+            if (d && workKey) api.unfinishWork(workKey).catch(() => {});
           }),
         );
-      }).finally(() => mailBusy.current.delete(m.id));
+        return true;
+      } finally {
+        mailBusy.current.delete(m.id);
+      }
     },
-    [run, toast],
+    [run, toast, endWork],
   );
+
+  const startWork = useCallback((key: string) => void run(api.startWork(key), setWork), [run]);
+  const stopWork = useCallback(() => void run(api.stopWork(), () => setWork(null)), [run]);
 
   const toggleDone = useCallback(
     (i: Item) => {
       if (i.task) {
         const done = !i.done;
-        run(api.setTaskDone(i.task.id, done), (t) => {
+        // The backend ends the work with the task and keeps its real time,
+        // or opens it again (tasks.rs). So the screen does not save the
+        // time a second time. The timer goes in the same draw as the done
+        // task: the check for an item that closed elsewhere (below) must
+        // not finish it a second time. A failed change keeps the timer,
+        // because the work still runs.
+        run(api.setTaskDone(i.task.id, done), ({ task: t, work: d }) => {
+          if (done) setWork((w) => (w?.key === i.key ? null : w));
           putTask(t);
-          if (done) toast(`Finished: ${i.title}`, () => run(api.setTaskDone(t.id, false), putTask));
+          // The undo opens the task again. Then the backend forgets its real time.
+          const undo = () => run(api.setTaskDone(t.id, false), (r) => putTask(r.task));
+          if (done) finishedToast(i.key, `Finished: ${i.title}`, d, undo, true);
         });
       } else if (i.mail) {
-        void hideMail(i.mail, "reply", `Hidden: ${i.mail.subject}. It comes back when a new message comes.`);
+        void hideMail(i.mail, "reply", `Hidden: ${i.mail.subject}. It comes back when a new message comes.`, i.key);
       } else if (i.cu) {
         const c = i.cu;
         if (closing.current.has(c.id)) return;
@@ -521,15 +618,30 @@ export default function App() {
         run(api.clickupMarkDone(c.id), (before) => {
           setClickup((l) => ({ ...l, items: l.items.filter((x) => x.id !== c.id) }));
           setClosed((l) => [...l.filter((x) => x.id !== c.id), { id: c.id, title: c.title, before }]);
+          void afterFinish(i.key, null);
         }).finally(() => closing.current.delete(c.id));
       }
     },
-    [run, toast, hideMail],
+    [run, hideMail, afterFinish, finishedToast],
+  );
+
+  /** The "Done" button of the work timer. AIfred only reads GitHub, so a
+   * GitHub item keeps its place in the list until it closes there. An item
+   * that left the list (for example, closed in ClickUp) only ends its work. */
+  const finishItem = useCallback(
+    (key: string) => {
+      const i = byKey.get(key);
+      if (!i) void afterFinish(key, null);
+      else if (i.gh) void afterFinish(i.key, `Finished: ${i.title}`, () => {});
+      else toggleDone(i);
+    },
+    [byKey, afterFinish, toggleDone],
   );
 
   const undoClose = useCallback(
     (c: Closed) =>
       run(api.clickupUndoDone(c.id, c.before), () => {
+        api.unfinishWork(`clickup:${c.id}`).catch(() => {});
         setClosed((l) => l.filter((x) => x.id !== c.id));
         loadClickup(true, true);
       }),
@@ -633,6 +745,8 @@ export default function App() {
       if (!i.task) return;
       const t = i.task;
       run(api.deleteTask(t.id), () => {
+        // The backend deletes the task's work sessions too (tasks.rs).
+        setWork((w) => (w?.key === i.key ? null : w));
         setTasks((all) => all.filter((x) => x.id !== t.id));
         if (now.current.sel === i.key) setSel(null);
         toast(`Deleted: ${t.title}`);
@@ -1038,6 +1152,55 @@ export default function App() {
       </div>
     ) : null;
 
+  // ---------- Corrections of the brief ----------
+
+  /** You say that the brief is wrong about an item. The item loses its
+   * reason at once. AIfred can learn a memory fact from it (learn.rs). */
+  const correctBrief = useCallback(
+    (i: Item, kind: api.CorrectionKind) => {
+      if (!brief) return;
+      // The correction is for today, also when the screen still shows an
+      // older brief (today's brief is not written yet). So "Not today"
+      // counts for today, and today's brief gets it.
+      const day = today;
+      const shown = brief.day;
+      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => k !== i.key));
+      run(api.correctBrief(i.key, kind, day), (c) => {
+        setBrief((b) => (b && b.day === shown ? { ...b, why: drop(b.why)!, goal: drop(b.goal) } : b));
+        if (c.learned) api.memoryFacts().then(setFacts).catch(() => {});
+        const undo = () =>
+          run(api.undoCorrection(c.correction.id), () => {
+            api.brief(shown).then((b) => b && setBrief((old) => (old?.day === shown ? b : old))).catch(() => {});
+            if (c.learned) api.memoryFacts().then(setFacts).catch(() => {});
+          });
+        const text = c.learned
+          ? `AIfred learned: ${c.learned.text}`
+          : kind === "not_today"
+            ? `AIfred will not count this for today: ${i.title}`
+            : `AIfred will rank this lower from now on: ${i.title}`;
+        toast(text, undo);
+      });
+    },
+    [brief, today, run, toast],
+  );
+
+  // An item that you work on can close elsewhere, for example when AIfred
+  // finishes the task in a chat. Then its work stops, with its real time.
+  // The check runs again on each new list, and the timer goes only after
+  // the save. So it remembers the item that it finished: one save and one
+  // toast for each item. After a failed save, the timer stays on screen
+  // and you click Done. The error does not come back with each new list.
+  const autoFinished = useRef<string | null>(null);
+  useEffect(() => {
+    if (!work || !byKey.get(work.key)?.done) {
+      autoFinished.current = null;
+      return;
+    }
+    if (autoFinished.current === work.key) return;
+    autoFinished.current = work.key;
+    void afterFinish(work.key, null);
+  }, [work, byKey, afterFinish]);
+
   const ctx: AppCtx = {
     today,
     items,
@@ -1084,6 +1247,11 @@ export default function App() {
     models,
     setModel: pickModel,
     toggleDone,
+    work,
+    startWork,
+    stopWork,
+    finishItem,
+    correctBrief,
     addTask,
     homeMode,
     setHomeMode,

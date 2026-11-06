@@ -190,6 +190,178 @@ describe("goals", () => {
   });
 });
 
+describe("corrections of the brief", () => {
+  /** Three GitHub items from acme/shop, each with a reason from today's brief. */
+  const ranked = () => ({
+    github: [githubItem(9, "review_requested", "Bulk edit"), githubItem(10, "review_requested", "Fix typo"), githubItem(11, "review_requested", "New FAQ")],
+    newKeys: ["github:acme/shop#9", "github:acme/shop#10", "github:acme/shop#11"],
+    briefs: {
+      [today()]: {
+        day: today(),
+        written: 1,
+        text: "Three reviews.",
+        why: { "github:acme/shop#9": "It blocks the release.", "github:acme/shop#10": "It waits 3 days.", "github:acme/shop#11": "It is new." },
+      },
+    },
+  });
+
+  it("Not today removes the reason of the item, with an undo", async () => {
+    const fake = await startApp(ranked());
+    expect(await screen.findByText("It blocks the release.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Not today: Bulk edit" }));
+    expect(await screen.findByText("AIfred will not count this for today: Bulk edit")).toBeInTheDocument();
+    expect(screen.queryByText("It blocks the release.")).not.toBeInTheDocument();
+    expect(fake.corrections).toMatchObject([{ key: "github:acme/shop#9", kind: "not_today", day: today() }]);
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("It blocks the release.")).toBeInTheDocument();
+    expect(fake.corrections).toEqual([]);
+  });
+
+  it("three Wrong priority clicks from one place teach AIfred a memory fact", async () => {
+    const fake = await startApp(ranked());
+    for (const t of ["Bulk edit", "Fix typo"]) {
+      await userEvent.click(await screen.findByRole("button", { name: `Wrong priority: ${t}` }));
+      expect(await screen.findByText(`AIfred will rank this lower from now on: ${t}`)).toBeInTheDocument();
+    }
+    await userEvent.click(screen.getByRole("button", { name: "Wrong priority: New FAQ" }));
+    expect(await screen.findByText(/AIfred learned: GitHub acme\/shop: these items are less important/)).toBeInTheDocument();
+    expect(fake.memory.filter((f) => !f.forgotten)).toHaveLength(1);
+    // The undo removes the last correction and forgets the fact.
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.memory.filter((f) => !f.forgotten)).toHaveLength(0));
+    expect(await screen.findByText("It is new.")).toBeInTheDocument();
+  });
+});
+
+describe("work time", () => {
+  it("Start shows the timer, and Done says the real time next to the guess", async () => {
+    let clock = 1_000_000;
+    const fake = await startApp({ tasks: [task("Pay rent")], estimates: {}, now: () => clock });
+    const key = `task:${fake.tasks[0].id}`;
+    fake.estimates[key] = { minutes: 30, by: "you" };
+    await userEvent.click(await screen.findByRole("button", { name: "Start" }));
+    const bar = await screen.findByRole("region", { name: "Working on" });
+    expect(within(bar).getByText("Pay rent")).toBeInTheDocument();
+    clock += 45 * 60;
+    await userEvent.click(within(bar).getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("Finished: Pay rent. It took 45 m, the guess was 30 m.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Working on" })).not.toBeInTheDocument();
+    expect(fake.tasks[0].done).toBe(true);
+    expect(fake.workDone[key]).toMatchObject({ minutes: 45, guess: 30 });
+    // The backend keeps the time when the task is done. The window does not save it a second time.
+    expect(fake.calls.filter((c) => c.cmd === "finish_work")).toEqual([]);
+    // Undo opens the task again, and the real time does not count.
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.tasks[0].done).toBe(false));
+    await waitFor(() => expect(fake.workDone[key]).toBeUndefined());
+  });
+
+  it("Stop keeps the item open, and the timer comes back after a restart", async () => {
+    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")], sessions: [{ key: "github:acme/shop#7", started: Math.floor(Date.now() / 1000) - 600, ended: null }] });
+    const bar = await screen.findByRole("region", { name: "Working on" });
+    expect(within(bar).getByText(/^10 m/)).toBeInTheDocument();
+    // The item has no time guess. The default time is not a guess, so the bar shows none.
+    expect(within(bar).queryByText(/guessed/)).not.toBeInTheDocument();
+    await userEvent.click(within(bar).getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Working on" })).not.toBeInTheDocument());
+    expect(fake.sessions[0].ended).not.toBeNull();
+    expect(screen.getByText("Fix cart")).toBeInTheDocument();
+  });
+
+  it("Done on a GitHub item keeps its time, and the item stays until it closes on GitHub", async () => {
+    let clock = 1_000_000;
+    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")], now: () => clock });
+    await userEvent.click(await screen.findByRole("button", { name: "Start" }));
+    clock += 20 * 60;
+    await userEvent.click(within(await screen.findByRole("region", { name: "Working on" })).getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("Finished: Fix cart. It took 20 m.")).toBeInTheDocument();
+    expect(fake.workDone["github:acme/shop#7"]).toMatchObject({ minutes: 20, guess: null });
+    expect(screen.getByText("Fix cart")).toBeInTheDocument();
+  });
+
+  it("a failed save of the work time keeps the timer, so Done can run again", async () => {
+    let clock = 1_000_000;
+    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")], now: () => clock });
+    await userEvent.click(await screen.findByRole("button", { name: "Start" }));
+    clock += 20 * 60;
+    fake.failFinishWork = "the disk is full";
+    const bar = await screen.findByRole("region", { name: "Working on" });
+    await userEvent.click(within(bar).getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("Finished: Fix cart. The work time is not saved: the disk is full")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Working on" })).toBeInTheDocument();
+    fake.failFinishWork = undefined;
+    await userEvent.click(within(bar).getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("Finished: Fix cart. It took 20 m.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Working on" })).not.toBeInTheDocument();
+  });
+
+  it("a task that AIfred closes in a chat saves its time once, also when the save fails", async () => {
+    let clock = 1_000_000;
+    const fake = await startApp({
+      tasks: [task("Pay rent")],
+      now: () => clock,
+      onAsk: () => {
+        // AIfred closes the task with its tool while it answers.
+        fake.tasks[0].done = true;
+        return answer("Done.");
+      },
+    });
+    await userEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await screen.findByRole("region", { name: "Working on" });
+    clock += 10 * 60;
+    fake.failFinishWork = "the disk is full";
+    await userEvent.type(homeBox(), "I paid the rent{Enter}");
+    expect(await screen.findByText("The work time is not saved: the disk is full")).toBeInTheDocument();
+    // A new list after the next answer does not save it again or show the error again.
+    fake.calls.length = 0;
+    await userEvent.type(homeBox(), "thanks{Enter}");
+    await waitFor(() => expect(fake.calls.some((c) => c.cmd === "tasks")).toBe(true));
+    expect(fake.calls.filter((c) => c.cmd === "finish_work")).toEqual([]);
+    expect(screen.getAllByText("The work time is not saved: the disk is full")).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "Working on" })).toBeInTheDocument();
+  });
+
+  it("a timer that ran for more than 10 hours does not count, and the toast says so", async () => {
+    const fake = await startApp({ github: [githubItem(7, "assigned", "Fix cart")], sessions: [{ key: "github:acme/shop#7", started: Math.floor(Date.now() / 1000) - 11 * 3600, ended: null }] });
+    await userEvent.click(within(await screen.findByRole("region", { name: "Working on" })).getByRole("button", { name: "Done" }));
+    expect(await screen.findByText("Finished: Fix cart. One timer ran for more than 10 hours, so AIfred did not count it.")).toBeInTheDocument();
+    expect(fake.workDone["github:acme/shop#7"]).toBeUndefined();
+  });
+
+  it("an item that left the list keeps a Done button on its timer", async () => {
+    const fake = await startApp({ sessions: [{ key: "github:acme/shop#9", started: Math.floor(Date.now() / 1000) - 600, ended: null }] });
+    const bar = await screen.findByRole("region", { name: "Working on" });
+    await userEvent.click(within(bar).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Working on" })).not.toBeInTheDocument());
+    expect(fake.sessions[0].ended).not.toBeNull();
+  });
+
+  it("a deleted task stops its timer", async () => {
+    const fake = await startApp({ tasks: [task("Old idea")] });
+    await userEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await screen.findByRole("region", { name: "Working on" });
+    await openItem("Old idea");
+    await userEvent.click(within(details()).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Working on" })).not.toBeInTheDocument());
+    expect(fake.sessions).toEqual([]);
+  });
+
+  it("an email with work time: one toast has the time and an Undo for both", async () => {
+    let clock = 1_000_000;
+    const fake = await startApp({ mail: { fetched_at: clock, reply: [mail("r1", "Price for the plugin", "reply")], sent: [] }, now: () => clock });
+    const open = await screen.findByRole("list", { name: "Open" });
+    await userEvent.click(within(open).getByRole("button", { name: "Start" }));
+    clock += 12 * 60;
+    await userEvent.click(within(open).getByRole("button", { name: "No answer needed: Price for the plugin" }));
+    expect(await screen.findByText("Hidden: Price for the plugin. It comes back when a new message comes. It took 12 m.")).toBeInTheDocument();
+    expect(fake.workDone["gmail:r1"]).toMatchObject({ minutes: 12 });
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("Price for the plugin")).toBeInTheDocument();
+    await waitFor(() => expect(fake.workDone["gmail:r1"]).toBeUndefined());
+    expect(fake.mailHidden).toEqual([]);
+  });
+});
+
 describe("the home box", () => {
   it("sends a to-do line to AIfred, which adds the task", async () => {
     const fake = await startApp({

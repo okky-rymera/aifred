@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 13;
+const VERSION: i64 = 14;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -487,6 +487,54 @@ const SCHEMA_13: &str = "
 ALTER TABLE waiting ADD COLUMN wait_for TEXT NOT NULL DEFAULT ''; -- ,ana@x.com,bo@y.com, or '': anyone
 ";
 
+/// What AIfred learns from the user (learn.rs, worktime.rs): the user's
+/// corrections of the brief, the memory facts that came from them, and the
+/// real time of the work on each item.
+const SCHEMA_14: &str = "
+-- The user says that the brief is wrong about an item.
+CREATE TABLE correction (
+  id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  key   TEXT NOT NULL,                -- the item key
+  kind  TEXT NOT NULL,                -- 'not_today' or 'wrong_priority'
+  day   TEXT NOT NULL,                -- YYYY-MM-DD: the day of the brief
+  title TEXT NOT NULL,
+  place TEXT NOT NULL DEFAULT '',     -- where the item is from, for example 'GitHub acme/docs', or ''
+  ts    INTEGER NOT NULL
+);
+CREATE INDEX correction_by_day ON correction(day);
+CREATE INDEX correction_by_place ON correction(place, kind);
+
+-- One memory fact for each place that AIfred learned from corrections.
+-- The row stays when the user forgets the fact: AIfred learns a place once.
+CREATE TABLE learned (
+  place      TEXT PRIMARY KEY,
+  fact       INTEGER NOT NULL,        -- memory.id
+  correction INTEGER NOT NULL,        -- the correction that made the fact
+  ts         INTEGER NOT NULL
+);
+
+-- The user works on one item at a time.
+CREATE TABLE work_session (
+  id      INTEGER PRIMARY KEY,
+  key     TEXT NOT NULL,
+  started INTEGER NOT NULL,
+  ended   INTEGER                     -- NULL while the user works on the item
+);
+CREATE INDEX work_session_by_key ON work_session(key);
+CREATE UNIQUE INDEX one_running_session ON work_session((ended IS NULL)) WHERE ended IS NULL;
+
+-- A finished item: the real time of the work next to the time guess.
+CREATE TABLE work_done (
+  key      TEXT PRIMARY KEY,
+  title    TEXT NOT NULL,
+  place    TEXT NOT NULL DEFAULT '',
+  guess    INTEGER,                   -- the time guess in minutes, or NULL
+  guess_by TEXT,                      -- 'you' or 'aifred', or NULL
+  minutes  INTEGER NOT NULL,          -- all sessions together
+  finished INTEGER NOT NULL
+);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -596,6 +644,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 13 {
         tx.execute_batch(SCHEMA_13)?;
+    }
+    if version < 14 {
+        tx.execute_batch(SCHEMA_14)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

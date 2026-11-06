@@ -257,6 +257,31 @@ The "Waiting for" card on the home page lists what you wait for from other peopl
 - "Got it" closes an item. "Open again" opens it.
 - At most 50 open items.
 
+## Learning from your corrections
+
+AIfred learns from what you change (`crates/aifred-core/src/learn.rs`, `worktime.rs`). All of it stays in the database.
+
+### Corrections of the brief
+
+- An item with a reason from the brief has two buttons under the reason:
+  - "Not today": the item does not need you today.
+  - "Wrong priority": the brief ranked the item too high.
+- The item loses its reason at once. The brief text does not change until AIfred writes it again. Each button has an undo.
+- The next briefs and the plan chat get your corrections of the last 30 days.
+- Three "Wrong priority" corrections of different items from one place in 60 days make one memory fact. A place is a GitHub repository, a ClickUp list, the first person of an email, or the first tag of a local task. An item with no place teaches nothing. Example: "GitHub acme/docs: these items are less important to the user than they look. Rank them lower."
+- The fact is a core fact, so it goes into every chat and the brief. You can change or forget it under "What AIfred knows about you". AIfred does not learn a forgotten fact again.
+- The undo of a correction also forgets the fact when fewer than three corrections are left. A fact with a text that you changed stays.
+- The brief gets only your core memory facts. Chats get all facts when the memory is small, and only the core facts when it is large.
+
+### Real work times
+
+- "Start" on an item starts a timer. The card "Working on" shows the time, and the time guess when the item has one. You work on one item at a time: "Start" on another item stops the first one.
+- "Stop" stops the timer. The item stays open. You can start it again later. All sessions count.
+- "Done" on the card, or the tick of the item, finishes the item. The message says the real time and the guess, for example "It took 45 m, the guess was 30 m".
+- A GitHub item stays in the list until it closes on GitHub. "Done" only keeps its time.
+- A session longer than 10 hours does not count. AIfred thinks that you forgot the timer.
+- The brief and the plan chat get the real times of the last 20 finished items, and the middle value of real time divided by guess. They use them for new time guesses. They do not change a guess that exists.
+
 ## Check the app without a window on your screen
 
 ```bash

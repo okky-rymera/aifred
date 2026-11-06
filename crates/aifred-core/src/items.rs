@@ -50,6 +50,59 @@ pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
     Ok(found.is_some())
 }
 
+/// The title of an item and where it is from, for example "GitHub
+/// acme/docs", "ClickUp Rymera / Sprint 12", "Email from Ana", or
+/// "Your tasks with #home". The place is "" for a local task with no tag.
+/// None when AIfred does not know the item.
+pub fn title_place(c: &Connection, key: &str) -> anyhow::Result<Option<(String, String)>> {
+    let (source, id) = split(key)?;
+    if source == "task" {
+        let row: Option<(String, String)> = c
+            .query_row("SELECT title, tags FROM task WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        return Ok(row.map(|(title, tags)| {
+            let tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
+            let place = tags
+                .first()
+                .map(|t| format!("Your tasks with #{t}"))
+                .unwrap_or_default();
+            (title, place)
+        }));
+    }
+    let row: Option<(String, String, String)> = c
+        .query_row(
+            "SELECT title, place, data FROM work_item WHERE source = ?1 AND item_id = ?2",
+            [source, id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(title, place, data)| {
+        // An item with no known place has the place "". So it teaches
+        // nothing (learn.rs), and unrelated items do not count as one place.
+        let place = match source {
+            "github" | "clickup" if place.trim().is_empty() => String::new(),
+            "github" => format!("GitHub {place}"),
+            "clickup" => format!("ClickUp {place}"),
+            // Gmail: only the first person. The other people of a thread
+            // change from email to email, so the full list is almost never
+            // the same place two times (learn.rs counts items of one place).
+            _ => serde_json::from_str::<serde_json::Value>(&data)
+                .ok()
+                .and_then(|v| {
+                    v["people"][0]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(|p| format!("Email from {p}"))
+                })
+                .unwrap_or_default(),
+        };
+        (title, place)
+    }))
+}
+
 /// What the list knows of an item that is not in the item itself.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ItemMeta {
@@ -282,6 +335,40 @@ mod tests {
             "{ctx}"
         );
         assert!(details(&d, "github:none#1").is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_item_with_no_known_place_has_no_place() {
+        let d = std::env::temp_dir().join(format!("aifred-items-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        db::write(&d, |tx| {
+            for (source, id, place, data) in [
+                ("gmail", "m1", "Ana, Ben", r#"{"people":["Ana","Ben"]}"#),
+                ("gmail", "m2", "", r#"{"people":[]}"#),
+                ("gmail", "m3", "Ana", "not json"),
+                ("gmail", "m4", "", r#"{"people":["  "]}"#),
+                ("github", "acme/shop#1", "", "{}"),
+            ] {
+                tx.execute(
+                    "INSERT INTO work_item (source, item_id, title, place, url, data, in_list, pos, first_seen, last_seen)
+                     VALUES (?1, ?2, 'T', ?3, '', ?4, 1, 0, 0, 0)",
+                    [source, id, place, data],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        db::read(&d, |c| {
+            let place = |k: &str| title_place(c, k).map(|r| r.unwrap().1);
+            assert_eq!(place("gmail:m1")?, "Email from Ana");
+            for k in ["gmail:m2", "gmail:m3", "gmail:m4", "github:acme/shop#1"] {
+                assert_eq!(place(k)?, "", "{k}");
+            }
+            Ok(())
+        })
+        .unwrap();
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

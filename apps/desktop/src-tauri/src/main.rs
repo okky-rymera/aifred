@@ -30,6 +30,7 @@ use aifred_core::google::{self, GoogleStatus};
 use aifred_core::history::Turn;
 use aifred_core::items::{ItemDetails, ItemMeta};
 use aifred_core::jobs::{Job, JobChange, Run};
+use aifred_core::learn::{self, Corrected};
 use aifred_core::memory::Fact;
 use aifred_core::plan::{DayPlan, Estimate, PlanItem};
 use aifred_core::settings::{self, Settings};
@@ -37,6 +38,7 @@ use aifred_core::side::SideTurn;
 use aifred_core::tasks::{Task, TaskFields};
 use aifred_core::uploads::FileRef;
 use aifred_core::waiting::{self, NewWaiting, Waiting, WaitingChange};
+use aifred_core::worktime::{self, Done, Running};
 use aifred_core::{Answer, Assistant, default_data_dir};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
@@ -560,9 +562,21 @@ async fn set_task_step(
     blocking(&app, move |a| a.tasks().set_step(&id, index, &text, done)).await
 }
 
+/// A task that is done or open again. `work`: the real time that AIfred
+/// kept when the task is done now, or None.
+#[derive(Serialize)]
+struct TaskDone {
+    task: Task,
+    work: Option<Done>,
+}
+
 #[tauri::command]
-async fn set_task_done(app: State<'_, App>, id: String, done: bool) -> CmdResult<Task> {
-    blocking(&app, move |a| a.tasks().set_done(&id, done)).await
+async fn set_task_done(app: State<'_, App>, id: String, done: bool) -> CmdResult<TaskDone> {
+    blocking(&app, move |a| {
+        let (task, work) = a.tasks().set_done_work(&id, done)?;
+        Ok(TaskDone { task, work })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1188,6 +1202,50 @@ async fn set_estimate(app: State<'_, App>, key: String, minutes: Option<u32>) ->
     .await
 }
 
+/// The user says that the brief of `day` is wrong about an item (learn.rs).
+/// `kind` is "not_today" or "wrong_priority".
+#[tauri::command]
+async fn correct_brief(
+    app: State<'_, App>,
+    key: String,
+    kind: String,
+    day: String,
+) -> CmdResult<Corrected> {
+    blocking(&app, move |a| learn::add(&a.dir, &key, &kind, &day, now())).await
+}
+
+#[tauri::command]
+async fn undo_correction(app: State<'_, App>, id: i64) -> CmdResult<()> {
+    blocking(&app, move |a| learn::undo(&a.dir, id)).await
+}
+
+/// The item that the user works on now (worktime.rs).
+#[tauri::command]
+async fn work_running(app: State<'_, App>) -> CmdResult<Option<Running>> {
+    blocking(&app, |a| worktime::running(&a.dir)).await
+}
+
+#[tauri::command]
+async fn start_work(app: State<'_, App>, key: String) -> CmdResult<Running> {
+    blocking(&app, move |a| worktime::start(&a.dir, &key, now())).await
+}
+
+#[tauri::command]
+async fn stop_work(app: State<'_, App>) -> CmdResult<()> {
+    blocking(&app, |a| worktime::stop(&a.dir, now())).await
+}
+
+/// The item is finished: its real time, or None when it has no work time.
+#[tauri::command]
+async fn finish_work(app: State<'_, App>, key: String) -> CmdResult<Option<Done>> {
+    blocking(&app, move |a| worktime::finish(&a.dir, &key, now())).await
+}
+
+#[tauri::command]
+async fn unfinish_work(app: State<'_, App>, key: String) -> CmdResult<()> {
+    blocking(&app, move |a| worktime::unfinish(&a.dir, &key)).await
+}
+
 /// AIfred's own jobs. `all` false: only the active and paused jobs.
 #[tauri::command]
 async fn jobs(app: State<'_, App>, all: bool) -> CmdResult<Vec<Job>> {
@@ -1321,6 +1379,13 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         clear_day_plan,
         estimates,
         set_estimate,
+        correct_brief,
+        undo_correction,
+        work_running,
+        start_work,
+        stop_work,
+        finish_work,
+        unfinish_work,
         brief,
         write_brief,
         jobs,
@@ -1803,7 +1868,8 @@ mod tests {
         );
 
         let done = call(&win, "set_task_done", json!({ "id": id, "done": true })).unwrap();
-        assert_eq!(done["done"], true);
+        assert_eq!(done["task"]["done"], true);
+        assert_eq!(done["work"], json!(null));
         assert_eq!(call(&win, "tasks", json!({})).unwrap()[0]["done"], true);
 
         call(&win, "delete_task", json!({ "id": id })).unwrap();

@@ -74,10 +74,17 @@ Done: AIfred reads the last 14 days of Gmail through the same Google connection,
 
 Why: Google CC learns when the user replies to its daily email ([TechCrunch](https://www.techcrunch.com/2025/12/16/google-tests-an-email-based-productivity-assistant/)). Pulse lets the user rate each card. AIfred learns nothing when the user changes the plan.
 
-- [ ] Add "not today" and "wrong priority" to the items in the brief.
-- [ ] Save a pattern from repeated corrections as a memory fact (for example, "low priority: the docs repo").
-- [ ] Record when the user starts and finishes an item. Compare the real time with the time guess.
-- [ ] Use the real times to make the next time guesses better.
+- [x] Add "not today" and "wrong priority" to the items in the brief.
+- [x] Save a pattern from repeated corrections as a memory fact (for example, "low priority: the docs repo").
+- [x] Record when the user starts and finishes an item. Compare the real time with the time guess.
+- [x] Use the real times to make the next time guesses better.
+
+Done: each reason in the brief has "Not today" and "Wrong priority" (`crates/aifred-core/src/learn.rs`). The item loses its reason that day. The brief and the plan chat get the corrections of the last 30 days. Three "wrong priority" corrections of different items from one place (a repository, a ClickUp list, a sender, a tag) in 60 days make one core memory fact. The brief now gets the memory facts. A timer ("Start", "Stop", "Done") records the real time of each item (`crates/aifred-core/src/worktime.rs`). The brief and the plan chat get the last 20 real times and the middle value of real time divided by guess. Not done yet:
+- Check with real use that 3 corrections is the right number, and that the facts are useful.
+- A correction does not change the brief text. Only the reason of the item goes away until AIfred writes the brief again.
+- Only "too high" is a correction. There is no "too low" button for an item that the brief did not name.
+- AIfred does not change a time guess that exists. Only new guesses use the real times.
+- The timer does not stop by itself when an email item closes because the person answered.
 
 ### 5. Reviews
 
