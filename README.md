@@ -80,27 +80,38 @@ The source code:
 
 ## AIfred's jobs
 
-AIfred keeps its own list of jobs, apart from your to-do list. It does them by itself while it runs, also when the window is closed to the tray.
+AIfred's jobs are the tasks that AIfred does by itself. It does them while it runs, also when the window is closed to the tray. The Tasks page shows them next to your tasks.
 
 - Ask in the chat. Examples:
   - "Remind me every Monday at 9 to send my timesheet."
   - "Remind me on the 3rd and 17th to pay the invoices."
   - "In 2 hours, check if PR #123 is merged and tell me."
+  - "Add 'pay rent' to my tasks on the 1st of each month."
 - AIfred says the time back with the next run dates. Check them.
 - A job is one of these:
   - a reminder: a desktop notification, with no AI call,
   - an AI job: AIfred runs at that time, looks things up, and sends a notification with the result. If it has nothing to tell, it sends nothing.
+  - a repeating task: at each time, AIfred adds a new task to your list, with that day as the due day, and sends a notification. The rule shows under "AIfred's" on the Tasks page. Each new task shows under "Mine". Each copy keeps its own done date, so the end-of-day review shows each one.
 - An AI job can only read. It cannot change tasks, the plan, memory, GitHub, or ClickUp. It cannot make new jobs.
 - Each AI job run is one more AI call on your Claude login (Sonnet).
 - A job runs once, at a time and repeat (for example "every other Thursday", "the last Friday of the month"), or after an event. The repeat rule is an RRULE (RFC 5545). The time zone is the zone of your computer when you make the job.
 - AIfred has one job from the start: "Update the brief when you finish a task". It waits 90 seconds for more finished tasks, so many tasks give one update (at most 10 minutes after the first one). It only updates a brief that already exists for today.
-- "AIfred's jobs" (the clock in the left bar) shows the jobs, the next run, and the latest runs. You can pause, start, and delete a job there. To change a job, ask in the chat.
+- The Tasks page (the check box in the left bar) shows your tasks and AIfred's jobs. The filter at the top has three values:
+  - "Mine" (the start value): your tasks, GitHub items, ClickUp tasks, and emails, in the same groups as on the home page,
+  - "AIfred's": the jobs, the next run, and the latest runs,
+  - "Both": the two lists, your tasks first.
+  The page keeps the last filter. "See all tasks" on the home page opens it.
+- On the Tasks page, you can pause, start, and delete a job. To change a job, ask in the chat.
+- The job "Update the brief when you finish a task" is not on the Tasks page. It is on the Settings page, under "Brief". You can pause it there.
+- The AI gets your tasks and AIfred's active and paused jobs in one list. Each entry says who does it: "you" or "aifred". So the AI knows what AIfred already checks. A paused job shows only its title and status, not its message. The brief and the day plan do not pick AIfred's jobs.
 - At most 20 jobs that are active or paused. A job can repeat at most once an hour.
 - If AIfred was not running at a job time (closed, or the computer was asleep):
   - a one-time job runs late, and the notification says the planned time,
   - a repeating job runs one time for the newest missed time, if it is at most 12 hours old. Older times are skipped.
+  - a repeating task has no 12-hour limit: AIfred adds one task for each missed time, with the day of that time as the due day. It adds them one after the other, oldest first. After a very long gap, only the newest 20 missed times get a task. The older times are skipped.
 - A job that fails tries again after 1, 2, 4, and 8 minutes. After 5 failures in a row it turns off, and AIfred shows a notification.
-- A run that was busy when AIfred stopped does not run again.
+- A run that was busy when AIfred stopped does not run again. A repeating task is different: AIfred adds the task for that time after it starts again. It never adds the same task two times.
+- A repeating task whose add failed tries again also after you pause and start it. If you give it a new time, the failed old time gets no task. The run list shows why.
 - See `docs/research-agent-jobs.md` for the research and the next steps.
 
 ## Chat model

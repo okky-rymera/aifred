@@ -40,6 +40,7 @@ How to rank:
 - `corrections` are the user's corrections of earlier briefs. not_today: on that day, the item does not need the user. wrong_priority: the brief ranked the item too high, so rank it lower from now on. Never name an item that has a correction with today's day.
 - `review_picks` are the user's picks in the weekly review. drop or delegate: the item does not need the user. Never name it. plan: the user wants to do it on plan_day, not before. do: the user wants to do it soon.
 - `same_work` lists items that are one piece of work in several places, for example a ClickUp task and its GitHub pull request. Treat each list as one item. Name and rank only the first key of the list, and give why and goal only for it. Use the dates, the priority, and the state of all its items.
+- In `tasks`, doer \"you\" is work for the user. doer \"aifred\" is a reminder, a check, or a repeating task that AIfred runs by itself at `when`. With status \"paused\", AIfred does not run it now: never say that AIfred does it or watches its item. A repeating task (does \"task\") adds a new task for the user at each time. An AIfred task has no key: never name it as an item, and give it no why. Rank the user's items as usual. When an active AIfred task watches an item that you name, you can say so.
 - The facts about the user come from memory. Some say what matters less or more to the user. Follow them.
 
 Write the brief:
@@ -163,7 +164,7 @@ pub fn save(dir: &Path, brief: &Brief, minutes: &BTreeMap<String, u32>) -> anyho
 /// The keys of all items in an overview (overview.rs).
 pub fn keys(overview: &Value) -> Vec<String> {
     let lists = [
-        &overview["local_tasks"],
+        &overview["tasks"],
         &overview["github"]["items"],
         &overview["clickup"]["tasks"],
         &overview["email"]["needs_reply"],
@@ -421,7 +422,7 @@ mod tests {
     #[test]
     fn keys_come_from_all_lists() {
         let o = json!({
-            "local_tasks": [{"key": "task:t1"}],
+            "tasks": [{"key": "task:t1"}],
             "github": {"items": [{"key": "github:a/b#7"}]},
             "clickup": {"tasks": [{"key": "clickup:86a"}]}
         });

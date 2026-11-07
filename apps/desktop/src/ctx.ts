@@ -114,6 +114,8 @@ export type AppCtx = {
   /** Loads the tasks, the plan, the goals, and the "waiting for" list again, after a change that touches them all. */
   reload: () => void;
   goPlan: () => void;
+  /** Opens the Tasks page. */
+  goTasks: () => void;
 };
 
 export const Ctx = createContext<AppCtx>(null!);

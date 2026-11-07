@@ -2,6 +2,7 @@ import { useState } from "react";
 import * as api from "./api";
 import { GoogleSection } from "./Google";
 import { ActionLogSection } from "./Drafts";
+import { BriefJob } from "./Jobs";
 
 const REFRESH_CHOICES = [
   { minutes: 5, label: "Every 5 minutes" },
@@ -273,6 +274,7 @@ export function SettingsPage(props: {
           Write the brief by itself once a day, when AIfred opens
         </label>
         <p className="text-sm text-stone-500">The brief is one AI call on your Claude login. You can always write it again from the home screen.</p>
+        <BriefJob />
       </section>
 
       <div className="mt-6 flex items-center gap-3">

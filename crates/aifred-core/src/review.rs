@@ -179,7 +179,9 @@ fn last_change(c: &Connection, key: &str) -> anyhow::Result<Option<u64>> {
     let (source, id) = crate::items::split(key)?;
     Ok(match source {
         "task" => c
-            .query_row("SELECT updated FROM task WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT updated FROM user_task WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .optional()?,
         "github" | "clickup" => c
             .query_row(
@@ -228,7 +230,7 @@ fn day_check_in(c: &Connection, day: &str) -> anyhow::Result<DayCheck> {
     let mut done = Vec::new();
     let mut seen = HashSet::new();
     let mut q = c.prepare(
-        "SELECT id FROM task WHERE done = 1 AND done_at >= ?1 AND done_at < ?2 ORDER BY done_at",
+        "SELECT id FROM user_task WHERE done = 1 AND done_at >= ?1 AND done_at < ?2 ORDER BY done_at",
     )?;
     let ids: Vec<String> = q
         .query_map([start, end], |r| r.get(0))?
@@ -260,7 +262,7 @@ fn day_check_in(c: &Connection, day: &str) -> anyhow::Result<DayCheck> {
         .unwrap_or_default();
     let mut due: Vec<String> = {
         let mut q = c.prepare(
-            "SELECT id FROM task WHERE done = 0 AND due = ?1 AND (start IS NULL OR start <= ?1) ORDER BY created",
+            "SELECT id FROM user_task WHERE done = 0 AND due = ?1 AND (start IS NULL OR start <= ?1) ORDER BY created",
         )?;
         let rows = q.query_map([day], |r| r.get::<_, String>(0))?;
         rows.map(|r| r.map(|id| format!("task:{id}")))
@@ -339,7 +341,7 @@ fn remove_from_plan(tx: &Transaction, day: &str, key: &str) -> anyhow::Result<()
 fn close_task(tx: &Transaction, id: &str, now: u64) -> anyhow::Result<()> {
     crate::worktime::stop_in(tx, &format!("task:{id}"), now)?;
     tx.execute(
-        "UPDATE task SET done = 1, done_at = ?1 WHERE id = ?2 AND done = 0",
+        "UPDATE task SET done = 1, done_at = ?1 WHERE doer = 'you' AND id = ?2 AND done = 0",
         rusqlite::params![now as i64, id],
     )?;
     Ok(())
@@ -362,7 +364,7 @@ pub fn finish_day(dir: &Path, day: &str, moved: &[String], now: u64) -> anyhow::
             add_to_plan(tx, &next, key)?;
             if let Some(id) = key.strip_prefix("task:") {
                 tx.execute(
-                    "UPDATE task SET due = ?1, updated = ?2 WHERE id = ?3 AND due = ?4",
+                    "UPDATE task SET due = ?1, updated = ?2 WHERE doer = 'you' AND id = ?3 AND due = ?4",
                     rusqlite::params![next, now as i64, id, day],
                 )?;
             }
@@ -452,7 +454,7 @@ fn stale_in(c: &Connection, today: &str, now: u64) -> anyhow::Result<Vec<StaleIt
     };
 
     let mut q = c.prepare(
-        "SELECT id, MAX(created, updated) FROM task WHERE done = 0 AND (start IS NULL OR start <= ?1)",
+        "SELECT id, MAX(created, updated) FROM user_task WHERE done = 0 AND (start IS NULL OR start <= ?1)",
     )?;
     let tasks: Vec<(String, u64)> = q
         .query_map([today], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -483,7 +485,7 @@ fn goals_week_in(c: &Connection, now: u64) -> anyhow::Result<Vec<GoalWeek>> {
     // A task that the user gave away or dropped is closed, but not finished.
     let hidden = hidden_in(c)?;
     let mut finished: HashSet<String> = HashSet::new();
-    let mut q = c.prepare("SELECT id FROM task WHERE done = 1 AND done_at >= ?1")?;
+    let mut q = c.prepare("SELECT id FROM user_task WHERE done = 1 AND done_at >= ?1")?;
     for r in q.query_map([from], |r| r.get::<_, String>(0))? {
         finished.insert(format!("task:{}", r?));
     }
@@ -642,14 +644,15 @@ pub fn pick(
                     undo.plan = Some(day.into());
                 }
                 if source == "task" {
-                    let (start, due): (Option<String>, Option<String>) =
-                        tx.query_row("SELECT start, due FROM task WHERE id = ?1", [id], |r| {
-                            Ok((r.get(0)?, r.get(1)?))
-                        })?;
+                    let (start, due): (Option<String>, Option<String>) = tx.query_row(
+                        "SELECT start, due FROM user_task WHERE id = ?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
                     // A start day after the due day is not allowed (tasks.rs).
                     if due.as_deref().is_none_or(|d| d >= day) {
                         tx.execute(
-                            "UPDATE task SET start = ?1, updated = ?2 WHERE id = ?3",
+                            "UPDATE task SET start = ?1, updated = ?2 WHERE doer = 'you' AND id = ?3",
                             rusqlite::params![day, now as i64, id],
                         )?;
                         undo.set_start = true;
@@ -728,7 +731,7 @@ pub fn undo_pick(dir: &Path, id: i64, now: u64) -> anyhow::Result<()> {
             // The pick did not finish the task (close_task), so there is no
             // real time and no job to take back.
             tx.execute(
-                "UPDATE task SET done = 0, done_at = NULL WHERE id = ?1 AND done = 1",
+                "UPDATE task SET done = 0, done_at = NULL WHERE doer = 'you' AND id = ?1 AND done = 1",
                 [t],
             )?;
         }
@@ -740,7 +743,7 @@ pub fn undo_pick(dir: &Path, id: i64, now: u64) -> anyhow::Result<()> {
         {
             // `note` is the start day that the pick set.
             tx.execute(
-                "UPDATE task SET start = ?1, updated = ?2 WHERE id = ?3 AND start = ?4",
+                "UPDATE task SET start = ?1, updated = ?2 WHERE doer = 'you' AND id = ?3 AND start = ?4",
                 rusqlite::params![undo.start, now as i64, t, note],
             )?;
         }
@@ -832,7 +835,7 @@ mod tests {
     fn age(d: &Path, key: &str, t: u64) {
         db::write(d, |tx| {
             tx.execute(
-                "UPDATE task SET created = ?1, updated = ?1 WHERE id = ?2",
+                "UPDATE task SET created = ?1, updated = ?1 WHERE doer = 'you' AND id = ?2",
                 rusqlite::params![t as i64, key.strip_prefix("task:").unwrap()],
             )?;
             Ok(())
@@ -961,7 +964,7 @@ mod tests {
         age(&d, &later, now - 60 * day);
         db::write(&d, |tx| {
             tx.execute(
-                "UPDATE task SET start = '2026-12-01' WHERE id = ?1",
+                "UPDATE task SET start = '2026-12-01' WHERE doer = 'you' AND id = ?1",
                 [later.strip_prefix("task:").unwrap()],
             )?;
             Ok(())
@@ -1155,10 +1158,12 @@ mod tests {
     fn a_dropped_task_is_not_finished_work() {
         let d = temp("notdone");
         let s = TaskStore::new(&d);
+        // The task first: the first open of the database can take a second,
+        // and the drop must not come before the last change of the task.
+        let a = task(&s, "Drop it", None);
         let now = crate::files::now();
         let today = crate::plan::today();
         let g = crate::goals::add(&d, "Ship 2.0", now).unwrap();
-        let a = task(&s, "Drop it", None);
         crate::worktime::start(&d, &a, now - 2400).unwrap();
         crate::brief::save(
             &d,

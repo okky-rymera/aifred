@@ -336,10 +336,11 @@ const KINDS: [Kind; 5] = [
         filter: "1",
     },
     Kind {
-        table: "task",
+        table: "user_task",
         vec: "task_vec",
-        key: "rowid",
+        key: "rid",
         text: "title || char(10) || notes",
+        // The view has only the user's tasks (db.rs SCHEMA_19).
         filter: "1",
     },
     Kind {

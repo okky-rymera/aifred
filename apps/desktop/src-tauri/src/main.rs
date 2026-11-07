@@ -1495,6 +1495,16 @@ async fn jobs(app: State<'_, App>, all: bool) -> CmdResult<Vec<Job>> {
     blocking(&app, move |a| aifred_core::jobs::list(&a.dir, all)).await
 }
 
+/// The job that writes the brief again when a task is done (the Settings
+/// page). It cannot be deleted, so it is always there.
+#[tauri::command]
+async fn brief_job(app: State<'_, App>) -> CmdResult<Job> {
+    blocking(&app, move |a| {
+        aifred_core::jobs::get(&a.dir, aifred_core::jobs::BRIEF_JOB)
+    })
+    .await
+}
+
 /// The latest runs of one job, or of all jobs, newest first. No skipped runs
 /// unless `skipped` is true.
 #[tauri::command]
@@ -1503,9 +1513,10 @@ async fn job_runs(
     id: Option<String>,
     limit: u32,
     skipped: bool,
+    brief: bool,
 ) -> CmdResult<Vec<Run>> {
     blocking(&app, move |a| {
-        aifred_core::jobs::runs(&a.dir, id.as_deref(), limit, skipped)
+        aifred_core::jobs::runs(&a.dir, id.as_deref(), limit, skipped, brief)
     })
     .await
 }
@@ -1643,6 +1654,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         brief,
         write_brief,
         jobs,
+        brief_job,
         job_runs,
         set_job_status,
         delete_job,

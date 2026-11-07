@@ -1208,9 +1208,17 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       }
       case "jobs":
         return structuredClone(fake.jobs.filter((j) => args.all || j.status === "active" || j.status === "paused"));
+      case "brief_job": {
+        const j = fake.jobs.find((x) => x.action === "brief");
+        if (!j) throw "no job with id brief-on-task-done";
+        return structuredClone(j);
+      }
       case "job_runs":
         return structuredClone(
-          fake.jobRuns.filter((r) => (args.id == null || r.job === args.id) && (args.skipped || r.state !== "skipped")).slice(0, args.limit),
+          fake.jobRuns
+            .filter((r) => (args.id == null || r.job === args.id) && (args.skipped || r.state !== "skipped"))
+            .filter((r) => args.brief || fake.jobs.find((j) => j.id === r.job)?.action !== "brief")
+            .slice(0, args.limit),
         );
       case "set_job_status": {
         const j = fake.jobs.find((x) => x.id === args.id);
@@ -1248,7 +1256,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       default:
         throw `fake backend: unknown command ${cmd}`;
     }
-  });
+  }, { shouldMockEvents: true });
   return fake;
 }
 

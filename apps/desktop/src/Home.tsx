@@ -1,6 +1,6 @@
 // Home: the brief from AIfred, the day plan in one line, and the list in
 // groups. The box at the bottom adds a task or asks AIfred.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
@@ -468,14 +468,81 @@ function HomeBox() {
   );
 }
 
-export function Home() {
-  const { reviewCards, setReviewCard, items, links, today, githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
+type Groups = ReturnType<typeof groupItems>;
+
+/** The list in groups, worked out again only when the items, the links, or
+ * the day change. `given`: the groups that the caller has already. Then
+ * nothing is worked out. */
+function useGroups(given?: Groups): Groups {
+  const { items, links, today } = useApp();
+  const own = useMemo(() => (given ? null : groupItems(joinLinked(items, links.links), today)), [given, items, links.links, today]);
+  return given ?? own!;
+}
+
+/** The user's raw list in groups: "Needs you now", "Today", "New", "Open",
+ * with "Later" and "Finished" behind buttons. Home and the Tasks page show it.
+ * `before` goes before the buttons under the groups. `empty` is the text for
+ * an empty list. `groups`: the groups when the caller has them already. */
+export function TaskGroups(props: { before?: React.ReactNode; empty?: string; groups?: Groups }) {
+  const { githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
   const [showLater, setShowLater] = useState(false);
   const [showDone, setShowDone] = useState(false);
-  const g = groupItems(joinLinked(items, links.links), today);
+  const g = useGroups(props.groups);
+  const nothing = !g.now.length && !g.today.length && !g.isNew.length && !g.soon.length;
+  return (
+    <>
+      {tasksError && <div className="note-line err">Cannot load your tasks: {tasksError}</div>}
+      {githubState === "loading" && <div className="note-line">Loading GitHub items…</div>}
+      {githubWarning && githubState === "ok" && <div className="note-line warn">{githubWarning}</div>}
+      {!["loading", "ok", "off"].includes(githubState) && <div className="note-line err">GitHub: {githubState}</div>}
+      {clickupState === "loading" && <div className="note-line">Loading ClickUp tasks…</div>}
+      {clickupWarning && clickupState === "ok" && <div className="note-line warn">{clickupWarning}</div>}
+      {!["loading", "ok", "off"].includes(clickupState) && <div className="note-line err">ClickUp: {clickupState}</div>}
+      {mailWarning && mailState === "ok" && <div className="note-line warn">{mailWarning}</div>}
+      {!["loading", "ok", "off"].includes(mailState) && <div className="note-line err">Gmail: {mailState}</div>}
+      <Group title="Needs you now" list={g.now} alert why />
+      <Group title="Today" list={g.today} hideToday why />
+      <Group title="New" list={g.isNew} why />
+      <Group title="Open" list={g.soon} />
+      {nothing && !tasksError && githubState !== "loading" && (
+        <div className="empty">{g.later.length ? "Nothing to do today. Some tasks start later." : (props.empty ?? "Nothing to do. Add a task in the box below.")}</div>
+      )}
+      <div className="more">
+        {props.before}
+        {g.later.length > 0 && (
+          <button className="linkbtn" onClick={() => setShowLater((s) => !s)} title="Tasks with a start day after today">
+            {showLater ? "Hide" : "Show"} later ({g.later.length})
+          </button>
+        )}
+        {g.done.length > 0 && (
+          <button className="linkbtn" onClick={() => setShowDone((s) => !s)}>
+            {showDone ? "Hide" : "Show"} finished ({g.done.length})
+          </button>
+        )}
+      </div>
+      {showLater && g.later.length > 0 && (
+        <ul className="list card-list" aria-label="Later">
+          {g.later.map((i) => (
+            <Row key={i.key} item={i} />
+          ))}
+        </ul>
+      )}
+      {showDone && g.done.length > 0 && (
+        <ul className="list card-list" aria-label="Finished" style={{ marginTop: 8 }}>
+          {g.done.map((i) => (
+            <Row key={i.key} item={i} noActs />
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+export function Home() {
+  const { reviewCards, setReviewCard, today, goTasks } = useApp();
+  const g = useGroups();
   const hour = new Date().getHours();
   const hello = hour < 12 ? "Good morning." : hour < 18 ? "Good afternoon." : "Good evening.";
-  const nothing = !g.now.length && !g.today.length && !g.isNew.length && !g.soon.length;
   return (
     <div className="home-main">
       <div className="scroll">
@@ -490,54 +557,22 @@ export function Home() {
           {reviewCards.week !== "hidden" && <WeekReviewCard force={reviewCards.week === "open"} onClose={() => setReviewCard("week", "hidden")} />}
           <WaitingCard />
           <LinksCard />
-          {tasksError && <div className="note-line err">Cannot load your tasks: {tasksError}</div>}
-          {githubState === "loading" && <div className="note-line">Loading GitHub items…</div>}
-          {githubWarning && githubState === "ok" && <div className="note-line warn">{githubWarning}</div>}
-          {!["loading", "ok", "off"].includes(githubState) && <div className="note-line err">GitHub: {githubState}</div>}
-          {clickupState === "loading" && <div className="note-line">Loading ClickUp tasks…</div>}
-          {clickupWarning && clickupState === "ok" && <div className="note-line warn">{clickupWarning}</div>}
-          {!["loading", "ok", "off"].includes(clickupState) && <div className="note-line err">ClickUp: {clickupState}</div>}
-          {mailWarning && mailState === "ok" && <div className="note-line warn">{mailWarning}</div>}
-          {!["loading", "ok", "off"].includes(mailState) && <div className="note-line err">Gmail: {mailState}</div>}
-          <Group title="Needs you now" list={g.now} alert why />
-          <Group title="Today" list={g.today} hideToday why />
-          <Group title="New" list={g.isNew} why />
-          <Group title="Open" list={g.soon} />
-          {nothing && !tasksError && githubState !== "loading" && (
-            <div className="empty">{g.later.length ? "Nothing to do today. Some tasks start later." : "Nothing to do. Add a task in the box below."}</div>
-          )}
-          <div className="more">
-            <button className="linkbtn" onClick={() => setReviewCard("day", "open")} title="What you finished today, and what moves to tomorrow">
-              End the day
-            </button>
-            <button className="linkbtn" onClick={() => setReviewCard("week", "open")} title="Check your goals and the items that did not move for 3 weeks">
-              Weekly review
-            </button>
-            {g.later.length > 0 && (
-              <button className="linkbtn" onClick={() => setShowLater((s) => !s)} title="Tasks with a start day after today">
-                {showLater ? "Hide" : "Show"} later ({g.later.length})
-              </button>
-            )}
-            {g.done.length > 0 && (
-              <button className="linkbtn" onClick={() => setShowDone((s) => !s)}>
-                {showDone ? "Hide" : "Show"} finished ({g.done.length})
-              </button>
-            )}
-          </div>
-          {showLater && g.later.length > 0 && (
-            <ul className="list card-list" aria-label="Later">
-              {g.later.map((i) => (
-                <Row key={i.key} item={i} />
-              ))}
-            </ul>
-          )}
-          {showDone && g.done.length > 0 && (
-            <ul className="list card-list" aria-label="Finished" style={{ marginTop: 8 }}>
-              {g.done.map((i) => (
-                <Row key={i.key} item={i} noActs />
-              ))}
-            </ul>
-          )}
+          <TaskGroups
+            groups={g}
+            before={
+              <>
+                <button className="linkbtn" onClick={() => setReviewCard("day", "open")} title="What you finished today, and what moves to tomorrow">
+                  End the day
+                </button>
+                <button className="linkbtn" onClick={() => setReviewCard("week", "open")} title="Check your goals and the items that did not move for 3 weeks">
+                  Weekly review
+                </button>
+                <button className="linkbtn" onClick={goTasks} title="Your tasks and AIfred's tasks">
+                  See all tasks
+                </button>
+              </>
+            }
+          />
         </div>
       </div>
       <div className="a-foot">

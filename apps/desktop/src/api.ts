@@ -1,5 +1,6 @@
 // Typed wrappers around the desktop app's Rust commands.
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 /** A file that the user sent or keeps on a task (uploads.rs). */
 export type FileRef = { id: string; name: string; size: number };
@@ -315,12 +316,12 @@ export type Trigger =
   | { kind: "repeat"; start: string; rule: string }
   | { kind: "event"; event: string; wait_secs: number };
 
-/** One of AIfred's own jobs: a reminder, an AI run, or the brief update. */
+/** One of AIfred's own jobs: a reminder, an AI run, the brief update, or a rule that adds your task at each time. */
 export type Job = {
   id: string;
   title: string;
-  action: "remind" | "agent" | "brief";
-  /** The reminder text, or the instructions for the AI. */
+  action: "remind" | "agent" | "brief" | "task";
+  /** The reminder text, the instructions for the AI, or the notes of each new task. */
   message: string;
   trigger: Trigger;
   tz: string;
@@ -353,8 +354,12 @@ export type JobRun = {
 
 /** all false: only the active and paused jobs. */
 export const jobs = (all: boolean) => invoke<Job[]>("jobs", { all });
+/** The job that writes the brief again when you finish a task. */
+export const briefJob = () => invoke<Job>("brief_job");
 /** Newest first. id null: the runs of all jobs. */
-export const jobRuns = (id: string | null, limit: number, skipped: boolean) => invoke<JobRun[]>("job_runs", { id, limit, skipped });
+/** `brief` false: the runs of the brief job (action "brief") are left out. */
+export const jobRuns = (id: string | null, limit: number, skipped: boolean, brief: boolean) =>
+  invoke<JobRun[]>("job_runs", { id, limit, skipped, brief });
 export const setJobStatus = (id: string, status: "active" | "paused") => invoke<Job>("set_job_status", { id, status });
 export const deleteJob = (id: string) => invoke<void>("delete_job", { id });
 export const itemDetails = (key: string) => invoke<ItemDetails>("item_details", { key });
@@ -621,3 +626,8 @@ export function describe(e: ProgressEvent): string {
       return `Using ${e.server} → ${e.tool}`;
   }
 }
+
+/** The event that AIfred sends when its scheduler adds a task (a repeating task). */
+export const TASKS_CHANGED = "tasks-changed";
+/** Calls `f` each time AIfred adds a task by itself. Returns the stop function. */
+export const onTasksChanged = (f: () => void) => listen(TASKS_CHANGED, () => f());

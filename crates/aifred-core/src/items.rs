@@ -34,7 +34,7 @@ pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
     let (source, id) = split(key)?;
     let found = if source == "task" {
         c.query_row(
-            "SELECT 1 FROM task WHERE id = ?1 AND done = 0",
+            "SELECT 1 FROM user_task WHERE id = ?1 AND done = 0",
             [id],
             |_| Ok(()),
         )
@@ -58,9 +58,11 @@ pub fn title_place(c: &Connection, key: &str) -> anyhow::Result<Option<(String, 
     let (source, id) = split(key)?;
     if source == "task" {
         let row: Option<(String, String)> = c
-            .query_row("SELECT title, tags FROM task WHERE id = ?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT title, tags FROM user_task WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?;
         return Ok(row.map(|(title, tags)| {
             let tags: Vec<String> = serde_json::from_str(&tags).unwrap_or_default();
@@ -126,7 +128,8 @@ const FIRST_DOWNLOAD_SECS: u64 = 600;
 pub fn meta(dir: &Path, now: u64) -> anyhow::Result<Vec<ItemMeta>> {
     db::read(dir, |c| {
         let mut out = Vec::new();
-        let mut q = c.prepare("SELECT id, created, summary, notes FROM task WHERE done = 0")?;
+        let mut q =
+            c.prepare("SELECT id, created, summary, notes FROM user_task WHERE done = 0")?;
         for r in q.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -194,9 +197,11 @@ pub fn details(dir: &Path, key: &str) -> anyhow::Result<ItemDetails> {
     let (source, id) = split(key)?;
     db::read(dir, |c| {
         let row: Option<(String, Option<String>)> = if source == "task" {
-            c.query_row("SELECT notes, summary FROM task WHERE id = ?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            c.query_row(
+                "SELECT notes, summary FROM user_task WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?
         } else {
             c.query_row(
@@ -226,7 +231,9 @@ pub fn task_files(dir: &Path, key: &str) -> anyhow::Result<Vec<crate::uploads::F
     }
     db::read(dir, |c| {
         let files: Option<String> = c
-            .query_row("SELECT files FROM task WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT files FROM user_task WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .optional()?;
         Ok(files
             .map(|j| serde_json::from_str(&j))
@@ -243,7 +250,7 @@ pub fn context(dir: &Path, key: &str, max: usize) -> anyhow::Result<String> {
         if source == "task" {
             let t = c
                 .query_row(
-                    "SELECT title, notes, done, due, start, priority, tags, checklist, files FROM task WHERE id = ?1",
+                    "SELECT title, notes, done, due, start, priority, tags, checklist, files FROM user_task WHERE id = ?1",
                     [id],
                     |r| {
                         Ok(serde_json::json!({

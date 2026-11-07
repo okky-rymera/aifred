@@ -1255,7 +1255,7 @@ mod tests {
             "no AI call when nothing is missing"
         );
         let o = crate::overview::build(&dir, None).unwrap();
-        let summaries: Vec<&str> = o["local_tasks"]
+        let summaries: Vec<&str> = o["tasks"]
             .as_array()
             .unwrap()
             .iter()

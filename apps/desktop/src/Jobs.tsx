@@ -1,13 +1,14 @@
-// "AIfred's jobs": the reminders and AI runs that AIfred does by itself
+// AIfred's tasks: the reminders and AI runs that AIfred does by itself
 // (aifred_core::jobs). You make them in the chat ("remind me every Monday at
-// 9"). Here you see them, pause, start, or delete them, and read what each
-// run said. The page loads again every 30 seconds, because the jobs run in
-// the background.
+// 9"). The Tasks page shows them next to your tasks. There you pause, start,
+// or delete them, and read what each run said. The list loads again every 30
+// seconds and after a task change, because the runs happen in the background.
 import { useCallback, useEffect, useState } from "react";
 import * as api from "./api";
+import { useTasksChanged } from "./useTasksChanged";
 
 const RELOAD_MS = 30_000;
-const LOAD_ERROR = "Cannot load the jobs";
+const LOAD_ERROR = "Cannot load AIfred's tasks";
 
 /** A Unix time as local text, for example "Mon 9 Nov, 09:00". */
 function when(t: number): string {
@@ -17,6 +18,7 @@ function when(t: number): string {
 const ACTION: Record<api.Job["action"], string> = {
   remind: "Reminder",
   agent: "AIfred checks",
+  task: "Adds your task",
   brief: "Brief update",
 };
 
@@ -83,14 +85,32 @@ function JobRow({ job, onChange, onError }: { job: api.Job; onChange: () => void
   );
 }
 
-export function JobsPage() {
+/** Calls `load` now, every 30 seconds, and when a "task" job adds a task
+ * (the "tasks-changed" event). The runs happen in the background, so a list
+ * that loads only once goes out of date. A finished task starts the brief
+ * job, but sends no event: that run shows at the next 30-second load. */
+function useReload(load: () => void) {
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, RELOAD_MS);
+    return () => clearInterval(timer);
+  }, [load]);
+  useTasksChanged(load);
+}
+
+/** AIfred's tasks: the reminders and the checks that AIfred runs by itself,
+ * with the latest runs. The system job that writes the brief is not here: it
+ * is on the Settings page (BriefJob). */
+export function AifredTasks() {
   const [list, setList] = useState<api.Job[] | null>(null);
   const [runs, setRuns] = useState<api.JobRun[]>([]);
   const [showEnded, setShowEnded] = useState(false);
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
-    Promise.all([api.jobs(true), api.jobRuns(null, 20, false)])
+    // The brief job runs after each finished task. Its runs stay out in the
+    // query, so they cannot fill the 20 places (jobs.rs runs).
+    Promise.all([api.jobs(true), api.jobRuns(null, 20, false, false)])
       .then(([j, r]) => {
         setList(j);
         setRuns(r);
@@ -100,25 +120,22 @@ export function JobsPage() {
       .catch((e) => setError(`${LOAD_ERROR}: ${e}`));
   }, []);
 
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, RELOAD_MS);
-    return () => clearInterval(timer);
-  }, [load]);
+  useReload(load);
 
-  const open = (list ?? []).filter((j) => j.status === "active" || j.status === "paused");
-  const ended = (list ?? []).filter((j) => j.status === "done" || j.status === "off");
-  const title = (id: string) => list?.find((j) => j.id === id)?.title ?? "A deleted job";
+  const work = (list ?? []).filter((j) => j.action !== "brief");
+  const open = work.filter((j) => j.status === "active" || j.status === "paused");
+  const ended = work.filter((j) => j.status === "done" || j.status === "off");
+  const title = (id: string) => list?.find((j) => j.id === id)?.title ?? "A deleted task";
 
   return (
     <>
-      <h2 className="title">AIfred's jobs</h2>
       <p className="note-line" style={{ paddingTop: 0 }}>
         AIfred does these by itself while it runs, also when the window is closed to the tray. Ask in the chat to add one, for
-        example "remind me every Monday at 9 to send my timesheet".
+        example "remind me every Monday at 9 to send my timesheet", or "add a task to pay rent on the 1st of each month".
+        A repeating task of yours shows here as its rule. Each new copy goes to your list, with its own date.
       </p>
       {error && <p className="note-line err">{error}</p>}
-      {list && open.length === 0 && <p className="note-line">AIfred has no jobs now.</p>}
+      {list && open.length === 0 && <p className="note-line">AIfred has no tasks now.</p>}
       <ul className="flex flex-col gap-2">
         {open.map((j) => (
           <JobRow key={j.id} job={j} onChange={load} onError={setError} />
@@ -138,7 +155,7 @@ export function JobsPage() {
           )}
         </>
       )}
-      <h3 className="mt-6 mb-2 text-sm font-semibold">Latest runs</h3>
+      <h4 className="mt-6 mb-2 text-sm font-semibold">Latest runs</h4>
       {runs.length === 0 && <p className="note-line">No runs yet.</p>}
       <ul className="flex flex-col gap-1">
         {runs.map((r) => (
@@ -151,6 +168,34 @@ export function JobsPage() {
           </li>
         ))}
       </ul>
+    </>
+  );
+}
+
+/** The system job that writes the brief again when you finish a task. It is
+ * not work, so it is on the Settings page and not in the task list. It can
+ * pause, but not go away (jobs.rs). */
+export function BriefJob() {
+  const [job, setJob] = useState<api.Job | null>(null);
+  const [error, setError] = useState("");
+  const load = useCallback(() => {
+    api
+      .briefJob()
+      .then((j) => {
+        setJob(j);
+        setError((old) => (old.startsWith(LOAD_ERROR) ? "" : old));
+      })
+      .catch((e) => setError(`${LOAD_ERROR}: ${e}`));
+  }, []);
+  useReload(load);
+  return (
+    <>
+      {error && <p className="text-sm text-red-600">{error}</p>}
+      {job && (
+        <ul>
+          <JobRow job={job} onChange={load} onError={setError} />
+        </ul>
+      )}
     </>
   );
 }

@@ -274,7 +274,7 @@ struct Open {
 
 fn open_items(c: &Connection) -> anyhow::Result<Vec<Open>> {
     let mut out = Vec::new();
-    let mut q = c.prepare("SELECT id, title, notes FROM task WHERE done = 0")?;
+    let mut q = c.prepare("SELECT id, title, notes FROM user_task WHERE done = 0")?;
     for r in q.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,

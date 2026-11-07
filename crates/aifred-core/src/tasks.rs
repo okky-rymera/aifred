@@ -272,7 +272,7 @@ impl TaskStore {
     /// All tasks, in the order they were added.
     pub fn load(&self) -> anyhow::Result<Vec<Task>> {
         db::read(&self.dir, |c| {
-            let mut q = c.prepare(&format!("SELECT {COLUMNS} FROM task ORDER BY rowid"))?;
+            let mut q = c.prepare(&format!("SELECT {COLUMNS} FROM user_task ORDER BY rid"))?;
             Ok(q.query_map([], from_row)?.collect::<Result<_, _>>()?)
         })
     }
@@ -299,13 +299,25 @@ impl TaskStore {
 
     /// Adds a task with all the fields in `f`. The title is necessary.
     pub fn create(&self, f: TaskFields, added_by: &str) -> anyhow::Result<Task> {
-        let mut task = blank(added_by);
         let files = self.files(&f)?;
-        apply(&mut task, f)?;
+        let mut task = new_task(f, added_by)?;
         if let Some(files) = files {
             task.files = files;
         }
         db::write(&self.dir, |tx| save_new(tx, task))
+    }
+
+    /// `create` in a change that is open. It cannot add files: it has no
+    /// data folder.
+    pub(crate) fn create_in(
+        tx: &Transaction,
+        f: TaskFields,
+        added_by: &str,
+    ) -> anyhow::Result<Task> {
+        if f.files.is_some() {
+            bail!("create_in cannot add files");
+        }
+        save_new(tx, new_task(f, added_by)?)
     }
 
     /// Changes the fields in `f`. The other fields stay as they are.
@@ -313,7 +325,7 @@ impl TaskStore {
         db::write(&self.dir, |tx| {
             let Some(mut task) = tx
                 .query_row(
-                    &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+                    &format!("SELECT {COLUMNS} FROM user_task WHERE id = ?1"),
                     [id],
                     from_row,
                 )
@@ -364,7 +376,7 @@ impl TaskStore {
         db::write(&self.dir, |tx| {
             let Some(mut task) = tx
                 .query_row(
-                    &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+                    &format!("SELECT {COLUMNS} FROM user_task WHERE id = ?1"),
                     [id],
                     from_row,
                 )
@@ -377,7 +389,7 @@ impl TaskStore {
                 _ => bail!("the checklist changed. Reload the list and try again"),
             }
             tx.execute(
-                "UPDATE task SET checklist = ?1, updated = ?2 WHERE id = ?3",
+                "UPDATE task SET checklist = ?1, updated = ?2 WHERE doer = 'you' AND id = ?3",
                 rusqlite::params![serde_json::to_string(&task.checklist)?, now() as i64, id],
             )?;
             Ok(task)
@@ -412,13 +424,13 @@ impl TaskStore {
                 &self.dir,
                 query,
                 "task_vec",
-                "SELECT t.rowid FROM task_fts f JOIN task t ON t.rowid = f.rowid
+                "SELECT t.rid FROM task_fts f JOIN user_task t ON t.rid = f.rowid
                  WHERE task_fts MATCH ?1 AND (?2 OR t.done = 0) ORDER BY bm25(task_fts, 2.0, 1.0)",
-                "SELECT 1 FROM task WHERE rowid = ?1 AND (?2 OR done = 0)",
+                "SELECT 1 FROM user_task WHERE rid = ?1 AND (?2 OR done = 0)",
                 &[&include_done],
                 limit,
             )?;
-            let mut get = c.prepare(&format!("SELECT {COLUMNS} FROM task WHERE rowid = ?1"))?;
+            let mut get = c.prepare(&format!("SELECT {COLUMNS} FROM user_task WHERE rid = ?1"))?;
             Ok(ids
                 .iter()
                 .map(|id| get.query_row([id], from_row))
@@ -428,7 +440,7 @@ impl TaskStore {
 
     pub fn remove(&self, id: &str) -> anyhow::Result<()> {
         db::write(&self.dir, |tx| {
-            if tx.execute("DELETE FROM task WHERE id = ?1", [id])? == 0 {
+            if tx.execute("DELETE FROM task WHERE doer = 'you' AND id = ?1", [id])? == 0 {
                 bail!("no task with id {id}");
             }
             crate::worktime::forget_in(tx, &format!("task:{id}"))?;
@@ -442,7 +454,7 @@ impl TaskStore {
 fn get_in(tx: &Transaction, id: &str) -> anyhow::Result<Task> {
     match tx
         .query_row(
-            &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+            &format!("SELECT {COLUMNS} FROM user_task WHERE id = ?1"),
             [id],
             from_row,
         )
@@ -488,6 +500,14 @@ fn blank(added_by: &str) -> Task {
     }
 }
 
+/// A new task with the fields in `f`, not saved yet. `f.files` is not read:
+/// the caller resolves the files (TaskStore::files).
+fn new_task(f: TaskFields, added_by: &str) -> anyhow::Result<Task> {
+    let mut task = blank(added_by);
+    apply(&mut task, f)?;
+    Ok(task)
+}
+
 /// A new task with a title and an open checklist, in a change that is open.
 /// For steps.rs: the task and its link must be in one save.
 pub(crate) fn create_with_steps_in(
@@ -496,9 +516,8 @@ pub(crate) fn create_with_steps_in(
     steps: &[String],
     added_by: &str,
 ) -> anyhow::Result<Task> {
-    let mut task = blank(added_by);
-    apply(
-        &mut task,
+    TaskStore::create_in(
+        tx,
         TaskFields {
             title: Some(title.into()),
             checklist: Some(
@@ -512,8 +531,8 @@ pub(crate) fn create_with_steps_in(
             ),
             ..Default::default()
         },
-    )?;
-    save_new(tx, task)
+        added_by,
+    )
 }
 
 /// add_steps(), in a change that is open.
@@ -554,13 +573,15 @@ fn set_done_in(
 ) -> anyhow::Result<(Task, Option<crate::worktime::Done>)> {
     let done_at = done.then(|| now() as i64);
     let was_done: Option<bool> = tx
-        .query_row("SELECT done FROM task WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT done FROM user_task WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .optional()?;
     let Some(was_done) = was_done else {
         bail!("no task with id {id}");
     };
     tx.execute(
-        "UPDATE task SET done = ?1, done_at = ?2, updated = ?3 WHERE id = ?4",
+        "UPDATE task SET done = ?1, done_at = ?2, updated = ?3 WHERE doer = 'you' AND id = ?4",
         rusqlite::params![done, done_at, now() as i64, id],
     )?;
     // A task that is done now starts the jobs that wait for it (jobs.rs).
@@ -575,7 +596,7 @@ fn set_done_in(
         crate::worktime::unfinish_in(tx, &key)?;
     }
     let task = tx.query_row(
-        &format!("SELECT {COLUMNS} FROM task WHERE id = ?1"),
+        &format!("SELECT {COLUMNS} FROM user_task WHERE id = ?1"),
         [id],
         from_row,
     )?;
@@ -588,12 +609,12 @@ fn set_done_in(
 fn write_fields(tx: &Transaction, t: &Task, text_changed: bool) -> anyhow::Result<()> {
     if text_changed {
         tx.execute(
-            "UPDATE task SET title = ?1, notes = ?2 WHERE id = ?3",
+            "UPDATE task SET title = ?1, notes = ?2 WHERE doer = 'you' AND id = ?3",
             rusqlite::params![t.title, t.notes, t.id],
         )?;
     }
     tx.execute(
-        "UPDATE task SET due = ?1, start = ?2, priority = ?3, tags = ?4, checklist = ?5, files = ?6, updated = ?7 WHERE id = ?8",
+        "UPDATE task SET due = ?1, start = ?2, priority = ?3, tags = ?4, checklist = ?5, files = ?6, updated = ?7 WHERE doer = 'you' AND id = ?8",
         rusqlite::params![
             t.due,
             t.start,
@@ -619,6 +640,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         (TaskStore::new(&dir), dir)
+    }
+
+    /// AIfred's tasks share the task table (db.rs SCHEMA_19). No read of the
+    /// user's tasks may show one, and no change of a user task may touch one.
+    #[test]
+    fn aifred_tasks_are_not_in_any_read_of_the_users_tasks() {
+        let (s, dir) = store("aifred-rows");
+        s.add("Pay rent", "", "you").unwrap();
+        let job = crate::jobs::create(
+            &dir,
+            crate::jobs::NewJob {
+                title: "Check invoice PR".into(),
+                action: "remind".into(),
+                message: "Look at the invoice PR".into(),
+                trigger: Some(crate::jobs::Trigger::Once {
+                    at: "2030-01-01T09:00".into(),
+                }),
+                tz: Some("UTC".into()),
+                created_by: "you".into(),
+            },
+        )
+        .unwrap();
+        // Long notes, so each filter has something to hide.
+        db::write_jobs(&dir, |tx| {
+            tx.execute(
+                "UPDATE task SET notes = ?1 WHERE id = ?2",
+                rusqlite::params!["invoice ".repeat(200), job.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let hidden = |what: &str, text: String| {
+            assert!(
+                !text.contains("Check invoice PR") && !text.contains(&job.id),
+                "{what} shows AIfred's task: {text}"
+            );
+        };
+        let titles: Vec<String> = s.load().unwrap().into_iter().map(|t| t.title).collect();
+        assert_eq!(titles, ["Pay rent"]);
+        hidden(
+            "search",
+            format!("{:?}", s.search("invoice", true, None).unwrap()),
+        );
+        assert!(s.set_done(&job.id, true).is_err());
+        assert!(
+            s.update(
+                &job.id,
+                TaskFields {
+                    title: Some("x".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(s.remove(&job.id).is_err());
+        let key = format!("task:{}", job.id);
+        assert!(!crate::items::is_open(&db::open(&dir).unwrap(), &key).unwrap());
+        hidden(
+            "items",
+            format!("{:?}", crate::items::meta(&dir, now()).unwrap()),
+        );
+        let pending = crate::summaries::pending(&dir, 50, &Default::default()).unwrap();
+        assert_eq!(pending.len(), 0, "only AIfred's task has long notes");
+        // Done today, for the reviews.
+        db::write_jobs(&dir, |tx| {
+            Ok(tx.execute("UPDATE task SET status = 'done' WHERE id = ?1", [&job.id])?)
+        })
+        .unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        hidden(
+            "day check",
+            format!("{:?}", crate::review::day_check(&dir, &today).unwrap()),
+        );
+        hidden(
+            "week",
+            format!("{:?}", crate::review::week(&dir, &today, now()).unwrap()),
+        );
+        hidden("links", format!("{:?}", crate::links::get(&dir).unwrap()));
+        let o = crate::overview::build(&dir, None).unwrap();
+        let keys: Vec<&str> = o["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["key"].as_str())
+            .collect();
+        assert!(!keys.contains(&key.as_str()));
+        // The job is still AIfred's, and done.
+        assert_eq!(crate::jobs::get(&dir, &job.id).unwrap().status, "done");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -1,9 +1,10 @@
 // The full window with a fake backend: Home (brief and list), the task
 // panel, the chats, Day plan, Settings, and Memory.
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import App from "./App";
 import { DEFAULT_SETTINGS, type Answer } from "./api";
 import { addDays, dayOf } from "./items";
@@ -908,7 +909,7 @@ describe("the home box", () => {
     await startApp();
     await userEvent.click(screen.getByRole("button", { name: "Ask AIfred" }));
     expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "AIfred's jobs" }));
+    await userEvent.click(screen.getByRole("button", { name: "Tasks" }));
     await userEvent.click(screen.getByRole("button", { name: "Home" }));
     expect(screen.getByRole("button", { name: "Add task" })).toBeInTheDocument();
     await userEvent.click(homeBox());
@@ -1638,10 +1639,95 @@ describe("memory page", () => {
   });
 });
 
-describe("AIfred's jobs page", () => {
-  const openJobs = () => userEvent.click(screen.getByRole("button", { name: "AIfred's jobs" }));
+describe("Tasks page", () => {
+  // The page keeps the last filter in the window storage.
+  beforeEach(() => localStorage.removeItem("aifred-task-filter"));
+  const openTasks = async (filter?: string) => {
+    await userEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    if (filter) await userEvent.click(within(screen.getByRole("group", { name: "Whose tasks" })).getByRole("button", { name: filter }));
+  };
 
-  it("shows the jobs and the latest runs, and pauses and deletes a job", async () => {
+  it("starts with your tasks, and the filter shows AIfred's tasks or both", async () => {
+    await startApp({
+      tasks: [task("Pay rent")],
+      jobs: [job("j1", "Timesheet reminder"), job("brief-on-task-done", "Update the brief when you finish a task", { action: "brief", trigger: { kind: "event", event: "task_done", wait_secs: 90 } })],
+    });
+    await openTasks();
+    expect(screen.getByRole("button", { name: "Mine" })).toHaveAttribute("aria-pressed", "true");
+    const mine = screen.getByRole("region", { name: "Your tasks" });
+    expect(await within(mine).findByText("Pay rent")).toBeInTheDocument();
+    expect(screen.queryByText("Timesheet reminder")).not.toBeInTheDocument();
+
+    await openTasks("AIfred's");
+    expect(await screen.findByText("Timesheet reminder")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Your tasks" })).not.toBeInTheDocument();
+    // The brief job is not work: it is on the Settings page.
+    expect(screen.queryByText("Update the brief when you finish a task")).not.toBeInTheDocument();
+
+    await openTasks("Both");
+    expect(within(screen.getByRole("region", { name: "Your tasks" })).getByText("Pay rent")).toBeInTheDocument();
+    expect(await within(screen.getByRole("region", { name: "AIfred's tasks" })).findByText("Timesheet reminder")).toBeInTheDocument();
+  });
+
+  it("shows a task that AIfred adds by itself, with no reload", async () => {
+    const fake = await startApp({
+      tasks: [task("Pay rent")],
+      jobs: [job("j1", "Water the plants", { action: "task" })],
+    });
+    await openTasks("Both");
+    expect(await screen.findByText("Adds your task")).toBeInTheDocument();
+    fake.tasks.push(task("Water the plants"));
+    await emit("tasks-changed");
+    const mine = screen.getByRole("region", { name: "Your tasks" });
+    expect(await within(mine).findByText("Water the plants")).toBeInTheDocument();
+  });
+
+  it("a click on a task opens its panel and stays on the Tasks page", async () => {
+    await startApp({ tasks: [task("Pay rent")] });
+    await openTasks();
+    await userEvent.click(await screen.findByRole("button", { name: "Open details: Pay rent" }));
+    expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveValue("Pay rent");
+    expect(screen.getByRole("heading", { name: "Tasks" })).toBeInTheDocument();
+  });
+
+  it("an item that opens from the item panel shows its row also when the filter is AIfred's", async () => {
+    await startApp({
+      clickupToken: "pk_test",
+      clickup: [clickupItem("86a", "Checkout totals")],
+      tasks: [task("Tax work", { id: "t1" })],
+      links: [{ key: "clickup:86a", main: "task:t1" }],
+    });
+    await openTasks();
+    await openItem("Tax work");
+    // The panel stays open when you show AIfred's tasks.
+    await userEvent.click(within(screen.getByRole("group", { name: "Whose tasks" })).getByRole("button", { name: "AIfred's" }));
+    expect(screen.queryByRole("region", { name: "Your tasks" })).not.toBeInTheDocument();
+    const group = await within(details()).findByRole("list", { name: "Same work" });
+    await userEvent.click(within(group).getByRole("button", { name: "Open details: Checkout totals" }));
+    expect(screen.getByRole("button", { name: "Both" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(screen.getByRole("region", { name: "Your tasks" })).getByText("Tax work")).toBeInTheDocument();
+    // The saved filter does not change.
+    expect(localStorage.getItem("aifred-task-filter")).toBe("aifred");
+  });
+
+  it("home opens the Tasks page", async () => {
+    await startApp({ tasks: [task("Pay rent")] });
+    await userEvent.click(screen.getByRole("button", { name: "See all tasks" }));
+    expect(screen.getByRole("heading", { name: "Tasks" })).toBeInTheDocument();
+  });
+
+  it("Settings shows the brief job, and it can pause", async () => {
+    const fake = await startApp({
+      jobs: [job("brief-on-task-done", "Update the brief when you finish a task", { action: "brief", trigger: { kind: "event", event: "task_done", wait_secs: 90 } })],
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Update the brief when you finish a task")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete: Update the brief when you finish a task" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Pause: Update the brief when you finish a task" }));
+    await waitFor(() => expect(fake.jobs[0].status).toBe("paused"));
+  });
+
+  it("shows AIfred's tasks and the latest runs, and pauses and deletes a task", async () => {
     const now = Math.floor(Date.now() / 1000);
     const fake = await startApp({
       jobs: [
@@ -1654,16 +1740,16 @@ describe("AIfred's jobs page", () => {
         { id: 1, job: "j1", planned: now - 99, started: null, finished: null, state: "skipped", late: false, note: "AIfred was not running at this time.", output: "", cost_usd: null },
       ],
     });
-    await openJobs();
+    await openTasks("AIfred's");
     expect(await screen.findByText("Timesheet reminder")).toBeInTheDocument();
     expect(screen.getByText(/Every Monday at 09:00/)).toBeInTheDocument();
-    // A job that ended waits under "Ended". Its run shows with its answer.
+    // A task that ended waits under "Ended". Its run shows with its answer.
     expect(screen.queryByRole("button", { name: "Start: Watch PR #123" })).not.toBeInTheDocument();
     expect(screen.getByText("PR #123 is merged.")).toBeInTheDocument();
     expect(screen.getByText(/late, planned/)).toBeInTheDocument();
     expect(screen.queryByText("AIfred was not running at this time."), "skipped runs are hidden").not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Ended (2)" }));
-    // A job with no more times has no Start: it needs a new time first.
+    // A task with no more times has no Start: it needs a new time first.
     expect(screen.queryByRole("button", { name: "Start: Watch PR #123" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start: Daily check" })).toBeInTheDocument();
 
@@ -1675,30 +1761,24 @@ describe("AIfred's jobs page", () => {
     expect(fake.jobs.map((j) => j.id)).toEqual(["j2", "j3"]);
   });
 
-  it("says when there are no jobs", async () => {
+  it("says when AIfred has no tasks", async () => {
     await startApp();
-    await openJobs();
-    expect(await screen.findByText("AIfred has no jobs now.")).toBeInTheDocument();
+    await openTasks("AIfred's");
+    expect(await screen.findByText("AIfred has no tasks now.")).toBeInTheDocument();
   });
 
   it("a load error goes away when the next load works", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const fake = await startApp({ fail: { jobs: "database is locked" } });
-      await openJobs();
-      expect(await screen.findByText("Cannot load the jobs: database is locked")).toBeInTheDocument();
+      await openTasks("AIfred's");
+      expect(await screen.findByText("Cannot load AIfred's tasks: database is locked")).toBeInTheDocument();
       delete fake.fail.jobs;
       await vi.advanceTimersByTimeAsync(30_000);
-      await waitFor(() => expect(screen.queryByText(/Cannot load the jobs/)).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.queryByText(/Cannot load AIfred's tasks/)).not.toBeInTheDocument());
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("shows why the jobs cannot load", async () => {
-    await startApp({ fail: { jobs: "database is locked" } });
-    await openJobs();
-    expect(await screen.findByText("Cannot load the jobs: database is locked")).toBeInTheDocument();
   });
 });
 

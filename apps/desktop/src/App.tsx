@@ -6,12 +6,13 @@ import { Ctx, useApp, type AppCtx, type CardMode, type ChatState, type ListState
 import { Detail } from "./Detail";
 import { Home } from "./Home";
 import { addDays, buildItems, dayOf, dur, groupOf, meetingsOn, schedule, type Item } from "./items";
-import { JobsPage } from "./Jobs";
+import { TasksPage } from "./Tasks";
 import { MemoryList } from "./Memory";
 import { PlanChat, PlanView } from "./Plan";
 import { RestartButton, SettingsPage } from "./Settings";
+import { useTasksChanged } from "./useTasksChanged";
 
-type Page = "home" | "plan" | "memory" | "jobs" | "settings";
+type Page = "home" | "plan" | "tasks" | "memory" | "settings";
 type Toast = { text: string; undo?: () => void; error?: boolean };
 /** A task that was just closed in ClickUp. The window keeps each one with
  * its own undo: a second close must not lose the undo of the first. */
@@ -373,6 +374,9 @@ export default function App() {
       live = false;
     };
   }, [today]);
+
+  // A repeating task: AIfred adds the new task by itself. Show it at once.
+  useTasksChanged(loadTasks);
 
   // AIfred's jobs can write the brief in the background (for example when you
   // finish a task). Check for a newer brief each minute.
@@ -1016,6 +1020,11 @@ export default function App() {
     }
   }
 
+  const goTasks = () => {
+    setPage("tasks");
+    setSel(null);
+  };
+
   const goPlan = () => {
     setPage("plan");
     setSel(null);
@@ -1054,7 +1063,7 @@ export default function App() {
     if (!byKey.has(key)) return;
     setSel(key);
     setSide("task");
-    if (page !== "home" && page !== "plan") setPage("home");
+    if (page !== "home" && page !== "plan" && page !== "tasks") setPage("home");
     requestAnimationFrame(() => document.getElementById(`row-${key}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
   };
   const close = () => {
@@ -1140,7 +1149,7 @@ export default function App() {
 
   const onPlan = page === "plan";
   const chatOn = onPlan ? true : page === "home" && mainOpen;
-  const selItem = sel && (page === "home" || onPlan) ? byKey.get(sel) : undefined;
+  const selItem = sel && (page === "home" || page === "tasks" || onPlan) ? byKey.get(sel) : undefined;
   const showSide = (v: "chat" | "task") => {
     setSide(v);
     if (v === "chat") {
@@ -1382,6 +1391,7 @@ export default function App() {
       loadWaiting();
     },
     goPlan,
+    goTasks,
   };
 
   // Open links in the system browser, not inside the app window.
@@ -1459,9 +1469,9 @@ export default function App() {
           <nav className="rail" aria-label="App">
             {rail("home", ICON.home, "Home", () => (setPage("home"), setSel(null)), page === "home")}
             {rail("plan", ICON.cal, "Day plan", goPlan, onPlan)}
+            {rail("tasks", ICON.task, "Tasks", goTasks, page === "tasks")}
             {rail("chat", ICON.chat, "Conversation", ctx.openMain, page === "home" && mainOpen)}
             {rail("memory", ICON.mem, "What AIfred knows about you", () => (setPage("memory"), setSel(null)), page === "memory")}
-            {rail("jobs", ICON.clock, "AIfred's jobs", () => (setPage("jobs"), setSel(null)), page === "jobs")}
             <span className="sp" />
             {rail("settings", ICON.gear, "Settings", () => (setPage("settings"), setSel(null)), page === "settings", update?.state === "ready")}
           </nav>
@@ -1504,10 +1514,10 @@ export default function App() {
               </div>
             </div>
           )}
-          {page === "jobs" && (
+          {page === "tasks" && (
             <div className="scroll page-main page">
               <div className="page-inner">
-                <JobsPage />
+                <TasksPage />
               </div>
             </div>
           )}

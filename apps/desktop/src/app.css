@@ -91,6 +91,10 @@ body { background: var(--win); color: var(--ink); font-family: var(--f-body); fo
 .row:hover .r-side.has-acts .r-info, .row:focus-within .r-side.has-acts .r-info { display: none; }
 .row:hover .row-acts, .row:focus-within .row-acts { display: flex; }
 .more { display: flex; gap: 4px; margin: 14px 0 0 -4px; flex-wrap: wrap; }
+.seg { display: inline-flex; gap: 2px; padding: 2px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--pane); }
+.seg button { border: 0; background: transparent; color: var(--muted); border-radius: 7px; padding: 3px 12px; font-size: 13px; }
+.seg button:hover { color: var(--ink); }
+.seg button.on { background: var(--raise); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
 .flash { animation: flash 1.2s ease; }
 @keyframes flash { 0%, 40% { background: var(--amber-soft); } 100% { background: transparent; } }
 .chk { width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; border: 1.5px solid var(--faint); background: transparent; padding: 0; display: grid; place-items: center; flex: none; }

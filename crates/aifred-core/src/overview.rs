@@ -16,6 +16,10 @@
 //! next to the time guesses (worktime.rs), and the user's picks in the
 //! weekly review (review.rs).
 //!
+//! `tasks` has the user's open local tasks (doer "you") and AIfred's own
+//! reminders and checks (doer "aifred", jobs.rs) in one list. So the AI
+//! plans with all work, and it knows what AIfred already does.
+//!
 //! `same_work` lists the items that the user linked as one piece of work
 //! (links.rs). The AI must treat each list as one item.
 
@@ -29,6 +33,32 @@ use crate::github::GithubItem;
 use crate::summaries::for_item;
 use crate::tasks::{ChecklistItem, json_column};
 
+/// AIfred's own tasks (jobs.rs): the reminders and the checks that AIfred
+/// runs by itself, with doer "aifred". A paused one is in the list with its
+/// status and no message: AIfred does not run it now. They have no item key, so the brief
+/// and the plan cannot pick them. The AI sees what AIfred already does. The
+/// system job that writes the brief is not work, so it is not in the list.
+fn aifred_tasks(c: &rusqlite::Connection) -> anyhow::Result<Vec<Value>> {
+    Ok(crate::jobs::list_in(c, false)?
+        .into_iter()
+        .filter(|j| j.action != "brief")
+        .map(|j| {
+            let mut v = json!({
+                "job": j.id, "doer": "aifred", "title": j.title, "does": j.action, "when": j.when, "status": j.status,
+            });
+            // A paused job does not run, so its instructions do not help the
+            // plan. They only make each brief and chat call longer.
+            if !j.message.is_empty() && j.status == "active" {
+                v["message"] = j.message.into();
+            }
+            if let Some(t) = j.next_run.filter(|_| j.status == "active") {
+                v["next_run"] = crate::jobs::show(t, &j.tz).into();
+            }
+            v
+        })
+        .collect())
+}
+
 /// The overview. `clickup_account` is the account of the ClickUp token
 /// (clickup::account_key), or None when ClickUp is not connected.
 pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value> {
@@ -38,13 +68,13 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
     let gmail_account = crate::gmail::login(dir);
     db::read(dir, |c| {
         let mut q = c.prepare(
-            "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM task WHERE done = 0 ORDER BY created DESC",
+            "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM user_task WHERE done = 0 ORDER BY created DESC",
         )?;
-        let tasks: Vec<Value> = q
+        let mut tasks: Vec<Value> = q
             .query_map([], |r| {
                 let notes: String = r.get(2)?;
                 let id: String = r.get(0)?;
-                let mut t = json!({ "key": format!("task:{id}"), "id": id, "title": r.get::<_, String>(1)?, "created": r.get::<_, i64>(4)? });
+                let mut t = json!({ "key": format!("task:{id}"), "id": id, "doer": "you", "title": r.get::<_, String>(1)?, "created": r.get::<_, i64>(4)? });
                 if let Some(s) = for_item(r.get(3)?, &notes) {
                     t["summary"] = s.into();
                 }
@@ -66,6 +96,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 Ok(t)
             })?
             .collect::<Result<_, _>>()?;
+        tasks.extend(aifred_tasks(c)?);
 
         let github: Vec<Value> = rows(c, "github", None)?
             .into_iter()
@@ -90,7 +121,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             .collect();
         let mut out = json!({
             "goals": goals,
-            "local_tasks": tasks,
+            "tasks": tasks,
             "github": { "fetched_at": fetched_at(c, "github", None)?, "items": github },
         });
 
@@ -237,7 +268,7 @@ mod tests {
         let tasks = TaskStore::new(&d);
         tasks.add("Call Sam", "", "you").unwrap();
         db::write(&d, |tx| {
-            Ok(tx.execute("UPDATE task SET tags = 'not json'", [])?)
+            Ok(tx.execute("UPDATE task SET tags = 'not json' WHERE doer = 'you'", [])?)
         })
         .unwrap();
         assert!(tasks.load().is_err());
@@ -293,6 +324,68 @@ mod tests {
     }
 
     #[test]
+    fn aifred_tasks_are_in_the_task_list_with_no_key() {
+        use crate::jobs::{NewJob, Trigger};
+        let d = std::env::temp_dir().join(format!("aifred-overview-jobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        TaskStore::new(&d).add("Call Sam", "", "you").unwrap();
+        crate::jobs::create(
+            &d,
+            NewJob {
+                title: "Check PR 12".into(),
+                action: "agent".into(),
+                message: "Tell me when PR 12 is merged.".into(),
+                trigger: Some(Trigger::Repeat {
+                    start: "2030-01-07T09:00".into(),
+                    rule: "FREQ=DAILY".into(),
+                }),
+                tz: Some("UTC".into()),
+                created_by: "you".into(),
+            },
+        )
+        .unwrap();
+        let out = build(&d, None).unwrap();
+        let tasks = out["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 2, "the brief job is not work: {out}");
+        assert_eq!(tasks[0]["doer"], "you");
+        let job = &tasks[1];
+        assert_eq!(job["doer"], "aifred");
+        assert_eq!(job["does"], "agent");
+        assert_eq!(job["message"], "Tell me when PR 12 is merged.");
+        assert!(job["next_run"].as_str().unwrap().contains("2030"), "{job}");
+        assert!(job.get("key").is_none(), "the brief cannot pick it: {job}");
+        assert_eq!(crate::brief::keys(&out).len(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_read_does_not_stop_the_overview() {
+        let d = std::env::temp_dir().join(format!("aifred-overview-badjob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        TaskStore::new(&d).add("Call Sam", "", "you").unwrap();
+        // A paused job is never claimed, so claim_due does not turn it off.
+        db::write_jobs(&d, |tx| {
+            Ok(tx.execute(
+                "INSERT INTO task (id, title, added_by, created, doer, action, trigger, tz, status)
+                 VALUES ('jbad', 'Bad job', 'you', 1, 'aifred', 'remind', 'not json', 'UTC', 'paused')",
+                [],
+            )?)
+        })
+        .unwrap();
+        let out = build(&d, None).unwrap();
+        let titles: Vec<&str> = out["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(titles, ["Call Sam"]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn a_broken_google_file_does_not_stop_the_overview() {
         let d = std::env::temp_dir().join(format!("aifred-overview-google-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -300,7 +393,7 @@ mod tests {
         TaskStore::new(&d).add("Call Sam", "", "you").unwrap();
         std::fs::write(d.join("google.json"), "not json").unwrap();
         let out = build(&d, None).unwrap();
-        assert_eq!(out["local_tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(out["tasks"].as_array().unwrap().len(), 1);
         assert!(
             out["calendar"]["error"]
                 .as_str()
@@ -375,15 +468,15 @@ mod tests {
         let o = build(&d, Some("acct")).unwrap();
         assert_eq!(o["goals"], json!([{ "id": g.id, "text": "Ship 2.0" }]));
         assert_eq!(
-            o["local_tasks"].as_array().unwrap().len(),
+            o["tasks"].as_array().unwrap().len(),
             1,
             "done tasks are left out"
         );
-        assert_eq!(o["local_tasks"][0]["summary"], "Before 5pm.");
-        assert_eq!(o["local_tasks"][0]["key"], format!("task:{}", sam.id));
+        assert_eq!(o["tasks"][0]["summary"], "Before 5pm.");
+        assert_eq!(o["tasks"][0]["key"], format!("task:{}", sam.id));
         assert_eq!(o["github"]["items"][0]["key"], "github:acme/shop#7");
         assert_eq!(o["clickup"]["tasks"][0]["key"], "clickup:86a");
-        let t = &o["local_tasks"][0];
+        let t = &o["tasks"][0];
         assert_eq!(
             (&t["due"], &t["priority"], &t["tags"], &t["checklist"]),
             (

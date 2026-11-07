@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use aifred_core::jobs::{self, Claim, Outcome};
 use aifred_core::waiting;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::App;
@@ -190,6 +190,44 @@ async fn run<R: Runtime>(h: AppHandle<R>, c: Claim) {
                 cost_usd: None,
             }
         }
+        jobs::TASK => {
+            // make_task adds the task and ends the run in one step, so a
+            // time never gets two tasks. The finish() call below then
+            // changes nothing (jobs::make_task).
+            let (d, job, planned, run) = (a.dir.clone(), c.job.clone(), c.planned, c.run);
+            let made = tauri::async_runtime::spawn_blocking(move || {
+                jobs::make_task(&d, run, &job, planned)
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+            match made {
+                Ok(t) => {
+                    // After a long time with AIfred closed, the next ticks add
+                    // the tasks of the other missed times, one each tick
+                    // (jobs::claim_task). Only the newest one notifies, so
+                    // the user does not get one notification each 30 s.
+                    // A retry of a failed time always notifies: it is not
+                    // part of a catch-up, and the next time can still fail.
+                    let more = jobs::times_after(&c.job.trigger, &c.job.tz, c.planned, 1)
+                        .ok()
+                        .and_then(|t| t.first().copied())
+                        .is_some_and(|next| next <= aifred_core::files::now() as i64);
+                    if c.retry || !more {
+                        notify(&h, "New task", &format!("{}{late}", t.title));
+                    }
+                    // The task list changes without a click in the window.
+                    let _ = h.emit("tasks-changed", ()); // api.ts TASKS_CHANGED
+                    Outcome::Ok {
+                        output: String::new(),
+                        cost_usd: None,
+                    }
+                }
+                Err(e) => Outcome::Failed {
+                    error: format!("{e:#}"),
+                },
+            }
+        }
         "brief" => {
             // The claim came after the events. A brief that read the tasks
             // after this time (Brief::written) already knows the finished tasks.
@@ -247,7 +285,7 @@ async fn run<R: Runtime>(h: AppHandle<R>, c: Claim) {
             &h,
             "AIfred stopped a job",
             &format!(
-                "\"{}\" failed {} times in a row. Open AIfred's jobs to see the error and start it again.",
+                "\"{}\" failed {} times in a row. Open Tasks and pick \"AIfred's\" to see the error and start it again.",
                 job.title, job.failures
             ),
         ),

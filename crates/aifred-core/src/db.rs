@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 18;
+const VERSION: i64 = 19;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -617,6 +617,104 @@ CREATE TABLE action (
 CREATE INDEX action_by_item ON action(item);
 ";
 
+/// One task type (plan-tasks-missions-calendar.md, decision A): AIfred's
+/// jobs move into the task table with doer 'aifred'. The user's tasks get
+/// doer 'you'. The job fields stay NULL on them. The reads of the user's
+/// tasks must filter on doer = 'you'.
+///
+/// The order is necessary. foreign_keys is on, so a DROP of `job` while
+/// `job_run` points at it deletes every run. So the rows go into `task`
+/// first, then `job_run` points at `task`, and only then `job` goes.
+/// The job message stays out of `notes`: the task triggers index and
+/// summarize the notes.
+const SCHEMA_19: &str = "
+ALTER TABLE task ADD COLUMN doer     TEXT NOT NULL DEFAULT 'you'; -- 'you' or 'aifred'
+ALTER TABLE task ADD COLUMN action   TEXT;                        -- AIfred: 'remind', 'agent', or 'brief'
+ALTER TABLE task ADD COLUMN message  TEXT NOT NULL DEFAULT '';    -- AIfred: the reminder text, or the instructions for the AI
+ALTER TABLE task ADD COLUMN trigger  TEXT;                        -- {\"kind\": \"once\" | \"repeat\" | \"event\", ...}
+ALTER TABLE task ADD COLUMN tz       TEXT;                        -- IANA time zone of the trigger
+ALTER TABLE task ADD COLUMN status   TEXT;                        -- with a trigger: 'active', 'paused', 'done', or 'off'
+ALTER TABLE task ADD COLUMN next_run INTEGER;                     -- Unix seconds, or NULL
+ALTER TABLE task ADD COLUMN failures INTEGER NOT NULL DEFAULT 0;  -- failed runs in a row
+ALTER TABLE task ADD COLUMN cursor   INTEGER NOT NULL DEFAULT 0;  -- event triggers: the last job_event id that they used
+
+-- The user's tasks only. Reads of the user's tasks use this view, so they
+-- cannot get AIfred's rows by mistake. A view has no rowid: use rid.
+-- Writes go to `task` and must still filter on doer = 'you'. db::write
+-- stops a write that touches a job row (GUARD_JOBS).
+CREATE VIEW user_task AS SELECT * FROM task WHERE doer = 'you';
+
+-- Word search, meaning search and summaries are for the user's tasks only.
+-- The doer of a row never changes. All three search triggers must skip the
+-- same rows: an FTS 'delete' of a row that is not in the index breaks it.
+-- These come before the copy of the jobs, so the jobs are never indexed.
+DROP TRIGGER task_fts_insert;
+CREATE TRIGGER task_fts_insert AFTER INSERT ON task WHEN new.doer = 'you' BEGIN
+  INSERT INTO task_fts (rowid, title, notes) VALUES (new.rowid, new.title, new.notes);
+END;
+DROP TRIGGER task_fts_delete;
+CREATE TRIGGER task_fts_delete AFTER DELETE ON task WHEN old.doer = 'you' BEGIN
+  INSERT INTO task_fts (task_fts, rowid, title, notes) VALUES ('delete', old.rowid, old.title, old.notes);
+END;
+DROP TRIGGER task_fts_update;
+CREATE TRIGGER task_fts_update AFTER UPDATE OF title, notes ON task
+  WHEN new.doer = 'you' AND (old.title IS NOT new.title OR old.notes IS NOT new.notes) BEGIN
+  INSERT INTO task_fts (task_fts, rowid, title, notes) VALUES ('delete', old.rowid, old.title, old.notes);
+  INSERT INTO task_fts (rowid, title, notes) VALUES (new.rowid, new.title, new.notes);
+END;
+DROP TRIGGER task_vec_delete;
+CREATE TRIGGER task_vec_delete AFTER DELETE ON task WHEN old.doer = 'you' BEGIN
+  DELETE FROM task_vec WHERE rowid = old.rowid;
+END;
+DROP TRIGGER task_vec_update;
+CREATE TRIGGER task_vec_update AFTER UPDATE OF title, notes ON task
+  WHEN new.doer = 'you' AND (old.title IS NOT new.title OR old.notes IS NOT new.notes) BEGIN
+  DELETE FROM task_vec WHERE rowid = old.rowid;
+END;
+DROP TRIGGER task_summary_old;
+CREATE TRIGGER task_summary_old AFTER UPDATE OF title, notes ON task
+  WHEN new.doer = 'you' AND (old.title IS NOT new.title OR old.notes IS NOT new.notes) BEGIN
+  UPDATE task SET summary = NULL WHERE rowid = new.rowid;
+END;
+
+INSERT INTO task (id, title, notes, done, added_by, created, done_at, updated,
+                  doer, action, message, trigger, tz, status, next_run, failures, cursor)
+  SELECT id, title, '', status = 'done', created_by, created,
+         CASE WHEN status = 'done' THEN updated END, updated,
+         'aifred', action, message, trigger, tz, status, next_run, failures, cursor
+  FROM job;
+
+CREATE TABLE job_run_new (
+  id       INTEGER PRIMARY KEY,
+  job      TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  planned  INTEGER NOT NULL,
+  started  INTEGER,
+  finished INTEGER,
+  state    TEXT NOT NULL,                -- 'running', 'ok', 'quiet', 'skipped', or 'failed'
+  late     INTEGER NOT NULL DEFAULT 0,
+  note     TEXT NOT NULL DEFAULT '',     -- why it was skipped, or the error
+  output   TEXT NOT NULL DEFAULT '',
+  cost_usd REAL,
+  UNIQUE (job, planned)
+);
+INSERT INTO job_run_new (id, job, planned, started, finished, state, late, note, output, cost_usd)
+  SELECT id, job, planned, started, finished, state, late, note, output, cost_usd FROM job_run;
+DROP TABLE job_run;
+ALTER TABLE job_run_new RENAME TO job_run;
+CREATE INDEX job_run_by_job ON job_run(job, id);
+DROP TABLE job;
+
+CREATE INDEX task_by_next ON task(doer, status, next_run);
+
+-- An AIfred task with the status 'done' is done, the same as a user task.
+CREATE TRIGGER task_aifred_done AFTER UPDATE OF status ON task
+  WHEN new.doer = 'aifred' AND (new.status = 'done') IS NOT new.done BEGIN
+  UPDATE task SET done = (new.status = 'done'),
+                  done_at = CASE WHEN new.status = 'done' THEN CAST(strftime('%s', 'now') AS INTEGER) END
+  WHERE rowid = new.rowid;
+END;
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -742,6 +840,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     if version < 18 {
         tx.execute_batch(SCHEMA_18)?;
     }
+    if version < 19 {
+        tx.execute_batch(SCHEMA_19)?;
+    }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     // The data is in the database now. Only then move the old files away.
@@ -758,7 +859,47 @@ pub fn write<R>(
     dir: &Path,
     f: impl FnOnce(&Transaction) -> anyhow::Result<R>,
 ) -> anyhow::Result<R> {
+    write_with(dir, true, f)
+}
+
+/// AIfred's jobs share the task table with the user's tasks (SCHEMA_19).
+/// A change of the user's tasks must never add, change, or delete a job row:
+/// a delete also deletes the job's runs. So `write` puts these guards on its
+/// connection. A query that forgets "doer = 'you'" then fails, and it does
+/// not change a job. TEMP triggers belong to one connection only, and each
+/// write opens its own connection. Only jobs.rs writes job rows, with
+/// `write_jobs`, which has no guards.
+const GUARD_JOBS: &str = "
+CREATE TEMP TRIGGER guard_job_insert BEFORE INSERT ON main.task WHEN new.doer = 'aifred' BEGIN
+  SELECT RAISE(ABORT, 'a change of your tasks cannot add AIfred''s jobs');
+END;
+CREATE TEMP TRIGGER guard_job_update BEFORE UPDATE ON main.task
+  WHEN old.doer = 'aifred' OR new.doer IS NOT old.doer BEGIN
+  SELECT RAISE(ABORT, 'a change of your tasks cannot change AIfred''s jobs');
+END;
+CREATE TEMP TRIGGER guard_job_delete BEFORE DELETE ON main.task WHEN old.doer = 'aifred' BEGIN
+  SELECT RAISE(ABORT, 'a change of your tasks cannot delete AIfred''s jobs');
+END;
+";
+
+/// `write` for the rows of AIfred's jobs (jobs.rs), with no guards.
+pub(crate) fn write_jobs<R>(
+    dir: &Path,
+    f: impl FnOnce(&Transaction) -> anyhow::Result<R>,
+) -> anyhow::Result<R> {
+    write_with(dir, false, f)
+}
+
+fn write_with<R>(
+    dir: &Path,
+    guard: bool,
+    f: impl FnOnce(&Transaction) -> anyhow::Result<R>,
+) -> anyhow::Result<R> {
     let mut conn = open(dir)?;
+    if guard {
+        conn.execute_batch(GUARD_JOBS)
+            .context("cannot add the job guards")?;
+    }
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("cannot start a change")?;
@@ -1191,6 +1332,160 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn version_19_moves_the_jobs_into_the_task_table_and_keeps_their_runs() {
+        let d = temp("v19");
+        // Load sqlite-vec into new connections, then make a version 18 file by hand.
+        let vec_dir = temp("v19-vec");
+        drop(open(&vec_dir).unwrap());
+        std::fs::remove_dir_all(&vec_dir).unwrap();
+        let c = Connection::open(path(&d)).unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        c.execute_batch(
+            &[
+                SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4, SCHEMA_5, SCHEMA_6, SCHEMA_7, SCHEMA_8,
+                SCHEMA_9, SCHEMA_10, SCHEMA_11, SCHEMA_12, SCHEMA_13, SCHEMA_14, SCHEMA_15,
+                SCHEMA_16, SCHEMA_17, SCHEMA_18,
+            ]
+            .concat(),
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 18).unwrap();
+        c.execute(
+            "INSERT INTO task (id, title, notes, added_by, created) VALUES ('t1', 'Pay rent', '', 'you', 1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO job (id, title, action, message, trigger, tz, status, next_run, created_by, created, updated, cursor)
+             VALUES ('j1', 'Check PR 12', 'agent', 'Read the PR', '{\"kind\":\"once\",\"at\":\"2026-01-01T09:00\"}',
+                     'UTC', 'active', 500, 'you', 2, 3, 7),
+                    ('j2', 'Old reminder', 'remind', 'Call Ana', '{\"kind\":\"once\",\"at\":\"2025-01-01T09:00\"}',
+                     'UTC', 'done', NULL, 'aifred', 2, 4, 0)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO job_run (job, planned, state, output) VALUES ('j1', 400, 'ok', 'PR is open')",
+            [],
+        )
+        .unwrap();
+        drop(c);
+
+        let c = open(&d).unwrap();
+        let tables: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'job'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "the job table is gone");
+        let row = |id: &str| -> (
+            String,
+            String,
+            String,
+            i64,
+            Option<i64>,
+            String,
+            i64,
+            String,
+        ) {
+            c.query_row(
+                "SELECT doer, COALESCE(action, ''), notes, done, done_at, COALESCE(status, ''), cursor, message FROM task WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+            )
+            .unwrap()
+        };
+        let (doer, _, _, done, _, status, _, _) = row("t1");
+        assert_eq!((doer.as_str(), done, status.as_str()), ("you", 0, ""));
+        let (doer, action, notes, done, _, status, cursor, message) = row("j1");
+        assert_eq!(
+            (
+                doer.as_str(),
+                action.as_str(),
+                notes.as_str(),
+                done,
+                status.as_str(),
+                cursor,
+                message.as_str()
+            ),
+            ("aifred", "agent", "", 0, "active", 7, "Read the PR"),
+            "the job message stays out of the notes"
+        );
+        let (_, _, _, done, done_at, status, _, _) = row("j2");
+        assert_eq!((done, done_at, status.as_str()), (1, Some(4), "done"));
+        let (doer, action, ..) = row(crate::jobs::BRIEF_JOB);
+        assert_eq!((doer.as_str(), action.as_str()), ("aifred", "brief"));
+
+        // The run points at the task now, and goes with it.
+        let runs = |c: &Connection| -> i64 {
+            c.query_row("SELECT COUNT(*) FROM job_run WHERE job = 'j1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(runs(&c), 1, "the upgrade keeps the runs");
+        let err = c.execute(
+            "INSERT INTO job_run (job, planned, state) VALUES ('nothing', 1, 'ok')",
+            [],
+        );
+        assert!(err.is_err(), "a run needs a task");
+        // AIfred's tasks are not in the word search, and not in the view.
+        let count = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM task_fts WHERE task_fts MATCH 'check OR PR'"),
+            0,
+            "the job titles are not indexed"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM task_fts WHERE task_fts MATCH 'rent'"),
+            1
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM user_task"), 1);
+        c.execute("UPDATE task SET title = 'Check PR 13' WHERE id = 'j1'", [])
+            .unwrap();
+        assert_eq!(
+            count("SELECT COUNT(*) FROM task_fts WHERE task_fts MATCH 'PR'"),
+            0
+        );
+        // A job that is done now is a done task.
+        c.execute("UPDATE task SET status = 'done' WHERE id = 'j1'", [])
+            .unwrap();
+        assert_eq!(row("j1").3, 1);
+        c.execute("UPDATE task SET status = 'active' WHERE id = 'j1'", [])
+            .unwrap();
+        let (_, _, _, done, done_at, ..) = row("j1");
+        assert_eq!((done, done_at), (0, None));
+        c.execute("DELETE FROM task WHERE id = 'j1'", []).unwrap();
+        assert_eq!(runs(&c), 0, "a deleted task loses its runs");
+        // The delete of a job that is not in the index keeps the index whole.
+        // rank 0: check the index only. The jobs are in the content table on purpose.
+        c.execute(
+            "INSERT INTO task_fts (task_fts, rank) VALUES ('integrity-check', 0)",
+            [],
+        )
+        .unwrap();
+        drop(c);
+
+        // The user's task list does not show AIfred's tasks.
+        let titles: Vec<String> = crate::tasks::TaskStore::new(&d)
+            .load()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        assert_eq!(titles, ["Pay rent"]);
+        let jobs: Vec<String> = crate::jobs::list(&d, true)
+            .unwrap()
+            .into_iter()
+            .map(|j| j.id)
+            .collect();
+        assert_eq!(jobs, [crate::jobs::BRIEF_JOB, "j2"]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn word_search_changes_only_when_the_text_changes() {
         let d = temp("fts-when");
         let c = open(&d).unwrap();
@@ -1202,10 +1497,7 @@ pub(crate) mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert!(
-                sql.contains("WHEN old.title IS NOT new.title"),
-                "{name}: {sql}"
-            );
+            assert!(sql.contains("old.title IS NOT new.title"), "{name}: {sql}");
         }
         c.execute("INSERT INTO task (id, title, notes, added_by, created) VALUES ('t', 'Pay rent', '', 'you', 0)", []).unwrap();
         let find = |c: &Connection, word: &str| -> i64 {

@@ -5,7 +5,10 @@
 //! - Triggers: "once" (one local time), "repeat" (a calendar rule, RFC 5545
 //!   RRULE), or "event" (for example "a task is done").
 //! - Actions: "remind" (a notification, no AI call), "agent" (an AI run with
-//!   read-only tools), or "brief" (write the brief of today again).
+//!   read-only tools), "brief" (write the brief of today again), or "task"
+//!   (add a new task for the user, for example "pay rent" on the 1st of each
+//!   month). The rule of a "task" job is AIfred's (doer 'aifred'), so it is
+//!   not in the user's list. Only the new tasks are.
 //!
 //! The desktop app runs the jobs (the scheduler loop in main.rs). It asks
 //! `claim_due` for the jobs to run now. `claim_due` writes a run row and moves
@@ -15,6 +18,9 @@
 //! Missed times (the computer was asleep, or AIfred was closed): a one-time
 //! job runs late. A repeating job runs one time for the newest missed time,
 //! if it is at most 12 hours old. The older times get a "skipped" row.
+//! A "task" job adds a task for each missed time, also an old one: the user
+//! must still pay the rent when the computer was off on the 1st. It adds one
+//! task for each tick, oldest first, for at most 20 missed times (claim_task).
 //!
 //! See docs/research-agent-jobs.md for the reasons.
 
@@ -48,6 +54,9 @@ const KEEP_RUNS: i64 = 60 * 86400;
 /// After a long time with AIfred closed, at most this many "skipped" rows for
 /// the missed times of one job.
 const MAX_SKIP_ROWS: usize = 20;
+/// After a long time with AIfred closed, a "task" job adds the tasks of at
+/// most this many missed times (claim_task).
+const MAX_CATCH_UP: usize = 20;
 
 /// The event that a task write makes when a task is done.
 pub const TASK_DONE: &str = "task_done";
@@ -83,7 +92,7 @@ pub struct Job {
     pub id: String,
     /// A short name, for example "Timesheet reminder".
     pub title: String,
-    /// "remind", "agent", or "brief".
+    /// "remind", "agent", "brief", or "task".
     pub action: String,
     /// "remind": the notification text. "agent": the instructions for the AI.
     pub message: String,
@@ -135,6 +144,10 @@ pub struct Claim {
     pub run: i64,
     pub planned: i64,
     pub late: bool,
+    /// True when this claim tries a failed time of a "task" job again
+    /// (claim_task). The scheduler then always shows the "New task"
+    /// notification: the retry is not part of a catch-up.
+    pub retry: bool,
 }
 
 /// How a run ended.
@@ -334,14 +347,40 @@ pub fn times_after(trigger: &Trigger, tz: &str, after: i64, n: u16) -> anyhow::R
     }
 }
 
-/// The times of `trigger` in (from, to], at most 500.
-fn times_between(trigger: &Trigger, tz: &str, from: i64, to: i64) -> anyhow::Result<Vec<i64>> {
-    if to <= from {
-        return Ok(vec![]);
+/// The times of `trigger` in (from, to]: how many there are, and the newest
+/// `keep` of them, oldest first. It reads the rule in pages, so after a long
+/// gap (an hourly rule that was missed for months) the count is true, and
+/// the times are the newest ones.
+fn times_between(
+    trigger: &Trigger,
+    tz: &str,
+    from: i64,
+    to: i64,
+    keep: usize,
+) -> anyhow::Result<(usize, Vec<i64>)> {
+    const PAGE: u16 = 500;
+    let mut count = 0;
+    let mut tail = std::collections::VecDeque::with_capacity(keep + 1);
+    let mut after = from;
+    while after < to {
+        let page = times_after(trigger, tz, after, PAGE)?;
+        let full = page.len() == PAGE as usize;
+        for t in page {
+            if t > to {
+                return Ok((count, tail.into()));
+            }
+            count += 1;
+            tail.push_back(t);
+            if tail.len() > keep {
+                tail.pop_front();
+            }
+            after = t;
+        }
+        if !full {
+            break;
+        }
     }
-    let mut out = times_after(trigger, tz, from, 500)?;
-    out.retain(|t| *t <= to);
-    Ok(out)
+    Ok((count, tail.into()))
 }
 
 /// The trigger in plain words.
@@ -468,7 +507,27 @@ fn describe_rule(rule: &str, start: &str) -> String {
 
 // ---------- Store ----------
 
-const COLUMNS: &str = "id, title, action, message, trigger, tz, status, next_run, created_by, created, updated, failures";
+/// The SQL test for a job_run row that is a failed time of a "task" job and
+/// waits for its retry (claim_task). A run with no start time is not a time
+/// of the rule (claim_due writes it when a job cannot run): it gets no retry.
+/// All queries use this one text. It has no table name: the task table has
+/// no "state" or "started" column, so in a subquery on job_run the names
+/// are the job_run columns. A macro, so concat!() can put it in a const.
+macro_rules! waits_for_retry {
+    () => {
+        "state = 'failed' AND started IS NOT NULL"
+    };
+}
+
+/// AIfred's tasks are the rows of the task table with doer 'aifred' (db.rs SCHEMA_19).
+/// The last column is true when a failed time of a "task" job waits for its
+/// retry (claim_task). The queries read the task table with no alias.
+const COLUMNS: &str = concat!(
+    "id, title, action, message, trigger, tz, status, next_run, added_by, created, updated, failures,
+    action = 'task' AND EXISTS (SELECT 1 FROM job_run r WHERE r.job = task.id AND ",
+    waits_for_retry!(),
+    ")"
+);
 
 fn from_row(r: &Row) -> rusqlite::Result<Job> {
     let trigger: String = r.get(4)?;
@@ -482,7 +541,7 @@ fn from_row(r: &Row) -> rusqlite::Result<Job> {
         action: r.get(2)?,
         message: r.get(3)?,
         when: describe(&trigger, &tz),
-        can_start: can_start(&trigger, &tz, &status_of(r)?, now() as i64),
+        can_start: can_start(&trigger, &tz, &status_of(r)?, r.get(12)?, now() as i64),
         trigger,
         tz,
         status: r.get(6)?,
@@ -499,9 +558,12 @@ fn status_of(r: &Row) -> rusqlite::Result<String> {
 }
 
 /// True when update() accepts status "active" with no new time (see Job::can_start).
-fn can_start(trigger: &Trigger, tz: &str, status: &str, now: i64) -> bool {
+/// `retry`: a failed time of a "task" job waits for its retry. A start
+/// retries it, also when the rule has no more times.
+fn can_start(trigger: &Trigger, tz: &str, status: &str, retry: bool, now: i64) -> bool {
     match (status, trigger) {
         ("active", _) => false,
+        _ if retry => true,
         (_, Trigger::Event { .. }) => true,
         // A paused one-time job whose time passed runs at once (update).
         ("paused", Trigger::Once { .. }) => true,
@@ -509,14 +571,18 @@ fn can_start(trigger: &Trigger, tz: &str, status: &str, now: i64) -> bool {
     }
 }
 
-fn get_in(c: &Connection, id: &str) -> anyhow::Result<Job> {
-    c.query_row(
-        &format!("SELECT {COLUMNS} FROM job WHERE id = ?1"),
+/// The job with this id, or None. The only query that reads one job.
+fn find_in(c: &Connection, id: &str) -> anyhow::Result<Option<Job>> {
+    Ok(c.query_row(
+        &format!("SELECT {COLUMNS} FROM task WHERE id = ?1 AND doer = 'aifred'"),
         [id],
         from_row,
     )
-    .optional()?
-    .with_context(|| format!("no job with id {id}"))
+    .optional()?)
+}
+
+fn get_in(c: &Connection, id: &str) -> anyhow::Result<Job> {
+    find_in(c, id)?.with_context(|| format!("no job with id {id}"))
 }
 
 pub fn get(dir: &Path, id: &str) -> anyhow::Result<Job> {
@@ -525,52 +591,176 @@ pub fn get(dir: &Path, id: &str) -> anyhow::Result<Job> {
 
 /// The jobs, the next run first. `all` false: only active and paused jobs.
 pub fn list(dir: &Path, all: bool) -> anyhow::Result<Vec<Job>> {
-    db::read(dir, |c| {
-        let filter = if all {
-            ""
-        } else {
-            "WHERE status IN ('active', 'paused')"
-        };
-        let mut st = c.prepare(&format!(
-            "SELECT {COLUMNS} FROM job {filter}
-             ORDER BY status != 'active', next_run IS NULL, next_run, created"
-        ))?;
-        Ok(st.query_map([], from_row)?.collect::<Result<_, _>>()?)
-    })
+    db::read(dir, |c| list_in(c, all))
+}
+
+/// The same as list(), in an open connection. A job that cannot be read is
+/// left out, with a line in the log: one bad job must not hide the other
+/// jobs on the Tasks page, in the list_jobs tool, the brief, and the chat.
+/// claim_due turns an active bad job off.
+pub fn list_in(c: &Connection, all: bool) -> anyhow::Result<Vec<Job>> {
+    let filter = if all {
+        ""
+    } else {
+        "AND status IN ('active', 'paused')"
+    };
+    let mut st = c.prepare(&format!(
+        "SELECT {COLUMNS} FROM task WHERE doer = 'aifred' {filter}
+         ORDER BY status != 'active', next_run IS NULL, next_run, created"
+    ))?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, from_row(r))))?;
+    let mut out = vec![];
+    for row in rows {
+        match row? {
+            (_, Ok(j)) => out.push(j),
+            (id, Err(e)) => eprintln!("aifred: the job {id} cannot be read: {e}"),
+        }
+    }
+    Ok(out)
 }
 
 /// The runs of `job` (all jobs when None), the newest first, at most `limit`.
-/// Skipped runs only when `skipped` is true.
-pub fn runs(dir: &Path, job: Option<&str>, limit: u32, skipped: bool) -> anyhow::Result<Vec<Run>> {
+/// Skipped runs only when `skipped` is true. The runs of the brief job (action
+/// "brief") only when `brief` is true: it runs after each finished task, so
+/// its runs can fill the list.
+pub fn runs(
+    dir: &Path,
+    job: Option<&str>,
+    limit: u32,
+    skipped: bool,
+    brief: bool,
+) -> anyhow::Result<Vec<Run>> {
     db::read(dir, |c| {
         let mut st = c.prepare(
             "SELECT id, job, planned, started, finished, state, late, note, output, cost_usd
              FROM job_run WHERE (?1 IS NULL OR job = ?1) AND (?2 OR state != 'skipped')
+               AND (?4 OR job NOT IN (SELECT id FROM task WHERE doer = 'aifred' AND action = 'brief'))
              ORDER BY COALESCE(started, planned) DESC, id DESC LIMIT ?3",
         )?;
-        let rows = st.query_map(rusqlite::params![job, skipped, limit.clamp(1, 200)], |r| {
-            Ok(Run {
-                id: r.get(0)?,
-                job: r.get(1)?,
-                planned: r.get(2)?,
-                started: r.get(3)?,
-                finished: r.get(4)?,
-                state: r.get(5)?,
-                late: r.get(6)?,
-                note: r.get(7)?,
-                output: r.get(8)?,
-                cost_usd: r.get(9)?,
-            })
-        })?;
+        let rows = st.query_map(
+            rusqlite::params![job, skipped, limit.clamp(1, 200), brief],
+            |r| {
+                Ok(Run {
+                    id: r.get(0)?,
+                    job: r.get(1)?,
+                    planned: r.get(2)?,
+                    started: r.get(3)?,
+                    finished: r.get(4)?,
+                    state: r.get(5)?,
+                    late: r.get(6)?,
+                    note: r.get(7)?,
+                    output: r.get(8)?,
+                    cost_usd: r.get(9)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<Result<_, _>>()?)
     })
 }
 
 fn check_action(action: &str) -> anyhow::Result<()> {
     match action {
-        "remind" | "agent" | "brief" => Ok(()),
-        a => bail!("the action must be \"remind\" or \"agent\", not \"{a}\""),
+        "remind" | "agent" | "brief" | TASK => Ok(()),
+        a => bail!("the action must be \"remind\", \"agent\", or \"task\", not \"{a}\""),
     }
+}
+
+/// A "task" job adds a task at a time. After an event, it has no time.
+fn check_action_trigger(action: &str, trigger: &Trigger) -> anyhow::Result<()> {
+    if action == TASK && matches!(trigger, Trigger::Event { .. }) {
+        bail!("a job that adds a task needs a time or a repeat rule, not an event");
+    }
+    Ok(())
+}
+
+/// The action of a job that adds a new task for the user at each time.
+pub const TASK: &str = "task";
+
+/// Adds the task of a "task" job for the time `planned`, the time of the
+/// claimed run `run`. The task gets the job's title, its message as the
+/// notes, and the local day of `planned` as the due day.
+///
+/// The new task and the end of the run ("ok") are one transaction. So a
+/// crash leaves both or neither: a time has at most one run (UNIQUE (job,
+/// planned)), and a run that ends "ok" never runs again. A run that stopped
+/// with no task is "failed", and claim_task tries it again. The finish()
+/// call after it changes nothing, because the run is not "running" now.
+pub fn make_task(
+    dir: &Path,
+    run: i64,
+    job: &Job,
+    planned: i64,
+) -> anyhow::Result<crate::tasks::Task> {
+    let tz = zone(&job.tz)?;
+    let due = DateTime::from_timestamp(planned, 0)
+        .context("bad run time")?
+        .with_timezone(&tz)
+        .format("%Y-%m-%d")
+        .to_string();
+    let t = now() as i64;
+    db::write_jobs(dir, |tx| {
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM job_run WHERE id = ?1 AND job = ?2",
+                rusqlite::params![run, job.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if state.as_deref() != Some("running") {
+            bail!("the run {run} of the job {} is not running", job.id);
+        }
+        let task = crate::tasks::TaskStore::create_in(
+            tx,
+            crate::tasks::TaskFields {
+                title: Some(job.title.clone()),
+                notes: Some(job.message.clone()),
+                due: Some(due.clone()),
+                ..Default::default()
+            },
+            &job.created_by,
+        )?;
+        tx.execute(
+            "UPDATE job_run SET state = 'ok', finished = ?2, output = ?3, note = '' WHERE id = ?1",
+            rusqlite::params![
+                run,
+                t,
+                format!("Added the task \"{}\", due {due}.", task.title)
+            ],
+        )?;
+        // A one-time job, or a job at the end of its rule, is done when it
+        // has no next time and no other time waits for a retry.
+        // claim_task keeps the job active until here, so the job is "done"
+        // only when its last task is there.
+        tx.execute(
+            concat!(
+                "UPDATE task SET failures = 0,
+                    status = CASE WHEN status = 'active' AND next_run IS NULL AND NOT EXISTS (
+                               SELECT 1 FROM job_run r WHERE r.job = task.id AND ",
+                waits_for_retry!(),
+                ")
+                             THEN 'done' ELSE status END
+             WHERE id = ?1"
+            ),
+            [&job.id],
+        )?;
+        Ok(task)
+    })
+}
+
+/// The wait before a retry after `failures` failed runs in a row: 1, 2, 4,
+/// then 8 minutes. 0 failures (after a start or a crash): 1 minute.
+/// RETRY_WAIT_SQL is the same wait in SQL. The test
+/// the_retry_wait_is_the_same_in_rust_and_sql keeps the two the same.
+fn retry_wait(failures: u32) -> i64 {
+    60 * (1i64 << (failures.clamp(1, MAX_FAILURES) - 1))
+}
+
+/// retry_wait() in SQL, for any_due. `task.failures` is the failure count,
+/// and ?2 is MAX_FAILURES.
+macro_rules! retry_wait_sql {
+    () => {
+        "(60 << (MIN(MAX(task.failures, 1), ?2) - 1))"
+    };
 }
 
 /// Checks the trigger, and gives the next run after `now`.
@@ -630,18 +820,19 @@ pub fn create(dir: &Path, j: NewJob) -> anyhow::Result<Job> {
         bail!("the job needs a title");
     }
     check_action(&j.action)?;
-    if j.action != "brief" && j.message.trim().is_empty() {
+    if j.action != "brief" && j.action != TASK && j.message.trim().is_empty() {
         bail!("the job needs a message: the reminder text, or the instructions for the AI");
     }
     let trigger = j.trigger.context("the job needs a time or an event")?;
+    check_action_trigger(&j.action, &trigger)?;
     let tz =
         j.tz.filter(|z| !z.trim().is_empty())
             .unwrap_or_else(local_zone);
     let t = now() as i64;
     let next = check_trigger(&trigger, &tz, t)?;
-    db::write(dir, |tx| {
+    db::write_jobs(dir, |tx| {
         let open: usize = tx.query_row(
-            "SELECT COUNT(*) FROM job WHERE status IN ('active', 'paused')",
+            "SELECT COUNT(*) FROM task WHERE doer = 'aifred' AND status IN ('active', 'paused')",
             [],
             |r| r.get(0),
         )?;
@@ -650,9 +841,9 @@ pub fn create(dir: &Path, j: NewJob) -> anyhow::Result<Job> {
         }
         let id = new_id();
         tx.execute(
-            "INSERT INTO job (id, title, action, message, trigger, tz, status, next_run,
-                              created_by, created, updated, failures, cursor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?9, 0, ?10)",
+            "INSERT INTO task (id, title, action, message, trigger, tz, status, next_run,
+                               added_by, created, updated, failures, cursor, doer)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?9, 0, ?10, 'aifred')",
             rusqlite::params![
                 id,
                 title,
@@ -673,7 +864,7 @@ pub fn create(dir: &Path, j: NewJob) -> anyhow::Result<Job> {
 
 pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
     let t = now() as i64;
-    db::write(dir, |tx| {
+    db::write_jobs(dir, |tx| {
         let old = get_in(tx, id)?;
         let title = match ch.title {
             Some(s) if s.trim().is_empty() => bail!("the job needs a title"),
@@ -690,6 +881,7 @@ pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
             .unwrap_or(old.tz.clone());
         let new_time = ch.trigger.is_some() || tz != old.tz;
         let trigger = ch.trigger.unwrap_or(old.trigger.clone());
+        check_action_trigger(&old.action, &trigger)?;
         let status = match ch.status.as_deref() {
             // A new time for a job that ended ("move that reminder to
             // Friday"): the job starts again. A paused job stays paused.
@@ -701,13 +893,14 @@ pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
             Some(s) => bail!("the status must be \"active\" or \"paused\", not \"{s}\""),
         };
         let resumed = status == "active" && old.status != "active";
-        if resumed && !new_time && !can_start(&trigger, &tz, &old.status, t) {
+        let retry = old.action == TASK && has_retry(tx, id)?;
+        if resumed && !new_time && !can_start(&trigger, &tz, &old.status, retry, t) {
             // A job with no more times comes back only with a new time.
             bail!("the job has no more times. Give it a new time.");
         }
         if resumed {
             let open: usize = tx.query_row(
-                "SELECT COUNT(*) FROM job WHERE status IN ('active', 'paused') AND id != ?1",
+                "SELECT COUNT(*) FROM task WHERE doer = 'aifred' AND status IN ('active', 'paused') AND id != ?1",
                 [id],
                 |r| r.get(0),
             )?;
@@ -719,7 +912,12 @@ pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
         }
         // A new time, or a job that starts again: the next run is from now,
         // so the missed times do not all run.
-        let next = if let (true, false, "paused", Trigger::Once { at }) =
+        let next = if resumed && !new_time && retry {
+            // The failed time runs first (claim_task). The next run is the
+            // next time of the rule after now, or none: a one-time job has
+            // its run already, and a rule can be at its end.
+            times_after(&trigger, &tz, t - 1, 1)?.first().copied()
+        } else if let (true, false, "paused", Trigger::Once { at }) =
             (resumed, new_time, old.status.as_str(), &trigger)
         {
             // The pause held the run back. When its time passed during the
@@ -740,7 +938,7 @@ pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
             None
         };
         tx.execute(
-            "UPDATE job SET title = ?2, message = ?3, trigger = ?4, tz = ?5, status = ?6,
+            "UPDATE task SET title = ?2, message = ?3, trigger = ?4, tz = ?5, status = ?6,
                             next_run = ?7, updated = ?8,
                             failures = CASE WHEN ?9 THEN 0 ELSE failures END,
                             cursor = COALESCE(?10, cursor)
@@ -754,12 +952,44 @@ pub fn update(dir: &Path, id: &str, ch: JobChange) -> anyhow::Result<Job> {
                 status,
                 next,
                 t,
-                resumed,
+                // A start or a new time is a new try: 1 minute to the next
+                // retry. A failed time of a "task" job still gets its retry
+                // after a start (claim_task).
+                resumed || new_time,
                 cursor
             ],
         )?;
+        if new_time && old.action == TASK {
+            // The new time replaces the old ones ("move it to Friday"), so a
+            // failed old time gets no task. The run list tells why.
+            tx.execute(
+                concat!(
+                    "UPDATE job_run SET state = 'skipped',
+                        note = 'No task: the job got a new time before a retry. The error was: ' || note
+                 WHERE job = ?1 AND ",
+                    waits_for_retry!()
+                ),
+                [id],
+            )?;
+        }
         get_in(tx, id)
     })
+}
+
+/// True when a failed time of the job waits for its retry (claim_task).
+fn has_retry(tx: &Transaction, id: &str) -> anyhow::Result<bool> {
+    Ok(tx
+        .query_row(
+            concat!(
+                "SELECT 1 FROM job_run WHERE job = ?1 AND ",
+                waits_for_retry!(),
+                " LIMIT 1"
+            ),
+            [id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 /// Deletes the job and its runs. The brief job cannot be deleted, because
@@ -768,8 +998,8 @@ pub fn delete(dir: &Path, id: &str) -> anyhow::Result<()> {
     if id == BRIEF_JOB {
         bail!("AIfred's brief job cannot be deleted. Pause it to stop it.");
     }
-    db::write(dir, |tx| {
-        if tx.execute("DELETE FROM job WHERE id = ?1", [id])? == 0 {
+    db::write_jobs(dir, |tx| {
+        if tx.execute("DELETE FROM task WHERE id = ?1 AND doer = 'aifred'", [id])? == 0 {
             bail!("no job with id {id}");
         }
         Ok(())
@@ -816,11 +1046,22 @@ impl SchedulerLock {
 
 /// Marks the runs that were busy when AIfred stopped as failed.
 /// Call it only while you hold the SchedulerLock: then no other window has
-/// a run that is busy now. They do not
-/// run again: a reminder can come twice, but an AI run must not.
+/// a run that is busy now. Most of them do not run again: a reminder can
+/// come twice, but an AI run must not. A "task" job is different: its task
+/// and the end of its run are one transaction (make_task). So a "running"
+/// run has no task, and claim_task tries it again after a minute.
 pub fn recover(dir: &Path) -> anyhow::Result<usize> {
     let t = now() as i64;
-    db::write(dir, |tx| {
+    db::write_jobs(dir, |tx| {
+        // An older AIfred made a one-time "task" job "done" at its claim
+        // (claim_task now keeps it active). It must be active again, or
+        // claim_due does not see the retry.
+        tx.execute(
+            "UPDATE task SET status = 'active'
+             WHERE doer = 'aifred' AND action = 'task' AND status = 'done'
+               AND id IN (SELECT job FROM job_run WHERE state = 'running')",
+            [],
+        )?;
         Ok(tx.execute(
             "UPDATE job_run SET state = 'failed', finished = ?1,
                     note = 'AIfred stopped during the run.'
@@ -870,20 +1111,30 @@ pub fn claim_due(dir: &Path, now: i64) -> anyhow::Result<Vec<Claim>> {
     if !clean && !db::read(dir, |c| any_due(c, now))? {
         return Ok(vec![]);
     }
-    db::write(dir, |tx| {
+    db::write_jobs(dir, |tx| {
         if clean {
             tx.execute("DELETE FROM job_event WHERE ts < ?1", [now - KEEP_EVENTS])?;
+            // A failed time of a "task" job waits for its task (claim_task),
+            // also when the job is paused for a long time. It stays. When the
+            // job is off or done, nothing retries it, so it goes as the
+            // other runs do.
             tx.execute(
-                "DELETE FROM job_run WHERE COALESCE(finished, planned) < ?1 AND state != 'running'",
+                concat!(
+                    "DELETE FROM job_run WHERE COALESCE(finished, planned) < ?1 AND state != 'running'
+                   AND NOT (",
+                    waits_for_retry!(),
+                    " AND job IN (SELECT id FROM task WHERE doer = 'aifred' AND action = 'task'
+                                          AND status IN ('active', 'paused')))"
+                ),
                 [now - KEEP_RUNS],
             )?;
         }
         let jobs: Vec<(String, rusqlite::Result<(Job, i64)>)> = {
             let mut st = tx.prepare(&format!(
-                "SELECT {COLUMNS}, cursor FROM job WHERE status = 'active'"
+                "SELECT {COLUMNS}, cursor FROM task WHERE doer = 'aifred' AND status = 'active'"
             ))?;
             st.query_map([], |r| {
-                Ok((r.get(0)?, from_row(r).and_then(|j| Ok((j, r.get(12)?)))))
+                Ok((r.get(0)?, from_row(r).and_then(|j| Ok((j, r.get(13)?)))))
             })?
             .collect::<Result<_, _>>()?
         };
@@ -905,9 +1156,11 @@ pub fn claim_due(dir: &Path, now: i64) -> anyhow::Result<Vec<Claim>> {
                     tx.execute_batch("ROLLBACK TO one_job")?;
                     eprintln!("aifred: job {id} turns off: {e:#}");
                     let note = format!("AIfred cannot run this job: {e:#}");
-                    add_run(tx, &id, now, "failed", &note, Some(now), false)?;
+                    // No start time: this row is not a time of the rule, so
+                    // claim_task never tries it again as a task.
+                    add_run(tx, &id, now, "failed", &note, None, false)?;
                     tx.execute(
-                        "UPDATE job SET status = 'off', next_run = NULL WHERE id = ?1",
+                        "UPDATE task SET status = 'off', next_run = NULL WHERE id = ?1",
                         [&id],
                     )?;
                 }
@@ -935,21 +1188,38 @@ fn cleanup_due(now: i64) -> bool {
 /// new events. Only then does claim_due take the write lock.
 fn any_due(c: &Connection, now: i64) -> anyhow::Result<bool> {
     Ok(c.query_row(
-        "SELECT EXISTS (
-           SELECT 1 FROM job WHERE status = 'active' AND (
-             (next_run IS NOT NULL AND next_run <= ?1)
+        concat!(
+            "SELECT EXISTS (
+           SELECT 1 FROM task WHERE doer = 'aifred' AND status = 'active' AND (
+             -- A 'task' job with a failed time waits for that retry first
+             -- (claim_task).
+             CASE WHEN action = 'task' THEN COALESCE(
+                    (SELECT COALESCE(r.finished, 0) + ",
+            retry_wait_sql!(),
+            " <= ?1
+                     FROM job_run r
+                     WHERE r.job = task.id AND ",
+            waits_for_retry!(),
+            "
+                     ORDER BY r.planned LIMIT 1),
+                    next_run IS NOT NULL AND next_run <= ?1)
+                  ELSE next_run IS NOT NULL AND next_run <= ?1 END
              -- A bad trigger is due too: claim_due turns the job off.
              OR CASE WHEN json_valid(trigger) THEN
                   json_extract(trigger, '$.kind') = 'event' AND next_run IS NULL AND EXISTS (
                     SELECT 1 FROM job_event e
-                    WHERE e.name = json_extract(job.trigger, '$.event') AND e.id > job.cursor)
-                ELSE 1 END))",
-        [now],
+                    WHERE e.name = json_extract(task.trigger, '$.event') AND e.id > task.cursor)
+                ELSE 1 END))"
+        ),
+        rusqlite::params![now, MAX_FAILURES],
         |r| r.get(0),
     )?)
 }
 
 fn claim_time(tx: &Transaction, job: &Job, now: i64) -> anyhow::Result<Option<Claim>> {
+    if job.action == TASK {
+        return claim_task(tx, job, now);
+    }
     let Some(mut planned) = job.next_run else {
         return Ok(None);
     };
@@ -957,37 +1227,29 @@ fn claim_time(tx: &Transaction, job: &Job, now: i64) -> anyhow::Result<Option<Cl
         return Ok(None);
     }
     // The times after `planned` that also passed: only the newest one runs.
-    let later = times_between(&job.trigger, &job.tz, planned, now)?;
+    let (n, later) = times_between(&job.trigger, &job.tz, planned, now, MAX_SKIP_ROWS + 1)?;
     let next = times_after(&job.trigger, &job.tz, now, 1)?.first().copied();
-    let skip = |t: i64, note: &str| add_run(tx, &job.id, t, "skipped", note, None, false);
-    if let Some(&newest) = later.last() {
-        // The missed times, without the newest: at most MAX_SKIP_ROWS rows.
-        // The oldest row tells how many times have no row.
-        let missed: Vec<i64> = std::iter::once(planned)
-            .chain(later[..later.len() - 1].iter().copied())
-            .collect();
-        let cut = missed.len().saturating_sub(MAX_SKIP_ROWS);
-        for (i, t) in missed[cut..].iter().enumerate() {
-            if i == 0 && cut > 0 {
-                skip(
-                    *t,
-                    &format!("AIfred was not running at this time, and at {cut} earlier times."),
-                )?;
+    if let Some((&newest, before_newest)) = later.split_last() {
+        // The missed times: `planned` and the later times without the
+        // newest, n in all. `later` has only the newest of them.
+        let missed: Vec<i64> = if n > later.len() {
+            before_newest.to_vec()
+        } else {
+            std::iter::once(planned)
+                .chain(before_newest.iter().copied())
+                .collect()
+        };
+        skip_rows(tx, &job.id, &missed, n - missed.len(), |hidden| {
+            if hidden > 0 {
+                format!("AIfred was not running at this time, and at {hidden} earlier times.")
             } else {
-                skip(*t, "AIfred was not running at this time.")?;
+                "AIfred was not running at this time.".to_string()
             }
-        }
+        })?;
         planned = newest;
     }
     let repeat = matches!(job.trigger, Trigger::Repeat { .. });
-    let set_next = |next: Option<i64>| -> anyhow::Result<()> {
-        let status = if next.is_none() { "done" } else { "active" };
-        tx.execute(
-            "UPDATE job SET next_run = ?2, status = ?3 WHERE id = ?1",
-            rusqlite::params![job.id, next, status],
-        )?;
-        Ok(())
-    };
+    let set_next = |next: Option<i64>| set_next(tx, &job.id, next);
     if repeat && now - planned > STALE_SECS {
         add_run(
             tx,
@@ -1023,6 +1285,146 @@ fn claim_time(tx: &Transaction, job: &Job, now: i64) -> anyhow::Result<Option<Cl
         run,
         planned,
         late,
+        retry: false,
+    }))
+}
+
+/// Sets the next run of a job that runs at times. No next time: the job is done.
+fn set_next(tx: &Transaction, id: &str, next: Option<i64>) -> anyhow::Result<()> {
+    let status = if next.is_none() { "done" } else { "active" };
+    tx.execute(
+        "UPDATE task SET next_run = ?2, status = ?3 WHERE id = ?1",
+        rusqlite::params![id, next, status],
+    )?;
+    Ok(())
+}
+
+/// Writes a "skipped" row for the missed times in `times` (oldest first).
+/// `before` older times came before them. At most the newest MAX_SKIP_ROWS
+/// get a row. `note` gets the number of older times with no row, for the
+/// first row, and 0 for the other rows.
+fn skip_rows(
+    tx: &Transaction,
+    job: &str,
+    times: &[i64],
+    before: usize,
+    note: impl Fn(usize) -> String,
+) -> anyhow::Result<()> {
+    let cut = times.len().saturating_sub(MAX_SKIP_ROWS);
+    let hidden = before + cut;
+    for (i, t) in times[cut..].iter().enumerate() {
+        let n = if i == 0 { hidden } else { 0 };
+        add_run(tx, job, *t, "skipped", &note(n), None, false)?;
+    }
+    Ok(())
+}
+
+/// The claim of a "task" job. Each time of the rule must give its task, with
+/// the local day of that time as the due day. So, not as the other jobs:
+/// - It claims the oldest time that has no task, one time for each tick.
+///   After a long miss, the next ticks add the tasks of the other missed
+///   times, one after the other. Only the newest MAX_CATCH_UP missed times
+///   get a task. The older ones get a "skipped" row.
+/// - A busy run does not skip a time. The time waits for the next tick.
+/// - A failed time (an error, or AIfred stopped during the run) tries again
+///   with the same run row and the same time, so the task gets the due day of
+///   the planned time. The retry waits retry_wait(), counted from the end of
+///   the failed run. While it waits, no other time starts.
+/// - next_run is always the next time of the rule that has no run. A failure
+///   does not change it, so a retry during a catch-up still waits.
+fn claim_task(tx: &Transaction, job: &Job, now: i64) -> anyhow::Result<Option<Claim>> {
+    if busy(tx, &job.id)? {
+        return Ok(None);
+    }
+    // A run with no start time is not a time of the rule (claim_due writes
+    // it when the job cannot run). It gets no retry.
+    let failed: Option<(i64, i64, i64)> = tx
+        .query_row(
+            concat!(
+                "SELECT id, planned, COALESCE(finished, 0) FROM job_run
+             WHERE job = ?1 AND ",
+                waits_for_retry!(),
+                " ORDER BY planned LIMIT 1"
+            ),
+            [&job.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if let Some((run, planned, finished)) = failed {
+        if now < finished + retry_wait(job.failures) {
+            return Ok(None);
+        }
+        tx.execute(
+            "UPDATE job_run SET state = 'running', started = ?2, finished = NULL WHERE id = ?1",
+            rusqlite::params![run, now],
+        )?;
+        let late = now - planned > LATE_SECS;
+        return Ok(Some(Claim {
+            job: get_in(tx, &job.id)?,
+            run,
+            planned,
+            late,
+            retry: true,
+        }));
+    }
+    let Some(mut planned) = job.next_run else {
+        return Ok(None);
+    };
+    if planned > now {
+        return Ok(None);
+    }
+    // After a long miss, only the newest MAX_CATCH_UP times get a task.
+    let (n, later) = times_between(
+        &job.trigger,
+        &job.tz,
+        planned,
+        now,
+        MAX_CATCH_UP + MAX_SKIP_ROWS,
+    )?;
+    let missed = 1 + n;
+    if missed > MAX_CATCH_UP {
+        // The newest part of all missed times: `planned` and `later`.
+        let known: Vec<i64> = if n > later.len() {
+            later
+        } else {
+            std::iter::once(planned).chain(later).collect()
+        };
+        let (old, keep) = known.split_at(known.len() - MAX_CATCH_UP);
+        skip_rows(tx, &job.id, old, missed - known.len(), |hidden| {
+            if hidden > 0 {
+                format!(
+                    "AIfred was not running for a long time. No task for this time, and for {hidden} earlier times."
+                )
+            } else {
+                "AIfred was not running for a long time. No task for this time.".to_string()
+            }
+        })?;
+        planned = keep[0];
+    }
+    let late = now - planned > LATE_SECS;
+    let run = add_run(tx, &job.id, planned, "running", "", Some(now), late)?;
+    let next = times_after(&job.trigger, &job.tz, planned, 1)?
+        .first()
+        .copied();
+    let Some(run) = run else {
+        // This time already has a run: its task is there. So with no next
+        // time, the job is done now.
+        set_next(tx, &job.id, next)?;
+        return Ok(None);
+    };
+    // Not set_next(): with no next time, the job stays active. make_task
+    // makes it "done" in the same step as its last task, so the job is
+    // never "done" while its last task is not there.
+    tx.execute(
+        "UPDATE task SET next_run = ?2 WHERE id = ?1",
+        rusqlite::params![job.id, next],
+    )?;
+    Ok(Some(Claim {
+        job: get_in(tx, &job.id)?,
+        run,
+        planned,
+        late,
+        retry: false,
     }))
 }
 
@@ -1041,7 +1443,7 @@ fn claim_event(
     )?;
     let (Some(first), Some(last), Some(top)) = (first, last, top) else {
         if job.next_run.is_some() {
-            tx.execute("UPDATE job SET next_run = NULL WHERE id = ?1", [&job.id])?;
+            tx.execute("UPDATE task SET next_run = NULL WHERE id = ?1", [&job.id])?;
         }
         return Ok(None);
     };
@@ -1061,14 +1463,14 @@ fn claim_event(
     if let Some(next) = next {
         if job.next_run != Some(next) {
             tx.execute(
-                "UPDATE job SET next_run = ?2 WHERE id = ?1",
+                "UPDATE task SET next_run = ?2 WHERE id = ?1",
                 rusqlite::params![job.id, next],
             )?;
         }
         return Ok(None);
     }
     tx.execute(
-        "UPDATE job SET next_run = NULL, cursor = ?2 WHERE id = ?1",
+        "UPDATE task SET next_run = NULL, cursor = ?2 WHERE id = ?1",
         rusqlite::params![job.id, top],
     )?;
     let run = add_run(tx, &job.id, due, "running", "", Some(now), false)?;
@@ -1078,6 +1480,7 @@ fn claim_event(
         run,
         planned: due,
         late: false,
+        retry: false,
     }))
 }
 
@@ -1086,16 +1489,22 @@ fn claim_event(
 ///   row the job turns off. Event jobs do not retry: the next event runs them.
 /// - "Finished" ends the job.
 ///
-/// It gives the job after the change, or None when the job is gone.
+/// A run that is not "running" now does not change: make_task ended it
+/// already. It gives the job after the change, or None when the job is gone.
 pub fn finish(dir: &Path, run: i64, outcome: Outcome) -> anyhow::Result<Option<Job>> {
     let t = now() as i64;
-    db::write(dir, |tx| {
-        let job: Option<String> = tx
-            .query_row("SELECT job FROM job_run WHERE id = ?1", [run], |r| r.get(0))
+    db::write_jobs(dir, |tx| {
+        let row: Option<(String, String)> = tx
+            .query_row("SELECT job, state FROM job_run WHERE id = ?1", [run], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .optional()?;
-        let Some(job) = job else {
+        let Some((job, run_state)) = row else {
             return Ok(None);
         };
+        if run_state != "running" {
+            return find_in(tx, &job);
+        }
         let (state, output, note, cost) = match &outcome {
             Outcome::Ok { output, cost_usd } | Outcome::Finished { output, cost_usd } => {
                 ("ok", output.as_str(), "", *cost_usd)
@@ -1107,14 +1516,7 @@ pub fn finish(dir: &Path, run: i64, outcome: Outcome) -> anyhow::Result<Option<J
             "UPDATE job_run SET state = ?2, finished = ?3, output = ?4, note = ?5, cost_usd = ?6 WHERE id = ?1",
             rusqlite::params![run, state, t, output, note, cost],
         )?;
-        let Some(j) = tx
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM job WHERE id = ?1"),
-                [&job],
-                from_row,
-            )
-            .optional()?
-        else {
+        let Some(j) = find_in(tx, &job)? else {
             return Ok(None);
         };
         match outcome {
@@ -1122,31 +1524,41 @@ pub fn finish(dir: &Path, run: i64, outcome: Outcome) -> anyhow::Result<Option<J
                 let failures = j.failures + 1;
                 if failures >= MAX_FAILURES {
                     tx.execute(
-                        "UPDATE job SET failures = ?2, status = 'off', next_run = NULL WHERE id = ?1",
+                        "UPDATE task SET failures = ?2, status = 'off', next_run = NULL WHERE id = ?1",
                         rusqlite::params![j.id, failures],
                     )?;
                 } else if matches!(j.trigger, Trigger::Event { .. }) || j.status == "paused" {
                     tx.execute(
-                        "UPDATE job SET failures = ?2 WHERE id = ?1",
+                        "UPDATE task SET failures = ?2 WHERE id = ?1",
+                        rusqlite::params![j.id, failures],
+                    )?;
+                } else if j.action == TASK {
+                    // The failed run itself waits for its retry (claim_task).
+                    // next_run stays the next time of the rule. The claim
+                    // keeps the job active, but an older AIfred made a
+                    // one-time job "done" at its claim: it must be active
+                    // for the retry.
+                    tx.execute(
+                        "UPDATE task SET failures = ?2, status = 'active' WHERE id = ?1",
                         rusqlite::params![j.id, failures],
                     )?;
                 } else {
-                    let retry = t + 60 * (1i64 << (failures - 1));
+                    let retry = t + retry_wait(failures);
                     let next = j.next_run.map_or(retry, |n| n.min(retry));
                     tx.execute(
-                        "UPDATE job SET failures = ?2, next_run = ?3, status = 'active' WHERE id = ?1",
+                        "UPDATE task SET failures = ?2, next_run = ?3, status = 'active' WHERE id = ?1",
                         rusqlite::params![j.id, failures, next],
                     )?;
                 }
             }
             Outcome::Finished { .. } => {
                 tx.execute(
-                    "UPDATE job SET failures = 0, status = 'done', next_run = NULL WHERE id = ?1",
+                    "UPDATE task SET failures = 0, status = 'done', next_run = NULL WHERE id = ?1",
                     [&j.id],
                 )?;
             }
             Outcome::Ok { .. } | Outcome::Quiet { .. } => {
-                tx.execute("UPDATE job SET failures = 0 WHERE id = ?1", [&j.id])?;
+                tx.execute("UPDATE task SET failures = 0 WHERE id = ?1", [&j.id])?;
             }
         }
         Ok(Some(get_in(tx, &j.id)?))
@@ -1431,6 +1843,573 @@ mod tests {
     }
 
     #[test]
+    fn a_task_job_adds_a_new_task_at_each_time_also_after_a_long_miss() {
+        let d = dir("task-job");
+        let jkt = "Asia/Jakarta";
+        let mut new = job(
+            "Pay rent",
+            repeat("2030-12-01T08:00", "FREQ=MONTHLY;BYMONTHDAY=1"),
+            jkt,
+        );
+        new.action = TASK.into();
+        new.message = String::new();
+        let rule = create(&d, new).unwrap();
+        let store = crate::tasks::TaskStore::new(&d);
+        assert!(
+            store.load().unwrap().is_empty(),
+            "the rule is not a task of the user"
+        );
+
+        let t = ts("2030-12-01T08:00", jkt);
+        let c = claim_due(&d, t + 5).unwrap();
+        assert_eq!(c.len(), 1);
+        let made = make_task(&d, c[0].run, &c[0].job, c[0].planned).unwrap();
+        assert_eq!(
+            (made.title.as_str(), made.due.as_deref()),
+            ("Pay rent", Some("2030-12-01"))
+        );
+        assert_eq!(made.added_by, "aifred");
+        assert!(
+            claim_due(&d, t + 10).unwrap().is_empty(),
+            "one task for each time"
+        );
+        finish(
+            &d,
+            c[0].run,
+            Outcome::Ok {
+                output: String::new(),
+                cost_usd: None,
+            },
+        )
+        .unwrap();
+
+        // AIfred was closed on 1 January. Nine days later, the task still comes.
+        let jan = ts("2031-01-01T08:00", jkt);
+        let c = claim_due(&d, jan + 9 * 86400).unwrap();
+        assert_eq!(c.len(), 1, "a missed task is not skipped");
+        assert_eq!(c[0].planned, jan);
+        make_task(&d, c[0].run, &c[0].job, c[0].planned).unwrap();
+        let dues: Vec<Option<String>> = store.load().unwrap().into_iter().map(|t| t.due).collect();
+        assert_eq!(dues, [Some("2030-12-01".into()), Some("2031-01-01".into())]);
+        assert_eq!(
+            get(&d, &rule.id).unwrap().status,
+            "active",
+            "the rule stays"
+        );
+
+        // A task job cannot wait for an event.
+        let e = update(
+            &d,
+            &rule.id,
+            JobChange {
+                trigger: Some(Trigger::Event {
+                    event: TASK_DONE.into(),
+                    wait_secs: 90,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("not an event"), "{e}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Runs claim_due and make_task until no claim is left, as the scheduler
+    /// does tick by tick. Gives the due days of the new tasks.
+    fn run_task_ticks(d: &Path, now: i64) -> Vec<String> {
+        let mut dues = vec![];
+        for _ in 0..100 {
+            let c = claim_due(d, now).unwrap();
+            if c.is_empty() {
+                break;
+            }
+            assert_eq!(c.len(), 1, "one task for each tick");
+            let t = make_task(d, c[0].run, &c[0].job, c[0].planned).unwrap();
+            dues.push(t.due.unwrap());
+            finish(
+                d,
+                c[0].run,
+                Outcome::Ok {
+                    output: String::new(),
+                    cost_usd: None,
+                },
+            )
+            .unwrap();
+        }
+        dues
+    }
+
+    #[test]
+    fn a_task_job_adds_a_task_for_each_missed_time() {
+        let d = dir("task-missed");
+        let utc = "UTC";
+        let mut new = job(
+            "Submit timesheet",
+            repeat("2030-01-07T09:00", "FREQ=WEEKLY;BYDAY=MO"),
+            utc,
+        );
+        new.action = TASK.into();
+        create(&d, new).unwrap();
+        // AIfred is closed for 3 weeks: 7, 14 and 21 January.
+        let dues = run_task_ticks(&d, ts("2030-01-22T10:00", utc));
+        assert_eq!(dues, ["2030-01-07", "2030-01-14", "2030-01-21"]);
+        let skipped = runs(&d, None, 50, true, true)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.state == "skipped")
+            .count();
+        assert_eq!(skipped, 0);
+        std::fs::remove_dir_all(&d).unwrap();
+
+        // After a very long miss, only the newest MAX_CATCH_UP times get a task.
+        let d = dir("task-missed-long");
+        let mut new = job(
+            "Water the plants",
+            repeat("2030-01-01T09:00", "FREQ=DAILY"),
+            utc,
+        );
+        new.action = TASK.into();
+        create(&d, new).unwrap();
+        let dues = run_task_ticks(&d, ts("2030-02-10T10:00", utc));
+        assert_eq!(dues.len(), MAX_CATCH_UP);
+        assert_eq!(dues.last().unwrap(), "2030-02-10");
+        let skipped = runs(&d, None, 200, true, true)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.state == "skipped")
+            .count();
+        assert_eq!(
+            skipped, MAX_SKIP_ROWS,
+            "41 times, 20 tasks, at most 20 skipped rows"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_task_retry_keeps_the_day_of_the_planned_time() {
+        let d = dir("task-retry");
+        let utc = "UTC";
+        // Days near the real clock: finish() writes the real time, and the
+        // hourly cleanup deletes runs that look 60 days old.
+        let day = |n: i64| {
+            (Utc::now() + chrono::Duration::days(n))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        let (day1, day2) = (day(1), day(2));
+        let mut new = job(
+            "Log the day",
+            repeat(&format!("{day1}T23:59"), "FREQ=DAILY"),
+            utc,
+        );
+        new.action = TASK.into();
+        create(&d, new).unwrap();
+        let t = ts(&format!("{day1}T23:59"), utc);
+        let c = claim_due(&d, t + 5).unwrap();
+        assert_eq!(c.len(), 1);
+        let first_run = c[0].run;
+        finish(
+            &d,
+            c[0].run,
+            Outcome::Failed {
+                error: "the database is busy".into(),
+            },
+        )
+        .unwrap();
+        // The retry comes after midnight, on the next day.
+        let retry = t + 5 * 60;
+        let c = claim_due(&d, retry).unwrap();
+        assert_eq!(c.len(), 1, "the retry");
+        assert_eq!(c[0].planned, t, "the retry keeps the planned time");
+        assert_eq!(c[0].run, first_run, "the retry uses the same run row");
+        let made = make_task(&d, c[0].run, &c[0].job, c[0].planned).unwrap();
+        assert_eq!(made.due.as_deref(), Some(day1.as_str()));
+        finish(
+            &d,
+            c[0].run,
+            Outcome::Ok {
+                output: String::new(),
+                cost_usd: None,
+            },
+        )
+        .unwrap();
+        // The time of the next day still gives its own task.
+        let dues = run_task_ticks(&d, ts(&format!("{day2}T23:59"), utc) + 5);
+        assert_eq!(dues, [day2]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A daily "task" job whose times are the last `days` days, at the real
+    /// time of now. finish() and recover() write the real time, so the
+    /// retry waits must use a clock near it.
+    fn daily_task_job(d: &Path, title: &str, days: i64) -> (Job, i64) {
+        let utc = "UTC";
+        let start = Utc::now() - chrono::Duration::days(days);
+        let start_text = start.format("%Y-%m-%dT%H:%M").to_string();
+        let mut new = job(title, repeat(&start_text, "FREQ=DAILY"), utc);
+        new.action = TASK.into();
+        // create() wants a time after now: a rule that started in the past.
+        let rule = create(d, new).unwrap();
+        db::write_jobs(d, |tx| {
+            tx.execute(
+                "UPDATE task SET next_run = ?2 WHERE id = ?1",
+                rusqlite::params![rule.id, ts(&start_text, utc)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        (get(d, &rule.id).unwrap(), ts(&start_text, utc))
+    }
+
+    fn task_count(d: &Path) -> usize {
+        crate::tasks::TaskStore::new(d).load().unwrap().len()
+    }
+
+    #[test]
+    fn a_crash_during_a_task_run_gives_exactly_one_task() {
+        let d = dir("task-crash");
+        let (_, first) = daily_task_job(&d, "Log the day", 0);
+        let t = now() as i64;
+        // AIfred stops after the claim, before the task is saved.
+        let c = claim_due(&d, t).unwrap();
+        assert_eq!((c.len(), c[0].planned), (1, first));
+        assert_eq!(recover(&d).unwrap(), 1);
+        assert_eq!(task_count(&d), 0);
+        assert!(
+            claim_due(&d, t + 5).unwrap().is_empty(),
+            "the retry waits a minute"
+        );
+        let c = claim_due(&d, t + 90).unwrap();
+        assert_eq!(
+            (c.len(), c[0].planned),
+            (1, first),
+            "the stopped time gets its retry"
+        );
+        // This time AIfred stops after the task is saved, before finish().
+        make_task(&d, c[0].run, &c[0].job, c[0].planned).unwrap();
+        assert_eq!(recover(&d).unwrap(), 0, "the run ended with the task");
+        assert!(claim_due(&d, t + 600).unwrap().is_empty(), "no second task");
+        assert_eq!(task_count(&d), 1);
+        // A late finish() of the same run changes nothing.
+        finish(
+            &d,
+            c[0].run,
+            Outcome::Failed {
+                error: "late".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(get(&d, &c[0].job.id).unwrap().failures, 0);
+        assert!(claim_due(&d, t + 1200).unwrap().is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_failed_task_time_retries_after_a_pause_and_waits_during_a_catch_up() {
+        let d = dir("task-pause");
+        // Three missed days: the catch-up adds them one tick after the other.
+        let (rule, first) = daily_task_job(&d, "Water the plants", 2);
+        let t = now() as i64;
+        let c = claim_due(&d, t).unwrap();
+        assert_eq!(c[0].planned, first);
+        finish(
+            &d,
+            c[0].run,
+            Outcome::Failed {
+                error: "the database is busy".into(),
+            },
+        )
+        .unwrap();
+        // The next missed day is in the past, but the failed time waits for
+        // its retry, and no other time starts meanwhile.
+        assert!(get(&d, &rule.id).unwrap().next_run.unwrap() < t);
+        assert!(
+            claim_due(&d, t + 30).unwrap().is_empty(),
+            "no retry at once"
+        );
+        assert!(
+            !db::read(&d, |c| any_due(c, t + 30)).unwrap(),
+            "no write lock each tick"
+        );
+        // The user pauses the job, then starts it again.
+        let paused = JobChange {
+            status: Some("paused".into()),
+            ..Default::default()
+        };
+        update(&d, &rule.id, paused).unwrap();
+        let start = JobChange {
+            status: Some("active".into()),
+            ..Default::default()
+        };
+        update(&d, &rule.id, start).unwrap();
+        let c = claim_due(&d, t + 90).unwrap();
+        assert_eq!(c.len(), 1, "the failed time still gets its task");
+        assert_eq!(c[0].planned, first);
+        make_task(&d, c[0].run, &c[0].job, c[0].planned).unwrap();
+        assert_eq!(task_count(&d), 1);
+
+        // A new time replaces the old ones: a failed old time gets no task,
+        // and the run list says why.
+        let (rent, _) = daily_task_job(&d, "Pay rent", 0);
+        let c = run_until_claim(&d, t + 120);
+        assert_eq!(c.job.id, rent.id);
+        finish(
+            &d,
+            c.run,
+            Outcome::Failed {
+                error: "disk full".into(),
+            },
+        )
+        .unwrap();
+        let tomorrow = (Utc::now() + chrono::Duration::days(1))
+            .format("%Y-%m-%dT09:00")
+            .to_string();
+        let change = JobChange {
+            trigger: Some(repeat(&tomorrow, "FREQ=DAILY")),
+            ..Default::default()
+        };
+        update(&d, &rent.id, change).unwrap();
+        assert!(claim_due(&d, t + 600).unwrap().is_empty());
+        assert_eq!(task_count(&d), 1, "no task for the old time");
+        let r = runs(&d, Some(&rent.id), 10, true, true).unwrap();
+        let old = r.iter().find(|r| r.id == c.run).unwrap();
+        assert_eq!(old.state, "skipped");
+        assert!(
+            old.note.contains("new time") && old.note.contains("disk full"),
+            "{}",
+            old.note
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A one-time "task" job whose time was a minute ago. create() wants a
+    /// time after now, so the test moves the time back.
+    fn once_task_job(d: &Path, title: &str) -> Job {
+        let utc = "UTC";
+        let at = (Utc::now() - chrono::Duration::minutes(1))
+            .format("%Y-%m-%dT%H:%M")
+            .to_string();
+        let mut new = job(
+            title,
+            Trigger::Once {
+                at: (Utc::now() + chrono::Duration::days(1))
+                    .format("%Y-%m-%dT%H:%M")
+                    .to_string(),
+            },
+            utc,
+        );
+        new.action = TASK.into();
+        let j = create(d, new).unwrap();
+        db::write_jobs(d, |tx| {
+            tx.execute(
+                "UPDATE task SET trigger = ?2, next_run = ?3 WHERE id = ?1",
+                rusqlite::params![
+                    j.id,
+                    serde_json::to_string(&Trigger::Once { at: at.clone() })?,
+                    ts(&at, utc)
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        get(d, &j.id).unwrap()
+    }
+
+    fn fail(d: &Path, run: i64) -> Job {
+        finish(
+            d,
+            run,
+            Outcome::Failed {
+                error: "the database is locked".into(),
+            },
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn set_status(d: &Path, id: &str, status: &str) -> anyhow::Result<Job> {
+        update(
+            d,
+            id,
+            JobChange {
+                status: Some(status.into()),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_task_job_that_turned_off_retries_its_failed_time_after_a_start() {
+        let d = dir("task-off");
+        let j = once_task_job(&d, "Send the invoice");
+        // A long wait after each failure, so each claim is the retry.
+        let mut t = now() as i64;
+        for _ in 0..MAX_FAILURES {
+            t += 3600;
+            let c = run_until_claim(&d, t);
+            fail(&d, c.run);
+        }
+        let off = get(&d, &j.id).unwrap();
+        assert_eq!((off.status.as_str(), off.next_run), ("off", None));
+        assert!(off.can_start, "Start shows: the failed time waits");
+        let on = set_status(&d, &j.id, "active").unwrap();
+        assert_eq!((on.status.as_str(), on.next_run), ("active", None));
+        let c = run_until_claim(&d, t + 3600);
+        make_task(&d, c.run, &c.job, c.planned).unwrap();
+        assert_eq!(task_count(&d), 1);
+        assert_eq!(get(&d, &j.id).unwrap().status, "done");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_paused_one_time_task_job_with_a_retry_has_no_next_run_after_a_start() {
+        let d = dir("task-once-pause");
+        let j = once_task_job(&d, "Book the room");
+        let c = run_until_claim(&d, now() as i64);
+        fail(&d, c.run);
+        set_status(&d, &j.id, "paused").unwrap();
+        let on = set_status(&d, &j.id, "active").unwrap();
+        assert_eq!(on.next_run, None, "the time has its run already");
+        let c = run_until_claim(&d, now() as i64 + 3600);
+        make_task(&d, c.run, &c.job, c.planned).unwrap();
+        assert_eq!(get(&d, &j.id).unwrap().status, "done", "done at once");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_cleanup_keeps_a_failed_task_time_only_while_a_retry_can_come() {
+        let d = dir("task-cleanup");
+        let keep = once_task_job(&d, "Keep");
+        let gone = once_task_job(&d, "Gone");
+        for c in claim_due(&d, now() as i64).unwrap() {
+            fail(&d, c.run);
+        }
+        set_status(&d, &keep.id, "paused").unwrap();
+        db::write_jobs(&d, |tx| {
+            tx.execute("UPDATE task SET status = 'off' WHERE id = ?1", [&gone.id])?;
+            Ok(())
+        })
+        .unwrap();
+        // The cleanup runs at the first claim of this process, and then once
+        // an hour. A time far ahead is after the hour, and after KEEP_RUNS.
+        let later = now() as i64 + KEEP_RUNS + 2 * 3600;
+        claim_due(&d, later).unwrap();
+        let left = |id: &str| runs(&d, Some(id), 10, true, true).unwrap().len();
+        assert_eq!(left(&keep.id), 1, "the paused job can still retry it");
+        assert_eq!(left(&gone.id), 0, "nothing retries it");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    fn run_until_claim(d: &Path, now: i64) -> Claim {
+        let mut c = claim_due(d, now).unwrap();
+        assert_eq!(c.len(), 1);
+        c.remove(0)
+    }
+
+    #[test]
+    fn a_task_job_after_a_very_long_miss_adds_only_the_newest_times() {
+        // An hourly rule missed for 30 days: 720 times, more than one page
+        // of the rule (500). Only the newest 20 get a task.
+        let d = dir("task-hourly");
+        let utc = "UTC";
+        let mut new = job(
+            "Check the oven",
+            repeat("2030-01-01T00:00", "FREQ=HOURLY"),
+            utc,
+        );
+        new.action = TASK.into();
+        create(&d, new).unwrap();
+        let now = ts("2030-01-31T00:30", utc);
+        let mut planned = vec![];
+        for _ in 0..30 {
+            let c = claim_due(&d, now).unwrap();
+            if c.is_empty() {
+                break;
+            }
+            planned.push(c[0].planned);
+            make_task(&d, c[0].run, &c[0].job, c[0].planned).unwrap();
+        }
+        assert_eq!(planned.len(), MAX_CATCH_UP);
+        assert_eq!(
+            *planned.last().unwrap(),
+            ts("2030-01-31T00:00", utc),
+            "the newest time"
+        );
+        assert_eq!(planned[0], ts("2030-01-30T05:00", utc));
+        let skipped: Vec<Run> = runs(&d, None, 200, true, true)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.state == "skipped")
+            .collect();
+        assert_eq!(skipped.len(), MAX_SKIP_ROWS);
+        // 721 times, 20 tasks, 20 rows: 681 times in the note of the oldest row.
+        let oldest = skipped.iter().min_by_key(|r| r.planned).unwrap();
+        assert!(oldest.note.contains("681 earlier times"), "{}", oldest.note);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_change_of_the_user_tasks_cannot_touch_a_job() {
+        let d = dir("job-guard");
+        crate::tasks::TaskStore::new(&d)
+            .add("Call Sam", "", "you")
+            .unwrap();
+        let bulk = db::write(&d, |tx| {
+            Ok(tx.execute("UPDATE task SET due = '2030-01-01'", [])?)
+        });
+        assert!(
+            bulk.unwrap_err()
+                .to_string()
+                .contains("cannot change AIfred's jobs")
+        );
+        let gone = db::write(&d, |tx| Ok(tx.execute("DELETE FROM task", [])?));
+        assert!(
+            gone.unwrap_err()
+                .to_string()
+                .contains("cannot delete AIfred's jobs")
+        );
+        assert!(get(&d, BRIEF_JOB).is_ok());
+        assert_eq!(task_count(&d), 1, "nothing changed");
+        let mine = db::write(&d, |tx| {
+            Ok(tx.execute("UPDATE task SET due = '2030-01-01' WHERE doer = 'you'", [])?)
+        });
+        assert_eq!(mine.unwrap(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_run_list_can_leave_out_the_brief_runs() {
+        let d = dir("brief-runs");
+        let j = create(
+            &d,
+            job("Timesheet", repeat("2030-01-07T09:00", "FREQ=DAILY"), "UTC"),
+        )
+        .unwrap();
+        db::write(&d, |tx| {
+            for i in 0..3 {
+                add_run(tx, BRIEF_JOB, 100 + i, "ok", "", Some(100 + i), false)?;
+            }
+            add_run(tx, &j.id, 50, "ok", "", Some(50), false)?;
+            Ok(())
+        })
+        .unwrap();
+        let jobs_of = |brief: bool| -> Vec<String> {
+            runs(&d, None, 2, true, brief)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.job)
+                .collect()
+        };
+        assert_eq!(
+            jobs_of(true),
+            [BRIEF_JOB, BRIEF_JOB],
+            "the brief runs fill the list"
+        );
+        assert_eq!(jobs_of(false), [j.id]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn a_job_runs_once_for_its_time() {
         let d = dir("once");
         let jkt = "Asia/Jakarta";
@@ -1464,7 +2443,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(after.status, "active");
-        assert_eq!(runs(&d, Some(&j.id), 10, true).unwrap()[0].state, "ok");
+        assert_eq!(
+            runs(&d, Some(&j.id), 10, true, true).unwrap()[0].state,
+            "ok"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1487,10 +2469,10 @@ mod tests {
             "the newest time runs"
         );
         assert!(c[0].late);
-        let all = runs(&d, Some(&j.id), 10, true).unwrap();
+        let all = runs(&d, Some(&j.id), 10, true, true).unwrap();
         assert_eq!(all.iter().filter(|r| r.state == "skipped").count(), 2);
         assert!(
-            runs(&d, Some(&j.id), 10, false)
+            runs(&d, Some(&j.id), 10, false, true)
                 .unwrap()
                 .iter()
                 .all(|r| r.state != "skipped")
@@ -1530,7 +2512,7 @@ mod tests {
         let daily = get(&d, &daily.id).unwrap();
         assert_eq!(daily.next_run, Some(ts("2030-11-11T09:00", jkt)));
         assert_eq!(
-            runs(&d, Some(&daily.id), 5, true).unwrap()[0].note,
+            runs(&d, Some(&daily.id), 5, true, true).unwrap()[0].note,
             "Too late: AIfred was not running at this time."
         );
         std::fs::remove_dir_all(&d).unwrap();
@@ -1598,7 +2580,7 @@ mod tests {
         assert!(claim_due(&d, t + 3600).unwrap().is_empty());
         // AIfred stops and starts again: the busy run is failed, not run again.
         assert_eq!(recover(&d).unwrap(), 1);
-        let r = runs(&d, None, 10, true).unwrap();
+        let r = runs(&d, None, 10, true, true).unwrap();
         assert!(r.iter().any(|r| r.note == "The last run was still busy."));
         assert!(r.iter().any(|r| r.note == "AIfred stopped during the run."));
         std::fs::remove_dir_all(&d).unwrap();
@@ -1808,10 +2790,10 @@ mod tests {
         // The time passes during the pause.
         let past = local_text(t - 3600, jkt).unwrap();
         let planned = ts(&past, jkt);
-        db::write(&d, |tx| {
+        db::write_jobs(&d, |tx| {
             let trig = serde_json::to_string(&Trigger::Once { at: past.clone() })?;
             tx.execute(
-                "UPDATE job SET trigger = ?2 WHERE id = ?1",
+                "UPDATE task SET trigger = ?2 WHERE id = ?1",
                 rusqlite::params![j.id, trig],
             )?;
             Ok(())
@@ -1995,8 +2977,8 @@ mod tests {
             job("Bad", repeat("2030-11-04T09:00", "FREQ=DAILY"), jkt),
         )
         .unwrap();
-        db::write(&d, |tx| {
-            tx.execute("UPDATE job SET tz = 'Mars/Base' WHERE id = ?1", [&bad.id])?;
+        db::write_jobs(&d, |tx| {
+            tx.execute("UPDATE task SET tz = 'Mars/Base' WHERE id = ?1", [&bad.id])?;
             Ok(())
         })
         .unwrap();
@@ -2005,7 +2987,7 @@ mod tests {
         assert_eq!(c[0].job.id, good.id);
         let bad = get(&d, &bad.id).unwrap();
         assert_eq!((bad.status.as_str(), bad.next_run), ("off", None));
-        let r = &runs(&d, Some(&bad.id), 5, true).unwrap()[0];
+        let r = &runs(&d, Some(&bad.id), 5, true, true).unwrap()[0];
         assert_eq!(r.state, "failed");
         assert!(r.note.contains("time zone"), "{}", r.note);
         std::fs::remove_dir_all(&d).unwrap();
@@ -2023,7 +3005,7 @@ mod tests {
         // Closed for 3 days: 72 hourly times pass.
         let c = claim_due(&d, ts("2030-11-07T09:30", jkt)).unwrap();
         assert_eq!(c.len(), 1);
-        let skipped: Vec<Run> = runs(&d, Some(&j.id), 200, true)
+        let skipped: Vec<Run> = runs(&d, Some(&j.id), 200, true, true)
             .unwrap()
             .into_iter()
             .filter(|r| r.state == "skipped")
@@ -2048,5 +3030,105 @@ mod tests {
         );
         assert!(get(&d, BRIEF_JOB).is_ok());
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_one_time_task_job_is_done_only_when_its_task_is_there() {
+        let d = dir("task-done-late");
+        let j = once_task_job(&d, "Send the invoice");
+        let c = run_until_claim(&d, now() as i64);
+        assert!(!c.retry, "the first claim is not a retry");
+        let claimed = get(&d, &j.id).unwrap();
+        assert_eq!(
+            (claimed.status.as_str(), claimed.next_run),
+            ("active", None),
+            "no task yet: not done"
+        );
+        let c = fail(&d, c.run);
+        assert_eq!(c.status, "active");
+        let c = run_until_claim(&d, now() as i64 + 3600);
+        assert!(c.retry, "the second claim tries the failed time again");
+        make_task(&d, c.run, &c.job, c.planned).unwrap();
+        assert_eq!(get(&d, &j.id).unwrap().status, "done");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_one_time_task_job_whose_time_has_a_task_is_done_after_a_start() {
+        let d = dir("task-done-start");
+        let j = once_task_job(&d, "Send the invoice");
+        let c = run_until_claim(&d, now() as i64);
+        // The user pauses the job during the run. The task comes, but the
+        // job stays paused.
+        set_status(&d, &j.id, "paused").unwrap();
+        make_task(&d, c.run, &c.job, c.planned).unwrap();
+        assert_eq!(get(&d, &j.id).unwrap().status, "paused");
+        // A start gives the old time again, and that time has its task.
+        set_status(&d, &j.id, "active").unwrap();
+        claim_due(&d, now() as i64).unwrap();
+        let after = get(&d, &j.id).unwrap();
+        assert_eq!((after.status.as_str(), after.next_run), ("done", None));
+        assert_eq!(task_count(&d), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_read_does_not_hide_the_other_jobs() {
+        let d = dir("list-bad-row");
+        let good = create(
+            &d,
+            job(
+                "Good",
+                Trigger::Event {
+                    event: "task_done".into(),
+                    wait_secs: 60,
+                },
+                "UTC",
+            ),
+        )
+        .unwrap();
+        let bad = create(
+            &d,
+            job(
+                "Bad",
+                Trigger::Event {
+                    event: "task_done".into(),
+                    wait_secs: 60,
+                },
+                "UTC",
+            ),
+        )
+        .unwrap();
+        db::write_jobs(&d, |tx| {
+            tx.execute(
+                "UPDATE task SET trigger = 'not json', status = 'paused' WHERE id = ?1",
+                [&bad.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let ids: Vec<String> = list(&d, true).unwrap().into_iter().map(|j| j.id).collect();
+        assert!(ids.contains(&good.id), "the good job is in the list");
+        assert!(!ids.contains(&bad.id), "the bad job is left out");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_retry_wait_is_the_same_in_rust_and_sql() {
+        let c = Connection::open_in_memory().unwrap();
+        for failures in 0..=MAX_FAILURES + 2 {
+            let sql: i64 = c
+                .query_row(
+                    concat!(
+                        "SELECT ",
+                        retry_wait_sql!(),
+                        " FROM (SELECT ?1 AS failures) task"
+                    ),
+                    rusqlite::params![failures, MAX_FAILURES],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(sql, retry_wait(failures), "failures = {failures}");
+        }
     }
 }

@@ -45,9 +45,11 @@ struct ScheduleArgs {
     title: String,
     /// "remind": show `message` as a notification, with no AI run.
     /// "agent": you run again at that time with read-only tools, do what `message` says, and tell the user the result.
+    /// "task": add a new task to the user's to-do list at each time, with `title` as its title and the local day as its due day. Use it for a repeating to-do of the user, for example "pay rent on the 1st of each month". Give a time or a repeat rule, not after_event.
     action: String,
     /// "remind": the text of the notification, written to the user. Example: "Submit your timesheet."
     /// "agent": the instructions for your later run. Example: "Check if PR acme/shop#123 is merged. Tell the user the state."
+    /// "task": the notes of each new task, or "".
     message: String,
     #[serde(flatten)]
     when: WhenArgs,
@@ -166,7 +168,7 @@ fn view(j: &Job) -> Value {
 #[tool_router]
 impl JobTools {
     #[tool(
-        description = "Make one of your own jobs: a reminder for the user, or an agent job that you run later with read-only tools. Use it when the user asks you to remind them, or to check or do something at a later time, again and again, or after they finish a task. Give exactly one of at, in_minutes, repeat (with start), or after_event. Times are the user's local time. The answer has `when` and `next_runs`: tell them to the user so they can check the time."
+        description = "Make one of your own jobs: a reminder for the user, or an agent job that you run later with read-only tools. Use it when the user asks you to remind them, or to check or do something at a later time, again and again, or after they finish a task. For a to-do that repeats (\"add pay rent to my tasks on the 1st of each month\"), use action \"task\": it adds a new task at each time. For a to-do with one date, use the task tools, not this. Give exactly one of at, in_minutes, repeat (with start), or after_event. Times are the user's local time. The answer has `when` and `next_runs`: tell them to the user so they can check the time."
     )]
     async fn schedule_job(
         &self,
@@ -177,9 +179,9 @@ impl JobTools {
             .clone()
             .filter(|z| !z.trim().is_empty())
             .unwrap_or_else(jobs::local_zone);
-        if a.action != "remind" && a.action != "agent" {
+        if a.action != "remind" && a.action != "agent" && a.action != jobs::TASK {
             return Err(fail(anyhow::anyhow!(
-                "action must be \"remind\" or \"agent\""
+                "action must be \"remind\", \"agent\", or \"task\""
             )));
         }
         let trigger = trigger(a.when, &tz).map_err(fail)?;
@@ -204,7 +206,7 @@ impl JobTools {
     }
 
     #[tool(
-        description = "List your own jobs (reminders and agent jobs), the next run first, with `when` in plain words and the next run times. Not the user's to-do tasks."
+        description = "List your own jobs (reminders, agent jobs, and the rules of repeating tasks), the next run first, with `when` in plain words and the next run times. Not the user's to-do tasks."
     )]
     async fn list_jobs(
         &self,
@@ -264,6 +266,7 @@ impl JobTools {
             &self.dir,
             a.id.as_deref(),
             a.limit.unwrap_or(10).clamp(1, 50),
+            true,
             true,
         )
         .map_err(fail)?;
@@ -333,6 +336,42 @@ mod tests {
             when,
             timezone: Some("Asia/Jakarta".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn a_repeating_task_is_a_job_and_not_a_task_yet() {
+        let t = tools("repeat-task");
+        let mut a = schedule(
+            "Pay rent",
+            WhenArgs {
+                repeat: Some("FREQ=MONTHLY;BYMONTHDAY=1".into()),
+                start: Some("2030-12-01T08:00".into()),
+                ..Default::default()
+            },
+        );
+        a.action = "task".into();
+        a.message = String::new();
+        let j = body(t.schedule_job(Parameters(a)).await.unwrap());
+        assert_eq!(j["action"], "task");
+        assert!(
+            aifred_core::tasks::TaskStore::new(&t.dir)
+                .load()
+                .unwrap()
+                .is_empty(),
+            "the rule is not in the user's list"
+        );
+        let mut a = schedule(
+            "Pay rent",
+            WhenArgs {
+                after_event: Some("task_done".into()),
+                ..Default::default()
+            },
+        );
+        a.action = "task".into();
+        assert!(
+            t.schedule_job(Parameters(a)).await.is_err(),
+            "a task needs a time"
+        );
     }
 
     #[tokio::test]

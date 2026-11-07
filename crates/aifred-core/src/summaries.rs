@@ -71,14 +71,14 @@ pub fn pending(dir: &Path, limit: usize, skip: &HashSet<Key>) -> anyhow::Result<
         if ids.is_empty() {
             String::new()
         } else {
-            format!(" AND rowid NOT IN ({})", ids.join(","))
+            format!(" AND rid NOT IN ({})", ids.join(","))
         }
     };
     let sql = format!(
-        "SELECT 'work_item', rowid, title, details FROM work_item
+        "SELECT 'work_item', rid, title, details FROM work_item
            WHERE in_list = 1 AND summary IS NULL AND length(details) > ?1{}
          UNION ALL
-         SELECT 'task', rowid, title, notes FROM task
+         SELECT 'task', rid, title, notes FROM user_task
            WHERE done = 0 AND summary IS NULL AND length(notes) > ?1{}
          ORDER BY 1, 2",
         not_in("work_item"),
