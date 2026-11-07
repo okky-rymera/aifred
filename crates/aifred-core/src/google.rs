@@ -40,6 +40,10 @@ pub const GMAIL_COMPOSE: &str = "https://www.googleapis.com/auth/gmail.compose";
 /// picker. AIfred only adds suggestions: no code of AIfred makes a direct
 /// edit.
 pub const DOCS: &str = "https://www.googleapis.com/auth/documents";
+/// Read and change the user's Google Sheets (sheets.rs). The smaller access
+/// (drive.file) works only for Sheets that the user picks in Google's file
+/// picker. AIfred only adds comments: no code of AIfred changes a cell.
+pub const SHEETS: &str = "https://www.googleapis.com/auth/spreadsheets";
 /// The account's email, so the window can show which account is connected.
 const IDENTITY: &[&str] = &["openid", "email"];
 
@@ -99,7 +103,19 @@ pub const FEATURES: &[Feature] = &[
         // The suggestions are in the Docs, and the action log stays.
         forget: |_| Ok(()),
     },
+    Feature {
+        name: SHEET_COMMENTS,
+        scopes: &[SHEETS],
+        optional: true,
+        starts_off: true,
+        needs: None,
+        // The comments are in the Sheets, and the action log stays.
+        forget: |_| Ok(()),
+    },
 ];
+
+/// The name of the Google Sheets comments feature.
+pub const SHEET_COMMENTS: &str = "Sheets comments";
 
 /// The name of the Google Docs suggestions feature.
 pub const DOC_SUGGESTIONS: &str = "Docs suggestions";
@@ -346,6 +362,7 @@ pub(crate) fn fake_login(dir: &Path, email: &str) {
                 GMAIL.into(),
                 GMAIL_COMPOSE.into(),
                 DOCS.into(),
+                SHEETS.into(),
             ],
             email: Some(email.into()),
             ..Saved::default()
@@ -1054,6 +1071,121 @@ impl Client {
     }
 }
 
+/// The error of a call that one Google app did not do, by the HTTP status
+/// and the answer. Each app (docs.rs, sheets.rs) has its own messages.
+pub(crate) type Refused = fn(reqwest::StatusCode, &serde_json::Value) -> anyhow::Error;
+
+impl Client {
+    /// The JSON of a GET of `path`. None when Google did not find it (HTTP
+    /// 404): somebody deleted it, or the account cannot open it any more.
+    pub(crate) async fn get_if_there(
+        &self,
+        dir: &Path,
+        path: &str,
+        query: &[(&str, &str)],
+        refused: Refused,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let (status, v) = self
+            .call(dir, reqwest::Method::GET, path, query, None)
+            .await?;
+        match status {
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            s if s.is_success() => Ok(Some(v)),
+            s => Err(refused(s, &v)),
+        }
+    }
+
+    /// The JSON of a GET of `path`. Fails when Google did not find it.
+    pub(crate) async fn get(
+        &self,
+        dir: &Path,
+        path: &str,
+        query: &[(&str, &str)],
+        refused: Refused,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.get_if_there(dir, path, query, refused)
+            .await?
+            .ok_or_else(|| refused(reqwest::StatusCode::NOT_FOUND, &serde_json::Value::Null))
+    }
+}
+
+/// The calls to a Google app (`app`, for example "Google Docs"), when the
+/// login allows `scope` and the user ticked the feature `feature`. `undo`:
+/// also when the user turned the feature off, so the user can still undo.
+pub(crate) async fn connect(
+    dir: &Path,
+    base: &str,
+    scope: &'static str,
+    feature: &str,
+    app: &'static str,
+    undo: bool,
+) -> anyhow::Result<Client> {
+    let ok = files::off_thread(dir, move |d| {
+        if undo {
+            login_allows(d, scope)
+        } else {
+            allows(d, scope)
+        }
+    })
+    .await?;
+    if !ok {
+        bail!(
+            "AIfred cannot use {app} yet. In Settings, tick \"Use {feature}\", then connect Google again"
+        );
+    }
+    let token = token_for(dir, scope, &Endpoints::default())
+        .await?
+        .context("Google is not connected")?;
+    Ok(Client::new(app, base, token))
+}
+
+/// The answer of a call that makes or deletes a thing. When there is no
+/// clear answer (AIfred lost the connection, or a server error), Google can
+/// have done the call: the error then has the text `unclear`. A refused
+/// login stays as it is: Google did not do the call. Other answers pass.
+pub(crate) fn unclear_write(
+    answer: anyhow::Result<(reqwest::StatusCode, serde_json::Value)>,
+    unclear: &'static str,
+    refused: Refused,
+) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+    match answer {
+        Ok((status, v)) if status.is_server_error() => Err(refused(status, &v).context(unclear)),
+        Ok(a) => Ok(a),
+        Err(e) if e.is::<LoginRefused>() => Err(e),
+        Err(e) => Err(e.context(unclear)),
+    }
+}
+
+/// The email of the connected Google account, for the action log. Empty
+/// when AIfred cannot tell: the change is made already, so this never fails.
+pub(crate) async fn account_email(dir: &Path) -> String {
+    files::off_thread(dir, status)
+        .await
+        .ok()
+        .and_then(|s| s.email)
+        .unwrap_or_default()
+}
+
+/// Fails when the action `a` was made with another Google account than the
+/// connected one. `what` names the changes, for example "these comments".
+pub(crate) async fn check_account(
+    dir: &Path,
+    a: &crate::actions::Action,
+    what: &str,
+) -> anyhow::Result<()> {
+    if a.target["account"].as_str().is_none_or(str::is_empty) {
+        return Ok(());
+    }
+    let now = files::off_thread(dir, status)
+        .await?
+        .email
+        .unwrap_or_default();
+    if let Some(account) = crate::actions::other_account(a, &now) {
+        bail!("{what} are by {account}. Connect Google as {account} in Settings, then undo them");
+    }
+    Ok(())
+}
+
 /// Deletes a login that Google does not accept any more, so the window
 /// shows "Connect Google" again. The registration stays. Another AIfred
 /// program can have saved a new login meanwhile: that one stays.
@@ -1200,6 +1332,13 @@ mod tests {
         let st = set_feature(&d, DOC_SUGGESTIONS, true).unwrap();
         assert!(all_scopes(&st.off).contains(&DOCS));
 
+        // Sheets comments is the same.
+        assert!(!allows(&d, SHEETS).unwrap());
+        assert!(!all_scopes(&status(&d).unwrap().off).contains(&SHEETS));
+        let st = set_feature(&d, SHEET_COMMENTS, true).unwrap();
+        assert!(all_scopes(&st.off).contains(&SHEETS));
+        assert!(allows(&d, SHEETS).unwrap());
+
         // Gmail drafts is off until the user turns it on, also when the
         // login allows it.
         assert!(!allows(&d, GMAIL_COMPOSE).unwrap());
@@ -1213,7 +1352,10 @@ mod tests {
 
         let st = set_feature(&d, "Gmail", false).unwrap();
         assert_eq!(st.off, ["Gmail", DRAFTS]);
-        assert_eq!(st.optional, ["Gmail", DRAFTS, DOC_SUGGESTIONS]);
+        assert_eq!(
+            st.optional,
+            ["Gmail", DRAFTS, DOC_SUGGESTIONS, SHEET_COMMENTS]
+        );
         assert!(
             !allows(&d, GMAIL).unwrap(),
             "off, also when the login allows it"
@@ -1269,6 +1411,7 @@ mod tests {
                 ("Gmail".to_string(), false),
                 (DRAFTS.to_string(), false),
                 (DOC_SUGGESTIONS.to_string(), false),
+                (SHEET_COMMENTS.to_string(), false),
             ]
         );
         #[cfg(unix)]
@@ -1419,6 +1562,7 @@ mod tests {
                 ("Gmail".to_string(), false),
                 (DRAFTS.to_string(), false),
                 (DOC_SUGGESTIONS.to_string(), false),
+                (SHEET_COMMENTS.to_string(), false),
             ]
         );
         assert!(allows(&d, CALENDAR).unwrap() && !allows(&d, GMAIL).unwrap());

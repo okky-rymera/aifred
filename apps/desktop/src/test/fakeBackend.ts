@@ -7,6 +7,7 @@ import { MAX_GROUP, groupOf } from "../items";
 import type {
   Action,
   DocEdit,
+  SheetComment,
   Answer,
   Brief,
   CalEvent,
@@ -46,6 +47,8 @@ import type {
 
 /** What suggest_doc_changes gives. `canEdit` false: the user can only comment on the Doc. */
 type DocAnswer = { edits: DocEdit[]; message?: string; canEdit?: boolean };
+/** What suggest_sheet_comments gives. */
+type SheetAnswer = { comments: SheetComment[]; message?: string };
 type AskHandler = (prompt: string, progress: (e: ProgressEvent) => void, args: Record<string, any>) => Promise<Answer> | Answer;
 
 export type Fake = {
@@ -127,14 +130,24 @@ export type Fake = {
   onSuggestSteps: (key: string) => Promise<Step[]> | Step[];
   /** The text of the reply that write_reply gives for an email item. Throw to fail it. */
   onWriteReply: (key: string, note: string) => Promise<string> | string;
-  /** The Doc link that doc_link finds for an item, by key. */
+  /** The Doc link that work_links finds for an item, by key. */
   docLinks?: Record<string, string>;
-  /** Runs before doc_link answers: a test can hold the answer back. */
+  /** Runs before work_links answers: a test can hold the answer back. */
   beforeDocLink?: () => Promise<void>;
+  /** How many times the window called work_links. */
+  linkCalls?: number;
   /** What suggest_doc_changes gives: the changes and the message. Throw to fail it. */
   onSuggestDoc?: (key: string, link: string, note: string) => Promise<DocAnswer> | DocAnswer;
   /** The edits of the last save_doc_suggestions. */
   savedDocEdits?: DocEdit[];
+  /** The Sheet link that work_links finds for an item, by key. */
+  sheetLinks?: Record<string, string>;
+  /** What suggest_sheet_comments gives. Throw to fail it. */
+  onSuggestSheet?: (key: string, link: string, note: string) => Promise<SheetAnswer> | SheetAnswer;
+  /** The comments of the last save_sheet_comments. */
+  savedSheetComments?: SheetComment[];
+  /** True: Google gives no comment ids, so the save closes its action at once (sheets.rs). */
+  sheetNoIds?: boolean;
   /** AIfred's actions in other apps, like actions.rs, oldest first. */
   actions: Action[];
   /** True: the next Undo finds the draft gone from Gmail (sent or deleted). */
@@ -808,9 +821,12 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         fake.actions.push(a);
         return structuredClone(a);
       }
-      case "doc_link":
+      case "work_links": {
+        fake.linkCalls = (fake.linkCalls ?? 0) + 1;
         await fake.beforeDocLink?.();
-        return fake.docLinks?.[String(args.key)] ?? null;
+        const key = String(args.key);
+        return { doc: fake.docLinks?.[key] ?? null, sheet: fake.sheetLinks?.[key] ?? null };
+      }
       case "suggest_doc_changes": {
         const key = String(args.key);
         const link = String(args.link);
@@ -841,6 +857,42 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
           url: `https://docs.google.com/document/d/${args.doc}/edit`,
           undone_at: null,
           note: "",
+        };
+        fake.actions.push(a);
+        return structuredClone(a);
+      }
+      case "suggest_sheet_comments": {
+        const key = String(args.key);
+        const link = String(args.link);
+        // Like sheets::sheet_id and sheets::gid.
+        const id = /\/spreadsheets\/d\/([\w-]{25,})/.exec(link)?.[1];
+        if (!id) throw "this is not the link of a Google Sheet (docs.google.com/spreadsheets/d/…)";
+        const gid = Number(/[#?&]gid=(\d+)/.exec(link)?.[1] ?? 0);
+        // Like sheets::connect: no read before you turn on Sheets comments.
+        const on = fake.google.features.some(([n, on]) => n === "Sheets comments" && on) && !fake.google.off.includes("Sheets comments");
+        if (!on) throw 'AIfred cannot use Google Sheets yet. In Settings, tick "Use Sheets comments", then connect Google again';
+        const r: SheetAnswer = fake.onSuggestSheet ? await fake.onSuggestSheet(key, link, String(args.note)) : { comments: [] };
+        return { key, sheet: id, gid, tab: "Q4", title: "Prices", url: `https://docs.google.com/spreadsheets/d/${id}/edit#gid=${gid}`, comments: r.comments, message: r.message ?? "", check: "tab-hash" };
+      }
+      case "save_sheet_comments": {
+        await fake.beforeSave?.();
+        const comments = structuredClone(args.comments as SheetComment[]);
+        if (!comments.length) throw "there are no comments to save";
+        // Like sheets::save: the window sends the hash of the tab that it showed.
+        if (args.check !== "tab-hash") throw "the Sheet changed after AIfred read it. Suggest the comments again";
+        fake.savedSheetComments = comments;
+        const n = comments.length;
+        const a: Action = {
+          id: fake.actions.length + 1,
+          at: nowSecs(),
+          app: "sheets",
+          kind: "comment",
+          item: String(args.key),
+          title: `Commented on ${n} cell${n === 1 ? "" : "s"} in the Sheet "Prices"${fake.sheetNoIds ? ". Google gave no ids, so Undo cannot remove them" : ""}`,
+          after: comments.map((c) => `${c.cell} (now: ${c.value || "empty"})\n${c.text}`).join("\n\n"),
+          url: `https://docs.google.com/spreadsheets/d/${args.sheet}/edit#gid=${args.gid}`,
+          undone_at: fake.sheetNoIds ? nowSecs() : null,
+          note: fake.sheetNoIds ? "AIfred removed nothing: Google gave no ids for these comments. Delete them in the Sheet." : "",
         };
         fake.actions.push(a);
         return structuredClone(a);

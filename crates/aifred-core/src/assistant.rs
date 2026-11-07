@@ -107,6 +107,14 @@ You run by yourself now, for one of your own jobs. The user does not see this ru
 - If the job has reached its goal and must not run again (for example, the pull request it watches is merged), start the answer with DONE: and then the message.";
 
 /// What the backend reported for one message.
+/// The Google links of a piece of work (Assistant::work_links). None: the
+/// work has no such link.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct WorkLinks {
+    pub doc: Option<String>,
+    pub sheet: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Answer {
     pub text: String,
@@ -998,12 +1006,7 @@ impl<B: Backend> Assistant<B> {
         note: &str,
     ) -> anyhow::Result<crate::docs::Proposal> {
         let doc = crate::docs::read(&self.dir, link).await?;
-        let k = key.to_string();
-        let title = self
-            .off_thread(move |dir| crate::db::read(dir, |c| crate::items::title_place(c, &k)))
-            .await?
-            .map(|(t, _)| t)
-            .unwrap_or_default();
+        let title = self.item_title(key).await?;
         let answer = self
             .backend
             .complete(
@@ -1016,9 +1019,10 @@ impl<B: Backend> Assistant<B> {
         Ok(crate::docs::proposal(key, &doc, edits, message))
     }
 
-    /// The first Google Doc link in the description of the item `key`, or
-    /// of another item of the same work. None when there is none.
-    pub async fn doc_link(&self, key: &str) -> anyhow::Result<Option<String>> {
+    /// The first Google Doc link and the first Google Sheet link in the
+    /// description of the item `key`, or of another item of the same work.
+    /// One pass over the items finds both.
+    pub async fn work_links(&self, key: &str) -> anyhow::Result<WorkLinks> {
         let k = key.to_string();
         self.off_thread(move |dir| {
             let mut keys = vec![k.clone()];
@@ -1027,17 +1031,58 @@ impl<B: Backend> Assistant<B> {
                     .into_iter()
                     .filter(|g| g != &k),
             );
+            let mut found = WorkLinks::default();
             for key in keys {
                 let Ok(d) = crate::items::details(dir, &key) else {
                     continue;
                 };
-                if let Some(l) = crate::docs::find_link(&d.details) {
-                    return Ok(Some(l));
+                if found.doc.is_none() {
+                    found.doc = crate::docs::find_link(&d.details);
+                }
+                if found.sheet.is_none() {
+                    found.sheet = crate::sheets::find_link(&d.details);
+                }
+                if found.doc.is_some() && found.sheet.is_some() {
+                    break;
                 }
             }
-            Ok(None)
+            Ok(found)
         })
         .await
+    }
+
+    /// Suggests comments on the cells of the Google Sheet `link` for the
+    /// item `key` (sheets.rs), in one AI call with no tools. The call gets
+    /// only the Sheet, the title of the item, and the user's `note`. It
+    /// saves nothing: the user checks the comments, and saves them.
+    pub async fn suggest_sheet_comments(
+        &self,
+        key: &str,
+        link: &str,
+        note: &str,
+    ) -> anyhow::Result<crate::sheets::Proposal> {
+        let sheet = crate::sheets::read(&self.dir, link).await?;
+        let title = self.item_title(key).await?;
+        let answer = self
+            .backend
+            .complete(
+                crate::sheets::RULES,
+                &crate::sheets::prompt(&sheet, &title, note),
+                Some(crate::sheets::MODEL),
+            )
+            .await?;
+        let (comments, message) = crate::sheets::parse(&answer)?;
+        Ok(crate::sheets::proposal(key, &sheet, comments, message))
+    }
+
+    /// The title of the item `key`. Empty when there is no such item.
+    async fn item_title(&self, key: &str) -> anyhow::Result<String> {
+        let k = key.to_string();
+        Ok(self
+            .off_thread(move |dir| crate::db::read(dir, |c| crate::items::title_place(c, &k)))
+            .await?
+            .map(|(t, _)| t)
+            .unwrap_or_default())
     }
 }
 

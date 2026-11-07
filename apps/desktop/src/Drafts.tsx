@@ -35,15 +35,20 @@ export const undoneText = (a: api.Action) => a.note || GOOGLE_APPS[a.app].undone
 
 /** Runs a save of an action. Then it shows `text` with an Undo button,
  * and loads the action list again. It throws the error of the save. */
-export async function saveWithUndo(save: () => Promise<api.Action>, text: string, toast: ReturnType<typeof useApp>["toast"], load: () => void) {
+export async function saveWithUndo(save: () => Promise<api.Action>, text: string | ((a: api.Action) => string), toast: ReturnType<typeof useApp>["toast"], load: () => void) {
   try {
     const a = await save();
-    toast(text, () => {
-      undo(a.id)
-        .then((u) => toast(undoneText(u)))
-        .catch((e) => toast(`Cannot undo: ${e}`, undefined, true))
-        .finally(load);
-    });
+    // An action that is closed already (for example, Google gave no ids to remove) has no Undo.
+    const onUndo =
+      a.undone_at === null
+        ? () => {
+            undo(a.id)
+              .then((u) => toast(undoneText(u)))
+              .catch((e) => toast(`Cannot undo: ${e}`, undefined, true))
+              .finally(load);
+          }
+        : undefined;
+    toast(typeof text === "string" ? text : text(a), onUndo);
   } finally {
     load();
   }

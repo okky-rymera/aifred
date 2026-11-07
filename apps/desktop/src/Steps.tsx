@@ -2,7 +2,8 @@
 // of an item from the brief, and steps that AIfred suggests for an item.
 // For a step that is text in an email, a Google Doc, or a Google Sheet, it
 // says that AIfred can draft it. Now it can write replies to emails
-// (Drafts.tsx). Docs and Sheets come later.
+// (Drafts.tsx), suggest changes in Docs (Docs.tsx), and comment on the
+// cells of Sheets (Sheets.tsx).
 import { useEffect, useState } from "react";
 import * as api from "./api";
 import { useApp } from "./ctx";
@@ -12,9 +13,9 @@ import { groupOf, type Item } from "./items";
 export const DRAFT_TEXT: Record<api.DraftKind, string> = {
   email: "AIfred can draft the email later",
   doc: "AIfred can draft the Doc text later",
-  sheet: "AIfred can draft the Sheet change later",
+  sheet: "AIfred can comment on the Sheet",
 };
-const DRAFT_HINT = "AIfred makes a draft for you to check. It sends nothing by itself. Now it can write replies to emails. Docs, Sheets, and new emails come later.";
+const DRAFT_HINT = "AIfred makes a draft for you to check. It sends nothing by itself. Now it can write replies to emails, suggest changes in a Doc, and comment on the cells of a Sheet (use the item panel). New emails come later.";
 
 /** `replyTo`: the item is an email from this person, so AIfred can write a
  * reply to them now. The label names them: the next action can be an email

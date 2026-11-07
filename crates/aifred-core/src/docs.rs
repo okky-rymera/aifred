@@ -142,9 +142,10 @@ struct Change {
     insert: String,
 }
 
-/// The part of a Doc link after "/document/" and before the id: "d/", or
-/// "u/<n>/d/" for a person with more than one Google account.
-fn after_document(rest: &str) -> Option<&str> {
+/// The part of a Google link after "/document/" (or "/spreadsheets/") and
+/// before the id: "d/", or "u/<n>/d/" for a person with more than one
+/// Google account.
+pub(crate) fn after_document(rest: &str) -> Option<&str> {
     let rest = match rest.strip_prefix("u/") {
         Some(r) => {
             let n = r.chars().take_while(char::is_ascii_digit).count();
@@ -160,10 +161,20 @@ fn after_document(rest: &str) -> Option<&str> {
 
 /// The id of a Doc in a link, or a bare id.
 pub fn doc_id(link: &str) -> anyhow::Result<String> {
+    file_id(
+        link,
+        "/document/",
+        "this is not the link of a Google Doc (docs.google.com/document/d/…)",
+    )
+}
+
+/// The id of a Google file in a link with `path` ("/document/" or
+/// "/spreadsheets/"), or a bare id. Fails with `wrong` when there is none.
+pub(crate) fn file_id(link: &str, path: &str, wrong: &str) -> anyhow::Result<String> {
     let link = link.trim();
     let id_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     let in_link = link
-        .match_indices("/document/")
+        .match_indices(path)
         .find_map(|(at, m)| after_document(&link[at + m.len()..]));
     let id: String = match in_link {
         Some(rest) => rest.chars().take_while(|c| id_char(*c)).collect(),
@@ -171,7 +182,7 @@ pub fn doc_id(link: &str) -> anyhow::Result<String> {
         None => String::new(),
     };
     if id.len() < 25 {
-        bail!("this is not the link of a Google Doc (docs.google.com/document/d/…)");
+        bail!("{wrong}");
     }
     Ok(id)
 }
@@ -595,35 +606,7 @@ pub fn proposal(
             Err(r) => reasons.push(r),
         }
     }
-    let mut message = message;
-    if !reasons.is_empty() {
-        let n = reasons.len();
-        let s = if n == 1 { "" } else { "s" };
-        // Each reason once, with the number of changes when it is more than one.
-        let mut counted: Vec<(String, usize)> = Vec::new();
-        for r in reasons {
-            match counted.iter_mut().find(|(x, _)| *x == r) {
-                Some((_, k)) => *k += 1,
-                None => counted.push((r, 1)),
-            }
-        }
-        let why: Vec<String> = counted
-            .into_iter()
-            .map(|(r, k)| {
-                if k == 1 {
-                    r
-                } else {
-                    format!("{r} ({k} changes)")
-                }
-            })
-            .collect();
-        let note = format!("AIfred left out {n} change{s}: {}.", why.join("; "));
-        message = [message, note]
-            .into_iter()
-            .filter(|m| !m.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-    }
+    let message = crate::text::left_out(message, reasons, "change");
     Proposal {
         key: key.to_string(),
         doc: d.id.clone(),
@@ -718,43 +701,26 @@ const READ: [(&str, &str); 2] = [
 
 /// The Doc `doc` as Google has it now, as JSON.
 async fn get(g: &Docs, dir: &Path, doc: &str) -> anyhow::Result<Value> {
-    get_if_there(g, dir, doc)
-        .await?
-        .ok_or_else(|| refused(StatusCode::NOT_FOUND, &Value::Null))
+    g.get(dir, doc, &READ, refused).await
 }
 
-/// The Doc `doc` as JSON. None when Google did not find it (HTTP 404):
-/// somebody deleted it, or the account cannot open it any more.
+/// The Doc `doc` as JSON. None when Google did not find it (HTTP 404).
 async fn get_if_there(g: &Docs, dir: &Path, doc: &str) -> anyhow::Result<Option<Value>> {
-    let (status, v) = g.call(dir, Method::GET, doc, &READ, None).await?;
-    match status {
-        StatusCode::NOT_FOUND => Ok(None),
-        s if s.is_success() => Ok(Some(v)),
-        s => Err(refused(s, &v)),
-    }
+    g.get_if_there(dir, doc, &READ, refused).await
 }
 
 /// The Docs calls, when the login allows them. `undo`: also when the user
 /// turned Docs suggestions off, so the user can still undo.
 async fn connect(dir: &Path, base: &str, undo: bool) -> anyhow::Result<Docs> {
-    let ok = off_thread(dir, move |d| {
-        if undo {
-            google::login_allows(d, DOCS)
-        } else {
-            google::allows(d, DOCS)
-        }
-    })
-    .await?;
-    if !ok {
-        bail!(
-            "AIfred cannot use Google Docs yet. In Settings, tick \"Use {}\", then connect Google again",
-            google::DOC_SUGGESTIONS
-        );
-    }
-    let token = google::token_for(dir, DOCS, &google::Endpoints::default())
-        .await?
-        .context("Google is not connected")?;
-    Ok(Docs::new("Google Docs", base, token))
+    google::connect(
+        dir,
+        base,
+        DOCS,
+        google::DOC_SUGGESTIONS,
+        "Google Docs",
+        undo,
+    )
+    .await
 }
 
 /// The Doc of `link`, as Google has it now: the tab of the link, or the
@@ -832,12 +798,14 @@ async fn save_at(
             Some(body),
         )
         .await;
-    let v = match answer {
-        Ok((status, v)) if status.is_success() => v,
+    // No clear answer: Google can have made the suggestions. A second
+    // save fails, because the Doc changed: the user looks first.
+    let v = match google::unclear_write(answer, UNCLEAR, refused)? {
+        (status, v) if status.is_success() => v,
         // Google says HTTP 400 when the revision is not the newest one, but
         // also for a request that it does not accept. Google's documents
         // give no text for the first case, so a new read tells which one.
-        Ok((StatusCode::BAD_REQUEST, v)) if real_revision(revision) => {
+        (StatusCode::BAD_REQUEST, v) if real_revision(revision) => {
             let err = refused(StatusCode::BAD_REQUEST, &v);
             let now = get(&g, dir, &doc).await.and_then(|n| parse_doc(&n, tab));
             // When the new read fails too, Google's own reason stays: it
@@ -847,12 +815,7 @@ async fn save_at(
                 _ => err,
             });
         }
-        Ok((status, v)) if !status.is_server_error() => return Err(refused(status, &v)),
-        // No clear answer: Google can have made the suggestions. A second
-        // save fails, because the Doc changed: the user looks first.
-        Ok((status, v)) => return Err(refused(status, &v).context(UNCLEAR)),
-        Err(e) if e.is::<google::LoginRefused>() => return Err(e),
-        Err(e) => return Err(e.context(UNCLEAR)),
+        (status, v) => return Err(refused(status, &v)),
     };
     let mut ids = BTreeSet::new();
     collect(&v, "createdSuggestionIds", &mut ids);
@@ -867,11 +830,7 @@ async fn save_at(
     );
     // The Doc has the suggestions now, so nothing may stop the log: with no
     // account, Undo does not check who made them.
-    let account = off_thread(dir, google::status)
-        .await
-        .ok()
-        .and_then(|s| s.email)
-        .unwrap_or_default();
+    let account = google::account_email(dir).await;
     let target = json!({ "doc": doc, "tab": d.tab, "suggestions": ids, "account": account });
     let key = key.to_string();
     let after = summary(edits);
@@ -937,17 +896,7 @@ async fn undo_at(dir: &Path, base: &str, a: Action, now: u64) -> anyhow::Result<
         let note = "AIfred removed nothing: Google gave no ids for these suggestions. Reject them in the Doc.";
         return off_thread(dir, move |d| actions::set_undone(d, id, note, now)).await;
     }
-    if a.target["account"].as_str().is_some_and(|s| !s.is_empty()) {
-        let now_account = off_thread(dir, google::status)
-            .await?
-            .email
-            .unwrap_or_default();
-        if let Some(account) = actions::other_account(&a, &now_account) {
-            bail!(
-                "these suggestions are by {account}. Connect Google as {account} in Settings, then undo them"
-            );
-        }
-    }
+    google::check_account(dir, &a, "these suggestions").await?;
     let g = connect(dir, base, true).await?;
     // Like a Gmail draft that is gone: the action closes with a note, so
     // its Undo button goes away.
@@ -970,7 +919,7 @@ async fn undo_at(dir: &Path, base: &str, a: Action, now: u64) -> anyhow::Result<
         // No clear answer: Google can have removed them. The action stays
         // open, and the next Undo reads the Doc again.
         const UNDO_UNCLEAR: &str = "Google Docs did not answer clearly, and it can have removed the suggestions. Click Undo again: AIfred reads the Doc first";
-        let (status, v) = match g
+        let answer = g
             .call(
                 dir,
                 Method::POST,
@@ -978,15 +927,8 @@ async fn undo_at(dir: &Path, base: &str, a: Action, now: u64) -> anyhow::Result<
                 &[],
                 Some(json!({ "requests": requests })),
             )
-            .await
-        {
-            Ok(a) => a,
-            Err(e) if e.is::<google::LoginRefused>() => return Err(e),
-            Err(e) => return Err(e.context(UNDO_UNCLEAR)),
-        };
-        if status.is_server_error() {
-            return Err(refused(status, &v).context(UNDO_UNCLEAR));
-        }
+            .await;
+        let (status, v) = google::unclear_write(answer, UNDO_UNCLEAR, refused)?;
         if status == StatusCode::NOT_FOUND {
             // Somebody deleted the Doc after the read above.
             return off_thread(dir, move |d| actions::set_undone(d, id, GONE, now)).await;

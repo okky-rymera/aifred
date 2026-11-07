@@ -586,11 +586,14 @@ async fn save_reply_draft(
         .map_err(err)
 }
 
-/// The first Google Doc link in the item's description, or in another item
-/// of the same work. None when there is none.
+/// The first Google Doc link and the first Google Sheet link in the item's
+/// description, or in another item of the same work. One pass finds both.
 #[tauri::command]
-async fn doc_link(app: State<'_, App>, key: String) -> CmdResult<Option<String>> {
-    app.assistant.doc_link(&key).await.map_err(err)
+async fn work_links(
+    app: State<'_, App>,
+    key: String,
+) -> CmdResult<aifred_core::assistant::WorkLinks> {
+    app.assistant.work_links(&key).await.map_err(err)
 }
 
 /// Suggests changes to a Google Doc for an item (docs.rs). It reads the Doc,
@@ -620,9 +623,57 @@ async fn save_doc_suggestions(
     revision: String,
     edits: Vec<aifred_core::docs::Edit>,
 ) -> CmdResult<aifred_core::actions::Action> {
-    aifred_core::docs::save(&app.assistant.dir, &key, &doc, &tab, &revision, &edits, now())
+    aifred_core::docs::save(
+        &app.assistant.dir,
+        &key,
+        &doc,
+        &tab,
+        &revision,
+        &edits,
+        now(),
+    )
+    .await
+    .map_err(err)
+}
+
+/// Suggests comments on the cells of a Google Sheet for an item
+/// (sheets.rs). It reads the Sheet, and makes one AI call with no tools. It
+/// saves nothing: the window shows the comments first.
+#[tauri::command]
+async fn suggest_sheet_comments(
+    app: State<'_, App>,
+    key: String,
+    link: String,
+    note: String,
+) -> CmdResult<aifred_core::sheets::Proposal> {
+    app.assistant
+        .suggest_sheet_comments(&key, &link, &note)
         .await
         .map_err(err)
+}
+
+/// Saves the comments that the user checked on the cells of the Sheet, and
+/// logs them. Only a click of the user calls it: no AI can.
+#[tauri::command]
+async fn save_sheet_comments(
+    app: State<'_, App>,
+    key: String,
+    sheet: String,
+    gid: i64,
+    check: String,
+    comments: Vec<aifred_core::sheets::Comment>,
+) -> CmdResult<aifred_core::actions::Action> {
+    aifred_core::sheets::save(
+        &app.assistant.dir,
+        &key,
+        &sheet,
+        gid,
+        &check,
+        &comments,
+        now(),
+    )
+    .await
+    .map_err(err)
 }
 
 /// AIfred's actions in other apps, newest first. With `item`: only its actions.
@@ -637,8 +688,9 @@ async fn actions(
     .await
 }
 
-/// Undoes an action: deletes the Gmail draft when nobody changed it, or
-/// the Doc suggestions that nobody accepted or rejected.
+/// Undoes an action: deletes the Gmail draft when nobody changed it, the
+/// Doc suggestions that nobody accepted or rejected, or the Sheet comments
+/// that nobody resolved or answered.
 #[tauri::command]
 async fn undo_action(app: State<'_, App>, id: i64) -> CmdResult<aifred_core::actions::Action> {
     aifred_core::actions::undo(&app.assistant.dir, id, now())
@@ -1600,9 +1652,11 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         add_steps,
         write_reply,
         save_reply_draft,
-        doc_link,
+        work_links,
         suggest_doc_changes,
         save_doc_suggestions,
+        suggest_sheet_comments,
+        save_sheet_comments,
         actions,
         undo_action,
         update_status,

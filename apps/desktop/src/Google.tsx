@@ -1,7 +1,7 @@
 // The Google connection on the Settings page. Each user makes their own
 // Google registration (a "Desktop app" client) and pastes it here. One
 // connection serves all Google features: the calendar, Gmail, Gmail
-// drafts, and Docs suggestions.
+// drafts, Docs suggestions, and Sheets comments.
 import { useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { offText } from "./googleApps";
@@ -20,7 +20,8 @@ function Steps() {
       <li>
         Turn on the <a href="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com" className="underline">Google Calendar API</a> and the{" "}
         <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" className="underline">Gmail API</a> in that project. For Docs suggestions, also turn on the{" "}
-        <a href="https://console.cloud.google.com/apis/library/docs.googleapis.com" className="underline">Google Docs API</a>.
+        <a href="https://console.cloud.google.com/apis/library/docs.googleapis.com" className="underline">Google Docs API</a>. For Sheets comments, also turn on the{" "}
+        <a href="https://console.cloud.google.com/apis/library/sheets.googleapis.com" className="underline">Google Sheets API</a>.
       </li>
       <li>
         Open <a href="https://console.cloud.google.com/auth/overview" className="underline">Google Auth Platform</a> and set it up. For Audience, pick Internal when your account is in a company Google Workspace. Else pick External, and then click Publish app: in Testing, Google ends the login every 7 days. Google then shows "Google hasn't verified this app" at the login: this is your own registration, so click Advanced and continue.
@@ -111,7 +112,7 @@ export function GoogleSection(props: { onChanged: () => void }) {
     <section className="mt-8 space-y-2" aria-label="Google">
       <h2 className="text-sm font-semibold">Google</h2>
       <p className="text-sm text-stone-500">
-        AIfred reads your Google Calendar, so the day plan goes around your meetings. It reads your Gmail, so it finds the emails that wait for your answer and the emails where you wait for an answer. It reads only the sender, the subject, and Google's short preview of each email. It cannot change the calendar. With "Use Gmail drafts", AIfred can save a reply that you checked as a draft in Gmail, when you click. It never sends. Google gives no smaller access for drafts, so this access could also send email: AIfred has no code that sends. With "Use Docs suggestions", AIfred can read a Google Doc that you link to an item, and save the changes that you checked as suggestions in that Doc, when you click. The owner of the Doc accepts or rejects them. Google gives no smaller access for this, so this access could read and change all your Docs: AIfred has no code that changes a Doc directly.
+        AIfred reads your Google Calendar, so the day plan goes around your meetings. It reads your Gmail, so it finds the emails that wait for your answer and the emails where you wait for an answer. It reads only the sender, the subject, and Google's short preview of each email. It cannot change the calendar. With "Use Gmail drafts", AIfred can save a reply that you checked as a draft in Gmail, when you click. It never sends. Google gives no smaller access for drafts, so this access could also send email: AIfred has no code that sends. With "Use Docs suggestions", AIfred can read a Google Doc that you link to an item, and save the changes that you checked as suggestions in that Doc, when you click. The owner of the Doc accepts or rejects them. Google gives no smaller access for this, so this access could read and change all your Docs: AIfred has no code that changes a Doc directly. With "Use Sheets comments", AIfred can read a Google Sheet that you link to an item, and save the comments that you checked on its cells, when you click. The owner of the Sheet makes the changes. Google gives no smaller access for this, so this access could read and change all your Sheets: AIfred has no code that changes a cell.
       </p>
       {/* Off during a login too: the login already asked Google for the
           features, and a change now would not be in it. */}

@@ -1,5 +1,5 @@
 // The text of each Google app that AIfred changes (Gmail drafts, Docs
-// suggestions), in one place. A new app adds one entry here.
+// suggestions, Sheets comments), in one place. A new app adds one entry here.
 import type { Action } from "./api";
 
 export const GOOGLE_APPS: Record<
@@ -31,10 +31,17 @@ export const GOOGLE_APPS: Record<
     undone: "Deleted the suggestions in the Doc.",
     off: `Docs suggestions is off. AIfred reads no Docs and makes no new suggestions. Its suggestions stay in the Docs. "AIfred's actions" below lets you undo them until you connect Google again.`,
   },
+  sheets: {
+    feature: "Sheets comments",
+    name: "the Sheet",
+    undo: "Deletes the comments that nobody resolved or answered yet.",
+    undone: "Deleted the comments in the Sheet.",
+    off: `Sheets comments is off. AIfred reads no Sheets and makes no new comments. Its comments stay in the Sheets. "AIfred's actions" below lets you undo them until you connect Google again.`,
+  },
 };
 
-/** What turning the feature `name` off did. Gmail drafts and Docs
- * suggestions remove nothing: the drafts and the suggestions stay in
+/** What turning the feature `name` off did. Gmail drafts, Docs
+ * suggestions, and Sheets comments remove nothing: they stay in
  * Google, and the action log stays. Undo works until the next login,
  * because a new login does not ask for that access. Other features remove
  * their saved data. */

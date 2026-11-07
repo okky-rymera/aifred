@@ -1,8 +1,8 @@
 //! The log of AIfred's actions in other apps (plan step 8 in
 //! docs/plan-assistant.md). Each change that AIfred makes outside the
 //! computer gets one row, with what it wrote and the ids that Undo needs.
-//! The actions are Gmail drafts (drafts.rs) and suggestions in a Google
-//! Doc (docs.rs).
+//! The actions are Gmail drafts (drafts.rs), suggestions in a Google Doc
+//! (docs.rs), and comments in a Google Sheet (sheets.rs).
 
 use std::path::Path;
 
@@ -22,9 +22,9 @@ pub struct Action {
     pub id: i64,
     /// Unix seconds.
     pub at: u64,
-    /// "gmail" or "docs".
+    /// "gmail", "docs", or "sheets".
     pub app: String,
-    /// "draft" (gmail) or "suggestion" (docs).
+    /// "draft" (gmail), "suggestion" (docs), or "comment" (sheets).
     pub kind: String,
     /// The key of the item that the action is for.
     pub item: String,
@@ -145,6 +145,21 @@ pub fn set_undone(dir: &Path, id: i64, note: &str, now: u64) -> anyhow::Result<A
     })
 }
 
+/// Changes the target of an action that is not undone yet, for example to
+/// keep what a partial Undo did for the next Undo.
+pub fn set_target(dir: &Path, id: i64, target: &Value) -> anyhow::Result<()> {
+    db::write(dir, |tx| {
+        let n = tx.execute(
+            "UPDATE action SET target = ?2 WHERE id = ?1 AND undone_at IS NULL",
+            rusqlite::params![id, target.to_string()],
+        )?;
+        if n == 0 {
+            bail!("this action is undone already");
+        }
+        Ok(())
+    })
+}
+
 /// The checks of an Undo before it calls the app: the action is not undone
 /// yet, and it is of the app `app` and the kind `kind`.
 pub fn check_undo(a: &Action, app: &str, kind: &str) -> anyhow::Result<()> {
@@ -161,15 +176,15 @@ pub fn check_undo(a: &Action, app: &str, kind: &str) -> anyhow::Result<()> {
 /// account. In another account, the app does not find the change, and
 /// Undo would wrongly say that it is gone. `now`: the connected account.
 /// Each app finds `now` in its own way: Gmail from the saved addresses,
-/// Google Docs from the Google login.
+/// Google Docs and Google Sheets from the Google login.
 pub fn other_account<'a>(a: &'a Action, now: &str) -> Option<&'a str> {
     a.target["account"]
         .as_str()
         .filter(|s| !s.is_empty() && *s != now)
 }
 
-/// Undoes an action in its app: deletes the Gmail draft, or the Doc
-/// suggestions.
+/// Undoes an action in its app: deletes the Gmail draft, the Doc
+/// suggestions, or the Sheet comments.
 pub async fn undo(dir: &Path, id: i64, now: u64) -> anyhow::Result<Action> {
     // One Undo at a time. Two clicks at the same time must not both delete.
     let _one = UNDO.lock().await;
@@ -179,6 +194,7 @@ pub async fn undo(dir: &Path, id: i64, now: u64) -> anyhow::Result<Action> {
     match a.app.as_str() {
         "gmail" => crate::drafts::undo(dir, a, now).await,
         "docs" => crate::docs::undo(dir, a, now).await,
+        "sheets" => crate::sheets::undo(dir, a, now).await,
         app => bail!("AIfred cannot undo an action in \"{app}\" yet"),
     }
 }

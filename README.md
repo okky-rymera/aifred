@@ -247,8 +247,9 @@ The brief and the chat get the linked items as one piece of work (`same_work` in
 - A label says who does the next action:
   - "You do this": only you can do it, for example a decision, a call, code, or a review.
   - "AIfred can write a reply to (name)": the item is an email from that person. Use "Write a reply" in the item panel (see "Reply drafts" below). An email to another person, you write yourself.
-  - "AIfred can draft the email later" (or the Sheet change): AIfred cannot do this yet. When it can, it makes a draft for you to check. It sends nothing by itself.
+  - "AIfred can draft the email later": AIfred cannot do this yet. When it can, it makes a draft for you to check. It sends nothing by itself.
   - "AIfred can draft the Doc text later": use "Suggest changes" under "Doc" in the item panel (see "Doc suggestions" below).
+  - "AIfred can comment on the Sheet": use "Suggest comments" under "Sheet" in the item panel (see "Sheet comments" below).
 - "✦ Suggest steps" in the item panel splits an item into 2 to 8 steps. It is one AI call (Sonnet) on your Claude login. It saves nothing until you pick:
   - Clear the box of a step that you do not want, then click "Add N steps".
   - For your own task, the steps go at the end of its checklist. A step that the checklist has already is not added again.
@@ -259,7 +260,7 @@ The brief and the chat get the linked items as one piece of work (`same_work` in
 
 - AIfred connects to Google itself. Each user makes their own Google registration once:
   1. In Google Cloud Console, make a project.
-  2. Turn on the Google Calendar API and the Gmail API. For Docs suggestions, also turn on the Google Docs API.
+  2. Turn on the Google Calendar API and the Gmail API. For Docs suggestions, also turn on the Google Docs API. For Sheets comments, also turn on the Google Sheets API.
   3. Set up Google Auth Platform. Pick the audience "Internal" for a company Google Workspace. Else pick "External" and publish the app: in "Testing", Google ends the login every 7 days. Google then shows "Google hasn't verified this app" at the login. It is your own registration: click "Advanced" and continue.
   4. Create a client of the type "Desktop app".
 - Paste the client ID and the client secret on the Settings page, then click "Connect Google". Google's login page opens in the browser.
@@ -307,6 +308,30 @@ AIfred can suggest changes to a Google Doc for an item (`crates/aifred-core/src/
 - The save fails when the Doc changed after AIfred read it. Then suggest the changes again.
 - Each save goes in the action log: under "Doc" in the item panel, and under "AIfred's actions" on the Settings page.
 - Undo deletes the suggestions that nobody accepted or rejected yet. It works also after you turn Docs suggestions off, until you connect Google again.
+
+### Sheet comments
+
+AIfred can suggest comments on the cells of a Google Sheet for an item (`crates/aifred-core/src/sheets.rs`). Each comment names a cell and says the change. You check each comment. Only your click saves them, as comments on the cells. The owner of the Sheet makes the changes. AIfred never changes a cell.
+
+- Turn it on once: turn on the Google Sheets API in your Google project. Then tick "Use Sheets comments" in Settings > Google, click "Connect again", and allow it. It is off until you turn it on. Google has no access for "comments only", so this access could read and change all your Sheets. AIfred has no code that changes a cell.
+- The item panel shows "Sheet" in these cases:
+  - Sheets comments is on.
+  - The brief says that AIfred can comment on a Sheet.
+  - The item, or another item of the same work, has a Sheet link in its description.
+- Give the Sheet link and a note of what to change. Click "✦ Suggest comments". AIfred reads the tab of the link (or the first tab with cells), at most the first 200 rows and the columns A to Z. It makes one AI call (Sonnet) on your Claude login. The AI call gets only the Sheet, the title of the item, and your note. It gets no memory facts and no other items, and it has no tools.
+- Each comment shows its cell and the value of the cell now. Change the text, or untick the comment. Then click "Save as comments". At most 5 comments, one for each cell.
+- AIfred never gives a comment to a person. A comment cannot have an email address: in Sheets, an address with "@" or "+" tells that person.
+- The save fails when the tab changed after AIfred read it. Then suggest the comments again. These changes stop the save:
+  - A new or deleted row or column.
+  - A new text or formula in the part that AIfred read.
+  - A new value in a commented cell with no formula.
+
+  A formula that changes by itself, like =NOW(), does not stop the save.
+- The save fails when a cell has an open comment with the same text already. An earlier save with no clear answer from Google can have added it. Look in the Sheet.
+- Each save goes in the action log: under "Sheet" in the item panel, and under "AIfred's actions" on the Settings page.
+- Sometimes Google gives no id for a comment. Then AIfred looks for the comment in the Sheet. The log title counts only the comments that Google confirmed. It names the cells that AIfred did not find. Undo cannot remove those comments, so look for them in the Sheet.
+- When AIfred finds none of the comments, the log says that Google did not confirm them, and the save has no Undo. Google can have saved them. Look in the Sheet before you save again.
+- Undo deletes the comments that nobody resolved or answered yet. A comment with an answer of another person stays, because a delete would also delete that answer. Undo works also after you turn Sheets comments off, until you connect Google again.
 
 ### "Waiting for" list
 

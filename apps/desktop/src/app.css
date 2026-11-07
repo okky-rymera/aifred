@@ -545,6 +545,7 @@ input.d-title:focus { border-color: var(--amber); outline: 0; background: var(--
 .docedit { display: flex; flex-direction: column; gap: 6px; }
 .docedit .before { white-space: pre-wrap; font-size: 13px; color: var(--muted); text-decoration: line-through; opacity: 0.75; }
 .docedit .d-text.reply { min-height: 70px; }
+.docedit .cellnow { white-space: pre-wrap; font-size: 13px; color: var(--muted); }
 .actions { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .actions li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 13px; }
 .detail .next-line { padding-left: 0; }

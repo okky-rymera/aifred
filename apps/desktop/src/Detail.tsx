@@ -11,6 +11,7 @@ import { PriPill } from "./Home";
 import { SameWork } from "./Links";
 import { NextStep, SuggestSteps } from "./Steps";
 import { DocSuggest } from "./Docs";
+import { SheetComments } from "./Sheets";
 import { ReplyDraft, useItemActions } from "./Drafts";
 
 /** Text that saves when you leave the box, or press Enter. */
@@ -317,6 +318,7 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
         <SuggestSteps item={i} />
         <ReplyDraft item={i} log={actions.list.filter((a) => a.app === "gmail")} load={actions.reload} />
         <DocSuggest item={i} log={actions.list.filter((a) => a.app === "docs")} load={actions.reload} />
+        <SheetComments item={i} log={actions.list.filter((a) => a.app === "sheets")} load={actions.reload} />
         {i.task && i.task.files.length > 0 && (
           <>
             <div className="d-sec">

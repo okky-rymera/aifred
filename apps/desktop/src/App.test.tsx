@@ -1826,3 +1826,97 @@ describe("Doc suggestions", () => {
     expect(await within(details()).findByText(/Cannot suggest changes: this is not the link of a Google Doc/)).toBeInTheDocument();
   });
 });
+
+describe("Sheet comments", () => {
+  const ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123";
+  const LINK = `https://docs.google.com/spreadsheets/d/${ID}/edit#gid=77`;
+  const sheetsOn = { client_id: "1-a.apps.googleusercontent.com", secret_set: true, connected: true, email: "me@x.com", features: [["Calendar", true], ["Gmail", true], ["Sheets comments", true]] as [string, boolean][], optional: ["Gmail", "Sheets comments"], off: [] };
+
+  it("shows each comment with its cell, saves only the kept ones, and logs them with an undo", async () => {
+    const fake = await startApp({
+      google: sheetsOn,
+      tasks: [task("Fix the prices", { id: "t1" })],
+      sheetLinks: { "task:t1": LINK },
+      onSuggestSheet: (_k, _l, note) => ({
+        comments: [
+          { cell: "B3", text: `Change to ${note}: the new price.`, value: "$10.00" },
+          { cell: "C3", text: "Add the date: [date].", value: "" },
+        ],
+        message: "AIfred left out 1 comment: the AI named a cell outside the part of the Sheet that it got.",
+      }),
+    });
+    await openItem("Fix the prices");
+    expect(await within(details()).findByRole("textbox", { name: "Sheet link" })).toHaveValue(LINK);
+    await userEvent.type(within(details()).getByRole("textbox", { name: "What to change in the Sheet" }), "$12.00");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest comments" }));
+    const box = await within(details()).findByRole("group", { name: "Sheet comments" });
+    expect(within(box).getByText(/left out 1 comment/)).toBeInTheDocument();
+    expect(within(box).getByRole("link", { name: "Prices, Q4 ↗" })).toHaveAttribute("href", LINK);
+    const b3 = within(box).getByRole("group", { name: "Comment on B3" });
+    expect(within(b3).getByLabelText("Cell now")).toHaveTextContent("Now: $10.00");
+    expect(within(within(box).getByRole("group", { name: "Comment on C3" })).getByLabelText("Cell now")).toHaveTextContent("Now: (empty)");
+    const text = within(b3).getByRole("textbox", { name: "Comment" });
+    expect(text).toHaveValue("Change to $12.00: the new price.");
+    await userEvent.clear(text);
+    await userEvent.type(text, "Change to $12.00, tax included.");
+    await userEvent.click(within(within(box).getByRole("group", { name: "Comment on C3" })).getByRole("checkbox"));
+    // Nothing is in the Sheet before the click.
+    expect(fake.actions).toEqual([]);
+    await userEvent.click(within(box).getByRole("button", { name: "Save as comments" }));
+    expect(await screen.findByText(/Commented on 1 cell in the Sheet "Prices"\. No cell changed/)).toBeInTheDocument();
+    expect(fake.savedSheetComments).toEqual([{ cell: "B3", text: "Change to $12.00, tax included.", value: "$10.00" }]);
+    const log = await within(details()).findByRole("list", { name: "AIfred's comments on this item" });
+    expect(within(log).getByText('Commented on 1 cell in the Sheet "Prices"')).toBeInTheDocument();
+    expect(within(log).getByRole("link", { name: "Open in the Sheet ↗" })).toHaveAttribute("href", LINK);
+    await userEvent.click(within(log).getByRole("button", { name: "Undo" }));
+    expect(await within(log).findByText(/^Undone/)).toBeInTheDocument();
+    expect(fake.actions[0].undone_at).not.toBeNull();
+  });
+
+  it("finds the Doc link and the Sheet link of an item with one call", async () => {
+    const DOC = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz9999/edit";
+    const both = { ...sheetsOn, features: [...sheetsOn.features, ["Docs suggestions", true]] as [string, boolean][], optional: [...sheetsOn.optional, "Docs suggestions"] };
+    const fake = await startApp({ google: both, tasks: [task("Fix the prices", { id: "t1" })], docLinks: { "task:t1": DOC }, sheetLinks: { "task:t1": LINK } });
+    await openItem("Fix the prices");
+    expect(await within(details()).findByRole("textbox", { name: "Sheet link" })).toHaveValue(LINK);
+    expect(await within(details()).findByRole("textbox", { name: "Doc link" })).toHaveValue(DOC);
+    expect(fake.linkCalls).toBe(1);
+  });
+
+  it("offers no Undo when Google gave no ids for the saved comments", async () => {
+    const fake = await startApp({
+      google: sheetsOn,
+      tasks: [task("Fix the prices", { id: "t1" })],
+      sheetLinks: { "task:t1": LINK },
+      sheetNoIds: true,
+      onSuggestSheet: () => ({ comments: [{ cell: "B3", text: "Change to $12.00.", value: "$10.00" }] }),
+    });
+    await openItem("Fix the prices");
+    await userEvent.click(await within(details()).findByRole("button", { name: "✦ Suggest comments" }));
+    const box = await within(details()).findByRole("group", { name: "Sheet comments" });
+    await userEvent.click(within(box).getByRole("button", { name: "Save as comments" }));
+    expect(await screen.findByText(/Google gave no ids, so Undo cannot remove them\. No cell changed/)).toBeInTheDocument();
+    await within(details()).findByRole("list", { name: "AIfred's comments on this item" });
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+    expect(fake.undoCalls ?? 0).toBe(0);
+  });
+
+  it("cannot read the Sheet before you turn on Sheets comments, and hides the part on items with no Sheet", async () => {
+    const off = { ...sheetsOn, features: [["Calendar", true], ["Gmail", true], ["Sheets comments", false]] as [string, boolean][], off: ["Sheets comments"] };
+    await startApp({ google: off, tasks: [task("Fix the prices", { id: "t1" }), task("Call Ana", { id: "t2" })], sheetLinks: { "task:t1": LINK } });
+    await openItem("Fix the prices");
+    await userEvent.click(await within(details()).findByRole("button", { name: "✦ Suggest comments" }));
+    expect(await within(details()).findByText(/AIfred cannot use Google Sheets yet\. In Settings, tick "Use Sheets comments"/)).toBeInTheDocument();
+    expect(within(details()).queryByRole("group", { name: "Sheet comments" })).not.toBeInTheDocument();
+    await openItem("Call Ana");
+    await waitFor(() => expect(within(details()).queryByRole("textbox", { name: "Sheet link" })).not.toBeInTheDocument());
+  });
+
+  it("shows an error for a link that is not a Google Sheet", async () => {
+    await startApp({ google: sheetsOn, tasks: [task("Fix the prices", { id: "t1" })] });
+    await openItem("Fix the prices");
+    await userEvent.type(await within(details()).findByRole("textbox", { name: "Sheet link" }), "https://example.com/x");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest comments" }));
+    expect(await within(details()).findByText(/Cannot suggest comments: this is not the link of a Google Sheet/)).toBeInTheDocument();
+  });
+});

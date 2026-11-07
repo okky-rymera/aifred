@@ -28,6 +28,45 @@ pub fn json_object(answer: &str) -> Option<&str> {
     Some(&answer[start..=end])
 }
 
+/// `message` with a note about the parts of an AI answer that AIfred left
+/// out: "AIfred left out 2 changes: <reason>; <reason> (3 changes)." Each
+/// reason shows once, with its number when it is more than one. `what`:
+/// the name of one part, for example "change".
+pub fn left_out(message: String, reasons: Vec<String>, what: &str) -> String {
+    if reasons.is_empty() {
+        return message;
+    }
+    let n = reasons.len();
+    let plural = |k: usize| if k == 1 { "" } else { "s" };
+    let mut counted: Vec<(String, usize)> = Vec::new();
+    for r in reasons {
+        match counted.iter_mut().find(|(x, _)| *x == r) {
+            Some((_, k)) => *k += 1,
+            None => counted.push((r, 1)),
+        }
+    }
+    let why: Vec<String> = counted
+        .into_iter()
+        .map(|(r, k)| {
+            if k == 1 {
+                r
+            } else {
+                format!("{r} ({k} {what}{})", plural(k))
+            }
+        })
+        .collect();
+    let note = format!(
+        "AIfred left out {n} {what}{}: {}.",
+        plural(n),
+        why.join("; ")
+    );
+    [message, note]
+        .into_iter()
+        .filter(|m| !m.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
