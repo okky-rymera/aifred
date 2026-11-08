@@ -3,7 +3,7 @@
 // No Rust, no Claude, no GitHub, no cost.
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { DEFAULT_SETTINGS } from "../api";
-import { MAX_GROUP, groupOf } from "../items";
+import { MAX_GROUP, groupOf, linkGroups, parentOf } from "../items";
 import type {
   Action,
   DocEdit,
@@ -25,9 +25,10 @@ import type {
   GithubItem,
   ItemDetails,
   ItemLink,
-  LinkSuggestion,
   Job,
   JobRun,
+  Mission,
+  MissionBefore,
   Mail,
   MailList,
   ProgressEvent,
@@ -69,6 +70,8 @@ export type Fake = {
   onGmailThreads?: () => Promise<void> | void;
   /** Runs before add_steps saves. A test can hold the save with it, like a slow disk. */
   onAddSteps?: () => Promise<void> | void;
+  /** Runs before set_mission_step saves. A test can hold the save with it. */
+  onMissionStep?: () => Promise<void> | void;
   /** Runs before day_plan answers. A test can hold the plan load with it. */
   onDayPlan?: (day: string) => Promise<void> | void;
   /** Runs before connect_google answers, like a user in the browser. A
@@ -178,6 +181,8 @@ export type Fake = {
   workDone: Record<string, WorkDone>;
   /** When set, finish_work fails with this text. */
   failFinishWork?: string;
+  /** When set, finish_work waits for it: the work ends after other changes. */
+  beforeFinishWork?: () => Promise<void>;
   /** The clock of the work timer, in Unix seconds. A test can move it. */
   now: () => number;
   /** The finished end-of-day checks: the moved keys, by day (review.rs). */
@@ -194,11 +199,8 @@ export type Fake = {
   goalDone: Record<number, number>;
   /** The items under another item, like links.rs. */
   links: ItemLink[];
-  /** AIfred's suggestions. The fake does not find them: a test sets them.
-   * A suggestion of a linked or rejected pair is left out, like in links.rs. */
-  linkSuggestions: LinkSuggestion[];
-  /** The rejected pairs, as "a|b" with a < b. */
-  linkNo: string[];
+  /** The items that the user took out of a mission, as "id:key" (mission_out). */
+  missionOut: string[];
 };
 
 let nextId = 1;
@@ -388,31 +390,25 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     picks: [],
     goalDone: {},
     links: [],
-    linkSuggestions: [],
-    linkNo: [],
+    missionOut: [],
     ...init,
   };
 
-  /** The links and the suggestions, like links::get. A rejected pair
-   * blocks all pairs of its two groups, like in links.rs. */
-  const linksNow = () => {
-    const head = (k: string) => groupOf(fake.links, k)[0];
-    const pairOf = (a: string, b: string) => [head(a), head(b)].sort().join("|");
-    const no = new Set(fake.linkNo.map((p) => pairOf(...(p.split("|") as [string, string]))));
-    return structuredClone({
+  /** The links, like links::get. */
+  const linksNow = () =>
+    structuredClone({
       links: [...fake.links].sort((a, b) => a.main.localeCompare(b.main) || a.key.localeCompare(b.key)),
-      suggestions: fake.linkSuggestions.filter((s) => head(s.main) !== head(s.key) && !no.has(pairOf(s.main, s.key))),
     });
-  };
-  /** Takes `key` out of its group, like links::unlink_in. */
+  /** How things were before a move of `key`, like links::before_in. */
+  const beforeOf = (key: string) => ({ key, link: structuredClone(fake.links.find((l) => l.key === key) ?? null), marks: [] });
+  /** Moves `key` out from under its parent, with its subtasks, like links::unlink_in. */
   const unlink = (key: string) => {
-    const g = groupOf(fake.links, key);
-    if (g[0] !== key) fake.links = fake.links.filter((l) => l.key !== key);
-    else {
-      const [next, ...others] = g.slice(1);
-      fake.links = fake.links.filter((l) => l.main !== key);
-      for (const k of others) fake.links.push({ key: k, main: next });
-    }
+    fake.links = fake.links.filter((l) => l.key !== key);
+  };
+  /** An item is gone: its subtasks move up to its parent, like links::remove_in. */
+  const removeLinks = (key: string) => {
+    const parent = parentOf(fake.links, key);
+    fake.links = fake.links.filter((l) => l.key !== key).flatMap((l) => (l.main !== key ? [l] : parent ? [{ ...l, main: parent }] : []));
   };
 
   mockIPC(async (cmd, payload) => {
@@ -468,6 +464,51 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     /** Like learn::fact_text. */
     const learnedText = (place: string, n: number) =>
       `${place}: these items are less important to the user than they look. Rank them lower. (AIfred learned this from ${n} "wrong priority" corrections in the brief.)`;
+    /** Like learn::add. */
+    const correct = (key: string, kind: Correction["kind"], day: string) => {
+      const item = titlePlace(key);
+      if (!item) throw `AIfred does not know the item ${key}`;
+      const old = fake.corrections.find((c) => c.key === key && c.kind === kind && c.day === day);
+      if (old) return { correction: structuredClone(old) };
+      const c: Correction = { id: nextId++, key, kind, day, title: item[0], place: item[1], ts: nowSecs() };
+      fake.corrections.push(c);
+      // Like learn.rs: 3 different items from one place in 60 days make one
+      // fact. AIfred learns each place once.
+      if (c.kind === "wrong_priority" && c.place && !fake.learned[c.place]) {
+        const n = counted(c.place, c.ts);
+        if (n >= 3) {
+          const f = fact(learnedText(c.place, n), { added_by: "aifred" });
+          fake.memory.push(f);
+          fake.learned[c.place] = { fact: f.id, ts: c.ts, text: f.text };
+          return { correction: structuredClone(c), learned: structuredClone(f) };
+        }
+      }
+      return { correction: structuredClone(c) };
+    };
+    /** A mission in any brief, by id. */
+    const mission = (id: number): Mission => {
+      const m = Object.values(fake.briefs)
+        .flatMap((b) => b.missions ?? [])
+        .find((x) => x.id === id);
+      if (!m) throw `AIfred does not know the mission ${id}`;
+      return m;
+    };
+    /** Where an item is in an open mission, like missions::spot_in. */
+    const missionSpot = (key: string) => {
+      for (const b of Object.values(fake.briefs))
+        for (const m of b.missions ?? []) {
+          const pos = m.items.findIndex((i) => i.key === key);
+          if (m.status === "open" && pos >= 0) return { mission: m.id, pos, by: m.items[pos]!.by };
+        }
+      return null;
+    };
+    /** Like missions::load: the progress from the steps and the items. */
+    const progress = (m: Mission) => {
+      const steps_done = m.checklist.filter((c) => c.done).length;
+      const items_closed = m.items.filter((i) => !i.open).length;
+      const all = m.checklist.length + m.items.length;
+      m.progress = { steps_done, steps: m.checklist.length, items_closed, items: m.items.length, percent: all ? Math.floor(((steps_done + items_closed) * 100) / all) : 0 };
+    };
     const running = (): Running | null => {
       const r = fake.sessions.find((x) => x.ended === null);
       if (!r) return null;
@@ -732,8 +773,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         find(args.id);
         fake.tasks = fake.tasks.filter((t) => t.id !== args.id);
         fake.sessions = fake.sessions.filter((x) => x.key !== `task:${args.id}`);
-        // Like tasks.rs: a deleted task leaves its group.
-        unlink(`task:${args.id}`);
+        // Like tasks.rs: a deleted task leaves its tree. Its subtasks move up.
+        removeLinks(`task:${args.id}`);
         return null;
       case "google_status":
         return structuredClone(fake.google);
@@ -920,7 +961,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         return structuredClone(await fake.onSuggestSteps(String(args.key)));
       case "add_steps": {
         await fake.onAddSteps?.();
-        // Like steps::add: the open task of the group, else a new task under the main item.
+        // Like steps::add: the item itself when it is an open task, else an
+        // open task directly under it that you placed, else a new subtask of the item.
         const key = String(args.key);
         // Like steps::clean: one line, no empty step, no step twice.
         const seen = new Set<string>();
@@ -929,8 +971,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
           .filter((x) => x && !seen.has(x.toLowerCase()) && seen.add(x.toLowerCase()));
         if (!steps.length) throw "no steps to add";
         if (steps.length > 8) throw "at most 8 steps can be added at one time";
-        const g = groupOf(fake.links, key);
-        const order = [key, ...g.filter((k) => k !== key)];
+        const mine = fake.links.filter((l) => l.main === key && l.by !== "aifred").map((l) => l.key).sort();
+        const order = [key, ...mine];
         const t = order.map((k) => fake.tasks.find((x) => `task:${x.id}` === k && !x.done)).find(Boolean);
         if (t) {
           let added = 0;
@@ -947,31 +989,44 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         if (!item) throw `no item ${key}`;
         const n = task(item[0], { added_by: "aifred", checklist: steps.map((text) => ({ text, done: false })) });
         fake.tasks.push(n);
-        fake.links.push({ key: `task:${n.id}`, main: g[0] });
+        fake.links.push({ key: `task:${n.id}`, main: key, by: "you", why: "" });
         return { task: structuredClone(n), added: steps.length, created: true };
       }
       case "item_links":
         return linksNow();
       case "link_items": {
-        // Like links::link_in.
+        // Like links::link_in: `key` goes under `main`, with its own subtasks.
         const { main, key } = args as { main: string; key: string };
-        if (main === key) throw "an item cannot be linked to itself";
+        if (main === key) throw "an item cannot be a subtask of itself";
         for (const k of [main, key]) if (!titlePlace(k)) throw `AIfred does not know the item ${k}`;
-        const [gm, gk] = [groupOf(fake.links, main), groupOf(fake.links, key)];
-        const target = gm[0] === gk[0] ? main : gm[0];
-        const all = new Set([...gm, ...gk]);
-        if (all.size > MAX_GROUP) throw `one piece of work can have at most ${MAX_GROUP} items`;
-        fake.links = fake.links.filter((l) => !all.has(l.key));
-        for (const k of [...all].sort()) if (k !== target) fake.links.push({ key: k, main: target });
+        const moving = linkGroups(fake.links.filter((l) => l.key !== key)).get(key) ?? [key];
+        if (moving.includes(main)) throw `${main} is a subtask of ${key}. An item cannot go under its own subtask`;
+        const all = new Set([...groupOf(fake.links, main), ...moving]);
+        if (all.size > MAX_GROUP) throw `one tree can have at most ${MAX_GROUP} items`;
+        const before = beforeOf(key);
+        fake.links = [...fake.links.filter((l) => l.key !== key), { key, main, by: "you", why: "" }];
+        return { ...linksNow(), before };
+      }
+      case "restore_link": {
+        // Like links::restore: the link comes back with its `by` and `why`.
+        // The fake has no sort marks.
+        const { key, link } = args.before as { key: string; link: { main: string; by?: string; why?: string } | null };
+        fake.links = fake.links.filter((l) => l.key !== key);
+        if (link) fake.links.push(link.by === "aifred" ? { key, main: link.main, by: "aifred", why: link.why ?? "" } : { key, main: link.main, by: "you", why: "" });
         return linksNow();
       }
-      case "unlink_item":
+      case "unlink_item": {
+        const before = beforeOf(String(args.key));
         unlink(String(args.key));
-        return linksNow();
-      case "reject_link": {
-        const pair = [String(args.a), String(args.b)].sort().join("|");
-        fake.linkNo = fake.linkNo.filter((p) => p !== pair);
-        if (args.no) fake.linkNo.push(pair);
+        return { ...linksNow(), before };
+      }
+      case "undo_moves": {
+        // Like sort::undo for a first move: the item goes back to the top.
+        const moves = Object.values(fake.briefs).flatMap((b) => b.moves ?? []);
+        for (const id of args.ids as number[]) {
+          const m = moves.find((x) => x.id === id);
+          if (m && fake.links.some((l) => l.key === m.key && l.main === m.main && l.by === "aifred")) unlink(m.key);
+        }
         return linksNow();
       }
       case "waiting_items":
@@ -1138,33 +1193,88 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
       case "brief": {
         // Like brief::get: an item corrected on that day has no reason and no goal.
         const b = structuredClone(fake.briefs[args.day] ?? null);
-        for (const c of fake.corrections.filter((c) => c.day === args.day)) {
-          if (b) delete b.why[c.key];
-          if (b?.goal) delete b.goal[c.key];
-          if (b?.next) delete b.next[c.key];
-          if (b?.draft) delete b.draft[c.key];
+        const corrected = new Set(fake.corrections.filter((c) => c.day === args.day).map((c) => c.key));
+        for (const k of corrected) {
+          if (b) delete b.why[k];
+          if (b?.goal) delete b.goal[k];
+          if (b?.next) delete b.next[k];
+          if (b?.draft) delete b.draft[k];
         }
+        // Like missions::today: a mission with a corrected item is not in the list.
+        if (b?.missions) b.missions = b.missions.filter((m) => m.status === "open" && m.items.length > 0 && !m.items.some((i) => corrected.has(i.key)));
+        // Like sort::moves_since_in: only AIfred's moves that are still in place.
+        if (b?.moves) b.moves = b.moves.filter((m) => fake.links.some((l) => l.key === m.key && l.main === m.main && l.by === "aifred"));
         return b;
       }
-      case "correct_brief": {
-        const item = titlePlace(args.key);
-        if (!item) throw `AIfred does not know the item ${args.key}`;
-        const old = fake.corrections.find((c) => c.key === args.key && c.kind === args.kind && c.day === args.day);
-        if (old) return { correction: structuredClone(old) };
-        const c: Correction = { id: nextId++, key: args.key, kind: args.kind, day: args.day, title: item[0], place: item[1], ts: nowSecs() };
-        fake.corrections.push(c);
-        // Like learn.rs: 3 different items from one place in 60 days make one
-        // fact. AIfred learns each place once.
-        if (c.kind === "wrong_priority" && c.place && !fake.learned[c.place]) {
-          const n = counted(c.place, c.ts);
-          if (n >= 3) {
-            const f = fact(learnedText(c.place, n), { added_by: "aifred" });
-            fake.memory.push(f);
-            fake.learned[c.place] = { fact: f.id, ts: c.ts, text: f.text };
-            return { correction: structuredClone(c), learned: structuredClone(f) };
-          }
+      case "correct_brief":
+        return correct(args.key, args.kind, args.day);
+      case "set_mission_step": {
+        await fake.onMissionStep?.();
+        const m = mission(args.id);
+        const step = m.checklist[args.index];
+        if (!step) throw `the mission has no step ${args.index + 1}`;
+        step.done = args.done;
+        progress(m);
+        return structuredClone(m);
+      }
+      case "finish_mission": {
+        const m = mission(args.id);
+        if (m.status !== "open") throw `AIfred does not know the open mission ${args.id}`;
+        m.status = "done";
+        return null;
+      }
+      case "reopen_mission": {
+        const m = mission(args.id);
+        if (m.status !== "done") throw `AIfred does not know the done mission ${args.id}`;
+        m.status = "open";
+        return null;
+      }
+      // Like missions::add_item, remove_item, and restore. `fake.missionOut`
+      // has the items that the user took out, as "id:key".
+      case "add_mission_item": {
+        const m = mission(args.id);
+        if (m.status !== "open") throw `AIfred does not know the open mission ${args.id}`;
+        const t = titlePlace(args.key);
+        if (!t || !isOpen(args.key)) throw `AIfred does not know the open item ${args.key}`;
+        if (m.items.some((i) => i.key === args.key)) throw "The item is in this mission already";
+        const spot = missionSpot(args.key);
+        const out = fake.missionOut.includes(`${m.id}:${args.key}`);
+        if (spot) mission(spot.mission).items.splice(spot.pos, 1);
+        fake.missionOut = fake.missionOut.filter((x) => x !== `${m.id}:${args.key}`);
+        m.items.push({ key: args.key, title: t[0], open: true, by: "you" });
+        for (const x of [m, ...(spot ? [mission(spot.mission)] : [])]) progress(x);
+        return { mission: structuredClone(m), before: { key: args.key, mission: m.id, spot, out } };
+      }
+      case "remove_mission_item": {
+        const m = mission(args.id);
+        const pos = m.items.findIndex((i) => i.key === args.key);
+        if (m.status !== "open" || pos < 0) throw "The item is not in this mission";
+        if (!m.items.some((i) => i.open && i.key !== args.key)) throw "This is the last open item of the mission. Use Done or Not today instead";
+        const [it] = m.items.splice(pos, 1);
+        fake.missionOut.push(`${m.id}:${args.key}`);
+        progress(m);
+        return { mission: structuredClone(m), before: { key: args.key, mission: m.id, spot: { mission: m.id, pos, by: it!.by }, out: false } };
+      }
+      case "restore_mission_item": {
+        const b = args.before as MissionBefore;
+        const now = missionSpot(b.key);
+        if (now) mission(now.mission).items.splice(now.pos, 1);
+        if (b.spot) {
+          const m = mission(b.spot.mission);
+          const t = titlePlace(b.key);
+          if (m.status === "open" && t) m.items.splice(b.spot.pos, 0, { key: b.key, title: t[0], open: isOpen(b.key), by: b.spot.by === "you" ? "you" : "aifred" });
+          progress(m);
         }
-        return { correction: structuredClone(c) };
+        const id = `${b.mission}:${b.key}`;
+        fake.missionOut = fake.missionOut.filter((x) => x !== id);
+        if (b.out) fake.missionOut.push(id);
+        return null;
+      }
+      case "correct_mission": {
+        // Like missions::correct: a mission with no open item is an error.
+        const open = mission(args.id).items.filter((i) => i.open);
+        if (!open.length) throw "All items of this mission are closed. Finish the mission instead";
+        return open.map((i) => correct(i.key, args.kind, args.day));
       }
       case "undo_correction": {
         const c = fake.corrections.find((x) => x.id === args.id);
@@ -1196,6 +1306,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         for (const x of fake.sessions) if (x.ended === null) x.ended = fake.now();
         return null;
       case "finish_work":
+        await fake.beforeFinishWork?.();
         if (fake.failFinishWork) throw fake.failFinishWork;
         return structuredClone(finishWork(args.key));
       case "unfinish_work":

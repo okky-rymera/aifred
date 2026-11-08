@@ -78,48 +78,55 @@ const COLUMNS: &str = "id, key, kind, day, title, place, ts";
 /// Saves a correction of the brief of `day`. The same correction of the same
 /// item on the same day is saved once: a second click gives the first one.
 pub fn add(dir: &Path, key: &str, kind: &str, day: &str, now: u64) -> anyhow::Result<Corrected> {
+    db::write(dir, |tx| add_in(tx, key, kind, day, now))
+}
+
+/// add(), in a write that is open.
+pub(crate) fn add_in(
+    tx: &Transaction,
+    key: &str,
+    kind: &str,
+    day: &str,
+    now: u64,
+) -> anyhow::Result<Corrected> {
     if kind != NOT_TODAY && kind != WRONG_PRIORITY {
         bail!("a correction is \"{NOT_TODAY}\" or \"{WRONG_PRIORITY}\", not \"{kind}\"");
     }
     crate::plan::check_day(day)?;
     let key = key.trim();
-    db::write(dir, |tx| {
-        let Some((title, place)) = crate::items::title_place(tx, key)? else {
-            bail!("AIfred does not know the item {key}");
-        };
-        let old = tx
-            .query_row(
-                &format!(
-                    "SELECT {COLUMNS} FROM correction WHERE key = ?1 AND kind = ?2 AND day = ?3"
-                ),
-                [key, kind, day],
-                row,
-            )
-            .optional()?;
-        if let Some(correction) = old {
-            return Ok(Corrected {
-                correction,
-                learned: None,
-            });
-        }
-        tx.execute(
-            "INSERT INTO correction (key, kind, day, title, place, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![key, kind, day, title, place, now as i64],
-        )?;
-        let correction = Correction {
-            id: tx.last_insert_rowid(),
-            key: key.into(),
-            kind: kind.into(),
-            day: day.into(),
-            title,
-            place,
-            ts: now,
-        };
-        let learned = learn(tx, &correction, now)?;
-        Ok(Corrected {
+    let Some((title, place)) = crate::items::title_place(tx, key)? else {
+        bail!("AIfred does not know the item {key}");
+    };
+    let old = tx
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM correction WHERE key = ?1 AND kind = ?2 AND day = ?3"),
+            [key, kind, day],
+            row,
+        )
+        .optional()?;
+    if let Some(correction) = old {
+        return Ok(Corrected {
             correction,
-            learned,
-        })
+            learned: None,
+        });
+    }
+    tx.execute(
+        "INSERT INTO correction (key, kind, day, title, place, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![key, kind, day, title, place, now as i64],
+    )?;
+    let correction = Correction {
+        id: tx.last_insert_rowid(),
+        key: key.into(),
+        kind: kind.into(),
+        day: day.into(),
+        title,
+        place,
+        ts: now,
+    };
+    let learned = learn(tx, &correction, now)?;
+    Ok(Corrected {
+        correction,
+        learned,
     })
 }
 

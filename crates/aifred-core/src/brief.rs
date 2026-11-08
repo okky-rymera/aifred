@@ -8,6 +8,15 @@
 //! says when AIfred can draft the text of that step later (an email, a Google
 //! Doc, or a Google Sheet). The other steps are for the user.
 //!
+//! The same call also gives the missions of today (missions.rs): the next
+//! small piece of work for each thing that needs the user, the most
+//! important first. For a tree of subtasks, that is the next subtask.
+//! A mission gets its reason, next action, and goal from its first item.
+//!
+//! The brief also shows how AIfred sorted new items into subtask trees
+//! since the brief of the day before (sort.rs). The app writes that part
+//! from the move log, not the AI, so it is always true.
+//!
 //! The user can correct the brief (learn.rs). The brief then shows no
 //! reason for the item on that day, and the next briefs get the corrections.
 
@@ -39,8 +48,9 @@ How to rank:
 - Meetings take the user's time. When the free minutes are fewer than the work that needs the user today, say so, and say what can wait.
 - `corrections` are the user's corrections of earlier briefs. not_today: on that day, the item does not need the user. wrong_priority: the brief ranked the item too high, so rank it lower from now on. Never name an item that has a correction with today's day.
 - `review_picks` are the user's picks in the weekly review. drop or delegate: the item does not need the user. Never name it. plan: the user wants to do it on plan_day, not before. do: the user wants to do it soon.
-- `same_work` lists items that are one piece of work in several places, for example a ClickUp task and its GitHub pull request. Treat each list as one item. Name and rank only the first key of the list, and give why and goal only for it. Use the dates, the priority, and the state of all its items.
+- An item with `parent` is a subtask: a part of the work of its parent item. For example, a GitHub pull request under its issue, and the issue under a ClickUp task. A subtask gets the urgency and the goal of its parent. When a parent has open subtasks, the work is in the subtasks: name the next subtask, not the parent.
 - In `tasks`, doer \"you\" is work for the user. doer \"aifred\" is a reminder, a check, or a repeating task that AIfred runs by itself at `when`. With status \"paused\", AIfred does not run it now: never say that AIfred does it or watches its item. A repeating task (does \"task\") adds a new task for the user at each time. An AIfred task has no key: never name it as an item, and give it no why. Rank the user's items as usual. When an active AIfred task watches an item that you name, you can say so.
+- `missions` are the missions from your earlier briefs. A mission is the next small piece of work: usually one item, sometimes two small items that the user does together. added_by_user: the user put these items in the mission. They stay in it: never put them in another mission. removed_by_user: the user took these items out of the mission. Never put them in it again.
 - The facts about the user come from memory. Some say what matters less or more to the user. Follow them.
 
 Write the brief:
@@ -55,9 +65,15 @@ Also give:
 - minutes: for each open item in `needs_guess`, how many minutes the work takes, as a whole number from 5 to 600. When `time_history` is there, use it: guess like the real times of similar finished items, and when real_vs_guess is above 1, make the guesses that much longer. real_vs_guess comes only from your own guesses (guess_by \"aifred\"), not from the user's guesses.
 - goal: for each item in `why`, the id of the goal that it serves. Leave out an item that serves no goal. Use only goal ids from `goals`.
 - next: for each item in `why`, the next action that moves it forward, at most 12 words. Start with a verb, and name the person or the thing. Use the description, the checklist, and the state of the item. Examples: \"Reply to Ana with the price.\", \"Review PR #12 and approve or ask for changes.\", \"Write the first 3 steps of the checklist.\"
+- missions: the most important work for today, as at most 10 missions, the most important first. AIfred shows the first 7 that it can use, so the last ones are spares. Use the items in `why`. A mission is the next small piece of work that the user can finish soon, not a full big task. For a tree of subtasks, the mission is the next open subtask, not the full tree: do not put a parent and its subtasks in one mission. Join two items only when they are small and the user does them together. A key is in at most one mission. For each mission:
+  - id: the id from `missions` when it is the same work as that mission, so its steps stay. Else null.
+  - title: what the next work is, at most 8 words. Example: \"Review the PayPal fix PR\". The app shows the parent of the first key next to the title, so do not repeat it.
+  - keys: its items. Put first the item of the next action. The first key must have why and next.
+  - steps: only when id is null and the work needs more than one action: 2 to 6 steps in order, each at most 12 words, each starts with a verb.
+  - doer: \"aifred\" when an active AIfred task does the next action. Else \"you\".
 - draft: for each item in `next` where the next action is to write text that AIfred can draft for the user to check: \"email\" (a reply or a new email), \"doc\" (text in a Google Doc), or \"sheet\" (a change in a Google Sheet). Leave out the actions that only the user can do: decisions, calls, meetings, code, reviews, and work in other apps.
 
-Answer with only a JSON object: {\"text\": \"...\", \"why\": {\"<key>\": \"...\"}, \"minutes\": {\"<key>\": 30}, \"goal\": {\"<key>\": 1}, \"next\": {\"<key>\": \"...\"}, \"draft\": {\"<key>\": \"email\"}}";
+Answer with only a JSON object: {\"text\": \"...\", \"why\": {\"<key>\": \"...\"}, \"minutes\": {\"<key>\": 30}, \"goal\": {\"<key>\": 1}, \"next\": {\"<key>\": \"...\"}, \"draft\": {\"<key>\": \"email\"}, \"missions\": [{\"id\": null, \"title\": \"...\", \"keys\": [\"<key>\"], \"steps\": [\"...\"], \"doer\": \"you\"}]}";
 
 /// The kinds of text that AIfred can draft for a next step (plan-assistant.md, step 8).
 pub const DRAFTS: [&str; 3] = ["email", "doc", "sheet"];
@@ -87,6 +103,18 @@ pub struct Brief {
     /// DRAFTS. A next action that is not here is for the user.
     #[serde(default)]
     pub draft: BTreeMap<String, String>,
+    /// The missions of the day, in rank order (missions.rs). get() reads
+    /// them; save() does not use this field.
+    #[serde(default)]
+    pub missions: Vec<crate::missions::Mission>,
+    /// AIfred's moves of items into subtask trees (sort.rs) since the brief
+    /// of the day before, that are still in place. get() reads them; save()
+    /// does not use this field.
+    #[serde(default)]
+    pub moves: Vec<crate::sort::Moved>,
+    /// The count of older moves that `moves` does not give (sort::moves_in).
+    #[serde(default)]
+    pub moves_more: usize,
 }
 
 /// The brief of `day`, or None when AIfred has not written it. An item that
@@ -121,7 +149,12 @@ pub fn get(dir: &Path, day: &str) -> anyhow::Result<Option<Brief>> {
                     goal: serde_json::from_str(&goal)?,
                     next: serde_json::from_str(&next)?,
                     draft: serde_json::from_str(&draft)?,
+                    missions: crate::missions::today_in(c, day)?,
+                    moves: Vec::new(),
+                    moves_more: 0,
                 };
+                (b.moves, b.moves_more) =
+                    crate::sort::moves_in(c, since_in(c, day)?, until_in(c, day)?)?;
                 b.why.retain(|k, _| !corrected.contains(k));
                 b.goal.retain(|k, _| !corrected.contains(k));
                 b.next.retain(|k, _| !corrected.contains(k));
@@ -133,9 +166,38 @@ pub fn get(dir: &Path, day: &str) -> anyhow::Result<Option<Brief>> {
     })
 }
 
-/// Saves the brief, and the time guesses for items that have none yet.
-pub fn save(dir: &Path, brief: &Brief, minutes: &BTreeMap<String, u32>) -> anyhow::Result<()> {
+/// When the brief before `day` read the items, or 0 when there is none.
+/// The brief of `day` shows AIfred's moves after this time.
+fn since_in(c: &rusqlite::Connection, day: &str) -> anyhow::Result<u64> {
+    let t: Option<i64> = c.query_row(
+        "SELECT MAX(written) FROM brief WHERE day < ?1",
+        [day],
+        |r| r.get(0),
+    )?;
+    Ok(t.unwrap_or(0).max(0) as u64)
+}
+
+/// When the brief after `day` read the items, or None when there is none.
+/// The brief of `day` does not show AIfred's moves after this time: the
+/// later brief shows them.
+fn until_in(c: &rusqlite::Connection, day: &str) -> anyhow::Result<Option<u64>> {
+    let t: Option<i64> = c.query_row(
+        "SELECT MIN(written) FROM brief WHERE day > ?1",
+        [day],
+        |r| r.get(0),
+    )?;
+    Ok(t.map(|t| t.max(0) as u64))
+}
+
+/// Saves the brief, its missions, and the time guesses for items that have none yet.
+pub fn save(
+    dir: &Path,
+    brief: &Brief,
+    minutes: &BTreeMap<String, u32>,
+    missions: &[crate::missions::Proposal],
+) -> anyhow::Result<()> {
     db::write(dir, |tx| {
+        crate::missions::save_in(tx, &brief.day, missions, brief.written)?;
         tx.execute(
             "INSERT INTO brief (day, written, text, why, goal, next, draft) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT (day) DO UPDATE SET written = ?2, text = ?3, why = ?4, goal = ?5, next = ?6, draft = ?7",
@@ -217,6 +279,7 @@ pub struct Parsed {
     pub goal: BTreeMap<String, i64>,
     pub next: BTreeMap<String, String>,
     pub draft: BTreeMap<String, String>,
+    pub missions: Vec<crate::missions::Proposal>,
 }
 
 /// The brief, the reasons, the time guesses, the goals, and the next steps
@@ -277,6 +340,7 @@ pub fn parse(answer: &str, known: &[String], goals: &[i64]) -> anyhow::Result<Pa
         .filter_map(|(k, d)| d.as_str().map(|d| (k.clone(), d.trim().to_lowercase())))
         .filter(|(_, d)| DRAFTS.contains(&d.as_str()))
         .collect();
+    let missions = crate::missions::parse(&v["missions"], &known);
     Ok(Parsed {
         text,
         why,
@@ -284,6 +348,7 @@ pub fn parse(answer: &str, known: &[String], goals: &[i64]) -> anyhow::Result<Pa
         goal,
         next,
         draft,
+        missions,
     })
 }
 
@@ -388,9 +453,12 @@ mod tests {
             goal: BTreeMap::from([(a.clone(), 1)]),
             next: BTreeMap::from([(a.clone(), "Do A".into()), (b.clone(), "Do B".into())]),
             draft: BTreeMap::from([(a.clone(), "email".into())]),
+            missions: Vec::new(),
+            moves: Vec::new(),
+            moves_more: 0,
         };
-        save(&d, &brief("2026-11-06"), &BTreeMap::new()).unwrap();
-        save(&d, &brief("2026-11-07"), &BTreeMap::new()).unwrap();
+        save(&d, &brief("2026-11-06"), &BTreeMap::new(), &[]).unwrap();
+        save(&d, &brief("2026-11-07"), &BTreeMap::new(), &[]).unwrap();
         crate::learn::add(&d, &a, crate::learn::NOT_TODAY, "2026-11-06", 10).unwrap();
         let today = get(&d, "2026-11-06").unwrap().unwrap();
         assert_eq!(today.why.keys().collect::<Vec<_>>(), [&b]);
@@ -443,9 +511,12 @@ mod tests {
             goal: BTreeMap::from([("task:t2".to_string(), 3)]),
             next: BTreeMap::from([("task:t2".to_string(), "Call Bo.".to_string())]),
             draft: BTreeMap::new(),
+            missions: Vec::new(),
+            moves: Vec::new(),
+            moves_more: 0,
         };
         let m = BTreeMap::from([("task:t1".to_string(), 10), ("task:t2".to_string(), 25)]);
-        save(&d, &b, &m).unwrap();
+        save(&d, &b, &m, &[]).unwrap();
         assert_eq!(get(&d, "2026-11-04").unwrap(), Some(b));
         let e = crate::plan::estimates(&d).unwrap();
         assert_eq!(

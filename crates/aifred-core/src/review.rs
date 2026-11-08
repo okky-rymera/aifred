@@ -1176,6 +1176,7 @@ mod tests {
                 ..Default::default()
             },
             &BTreeMap::new(),
+            &[],
         )
         .unwrap();
         let p = pick(&d, &a, DROP, "", &today, now).unwrap();
@@ -1279,6 +1280,7 @@ mod tests {
                 ..Default::default()
             },
             &BTreeMap::new(),
+            &[],
         )
         .unwrap();
         s.set_done(a.strip_prefix("task:").unwrap(), true).unwrap();

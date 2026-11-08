@@ -41,14 +41,14 @@ export type AppCtx = {
   /** The "waiting for" list: the open items, then the items that closed in the last 3 days. */
   waiting: api.Waiting[];
   waitingError: string;
-  /** Items that are one piece of work in many places, and AIfred's suggestions (links.rs). */
+  /** The subtasks: each item under its parent (links.rs). */
   links: api.Links;
-  /** Puts `key` and its group under the main item of `main`, with an undo. */
+  /** Puts `key` under `main` as a subtask, with an undo. */
   linkItems: (main: string, key: string) => Promise<boolean>;
-  /** Takes an item out of its group, with an undo. */
+  /** Moves an item out from under its parent, with an undo. */
   unlinkItem: (key: string) => Promise<boolean>;
-  /** "Not the same work": AIfred does not suggest the pair again. */
-  rejectLink: (s: api.LinkSuggestion) => Promise<boolean>;
+  /** Undoes AIfred's moves from the brief: the items go back to where they were. */
+  undoMoves: (moves: api.Moved[]) => Promise<boolean>;
   trackEmail: (m: api.Mail, followUp?: string) => Promise<boolean>;
   hideSent: (m: api.Mail) => Promise<boolean>;
   addWaiting: (item: api.NewWaiting) => Promise<boolean>;
@@ -74,7 +74,8 @@ export type AppCtx = {
   models: { main: string | null; plan: string | null; item: string | null };
   setModel: (box: "main" | "plan" | "item", m: string | null) => void;
 
-  toggleDone: (i: Item) => void;
+  /** True when the item closed. */
+  toggleDone: (i: Item) => Promise<boolean>;
   /** The item that you work on now, or null. */
   work: api.Running | null;
   /** Starts work on an item. The work on another item stops. */
@@ -84,6 +85,16 @@ export type AppCtx = {
   finishItem: (key: string) => void;
   /** You say that the brief is wrong about an item. */
   correctBrief: (i: Item, kind: api.CorrectionKind) => void;
+  /** Ticks step `index` of a mission, or takes the tick away. */
+  missionStep: (m: api.Mission, index: number) => void;
+  /** You say that the brief is wrong about a mission. */
+  correctMission: (m: api.Mission, kind: api.CorrectionKind) => void;
+  /** Adds an open item to a mission, with an undo. */
+  addToMission: (m: api.Mission, key: string) => Promise<boolean>;
+  /** Takes an item out of a mission, with an undo. */
+  removeFromMission: (m: api.Mission, key: string) => Promise<boolean>;
+  /** The items in `close` close, then the mission is done. False when one item did not close. */
+  finishMission: (m: api.Mission, close: string[]) => Promise<boolean>;
   addTask: (fields: api.TaskChanges & { title: string }) => Promise<boolean>;
   /** Puts the steps that you picked on the item's task, or on a new task under the item, with an undo. */
   addSteps: (key: string, steps: string[]) => Promise<boolean>;

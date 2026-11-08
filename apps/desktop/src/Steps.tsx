@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import * as api from "./api";
 import { useApp } from "./ctx";
-import { groupOf, type Item } from "./items";
+import type { Item } from "./items";
 
 /** Who does a step: AIfred can draft its text later, or only you can do it. */
 export const DRAFT_TEXT: Record<api.DraftKind, string> = {
@@ -50,12 +50,23 @@ export function NextStep({ item: i }: { item: Item }) {
   );
 }
 
-/** Where the picked steps go, said before the click. Same rule as steps::add:
- * the item itself when it is an open task, else the first open task of its
- * group in the saved order, else a new task. */
+/** The task that holds the steps of `i`: `i` itself when it is an open
+ * task, else the first open task directly under `i` that the user placed
+ * there (steps.rs, add). Undefined: there is no such task. */
+export function stepTaskKey(i: Item, links: api.ItemLink[], byKey: Map<string, Item>): string | undefined {
+  const mine = links
+    .filter((l) => l.main === i.key && l.by !== "aifred")
+    .map((l) => l.key)
+    .sort();
+  const order = [i.key, ...mine];
+  return order.find((k) => k.startsWith("task:") && byKey.get(k)?.done === false);
+}
+
+/** Where the picked steps go, said before the click: the task of
+ * stepTaskKey(), else a new task. A task that AIfred placed in the tree
+ * can be other work, so it does not count. */
 function target(i: Item, links: api.ItemLink[], byKey: Map<string, Item>): string {
-  const order = [i.key, ...groupOf(links, i.key).filter((k) => k !== i.key)];
-  const k = order.find((k) => k.startsWith("task:") && byKey.get(k)?.done === false);
+  const k = stepTaskKey(i, links, byKey);
   if (k === i.key) return "the checklist of this task";
   if (k) return `the checklist of your task "${byKey.get(k)?.title}"`;
   return "a new task of yours, under this item";

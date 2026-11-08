@@ -230,27 +230,66 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - This tick is the only change AIfred makes in ClickUp. The chat can only read ClickUp.
 - The token never goes into the tool settings file that Claude reads. The ClickUp tool server reads the token itself.
 
-## One piece of work in many places
+## Subtasks
 
-A ClickUp task, its GitHub pull request, and an email about it can be one piece of work. Link them, and the home list shows one row for them (`crates/aifred-core/src/links.rs`).
+An item can be a subtask of another item, with many levels. For example, the GitHub issue goes under the ClickUp task DEV-123, and the pull request goes under the issue. The subtasks exist only in AIfred. ClickUp and GitHub do not change (`crates/aifred-core/src/links.rs`).
 
-- The row is the main item. The other items show under it after "Also in". Click one to open it.
-- When the main item is finished or closed, the next open item of the group becomes the row.
+- The home list shows one row for each tree. The row is the top item. Its open subtasks show under it after "Subtasks". Click one to open it.
+- When the top item is finished or closed, the next open item of the tree becomes the row.
 - The row shows the earliest due day and the highest priority of its open items. So a GitHub row with a late ClickUp task in it shows under "Needs you now".
-- The tick, "Start", and "+ Plan" of the row act on the main item.
-- To link items yourself, open an item and click "+ Link another item" under "Same work". Type words of the other item's title.
-- "Unlink" under "Same work" shows an item as its own row again. When you unlink the main item, the next item becomes the main item.
-- Each link and unlink has an Undo.
-- One piece of work can have at most 10 items.
+- The tick, "Start", and "+ Plan" of the row act on the top item.
+- The item panel shows the tree under "Subtasks", each level indented.
+- To add a subtask, open the parent item and click "+ Add a subtask". Type words of the other item's title.
+- "Move out" takes an item out from under its parent. Its own subtasks go with it.
+- An item cannot go under itself or under one of its own subtasks.
+- When an item is deleted, or its source is disconnected, its subtasks move up to its parent.
+- Each change has an Undo.
+- One tree can have at most 10 items.
+- Each link keeps who placed it (you or AIfred) and AIfred's reason. The item panel shows AIfred's reason next to the item.
+- In the chat, you can ask AIfred to put an item under another item, or to move it out (the `move_item` tool).
 
-AIfred suggests links in the "Same work?" card on the home page. A suggestion needs no AI call. It comes from these rules, only for items from different sources:
+### AIfred sorts new items
 
-- One item names the other: a GitHub link, "acme/shop#7", a ClickUp link, a ClickUp id like "DEV-42", or "CU-86a1b2".
-- The titles have mostly the same words: at least 2 words in common, and at least 60% of all their words. Short and common words ("fix", "the", "add") do not count.
+When new items come in, AIfred puts them into trees by itself. It does not ask first (`crates/aifred-core/src/sort.rs`).
 
-"Link" accepts a suggestion. "Not the same" rejects it, and AIfred does not suggest that pair again. The main item of a suggestion is your own task first, then the ClickUp task, then the GitHub item, then the email.
+- The sort runs after each GitHub, ClickUp, or Gmail download, after you add a task, after a chat, and when the app starts.
+- Only new items cost an AI call. One call sorts up to 20 new items. With only one open item, there is no call.
+- Clues help the AI: a pull request closes an issue, or one item names the other (a GitHub link, `owner/repo#7`, a ClickUp link, or `DEV-42`).
+- The parent is the item that plans or holds the work. A ClickUp task is the parent of its GitHub issue. An issue is the parent of its pull request.
+- Each move has a new item in it. So AIfred does not move old items around again and again.
+- AIfred never moves an item that you placed. Your own move, "Move out", and an Undo of AIfred's move all count as your choice.
+- An Undo of your own move puts everything back as it was before the move. AIfred can sort the items again, as before.
+- The brief tells you what AIfred moved since the brief of the day before, with the reason. For one move: "I made X a subtask of Y." For more: "I reorganized several tasks:" and one line for each parent. The app writes this part from a log, not the AI, so it is always true.
+- Each line has an Undo. The item goes back to where it was, and AIfred does not move it again.
+- The note shows at most 5 lines first. "Show N more" shows the rest. The first sort after the update can move many old items.
+- The screen shows the new trees and the note as soon as a sort moves items. The note needs today's brief: without a brief, open the item to see AIfred's reason.
 
-The brief and the chat get the linked items as one piece of work (`same_work` in the overview).
+The brief and the chat see the trees: each subtask has a `parent` in the overview. When the parent is closed, the next open item above it is the parent.
+
+## Missions
+
+A mission is the next small piece of work: usually one open item, sometimes two small items that you do together. For a tree of subtasks, the mission is the next open subtask, not the full tree (`crates/aifred-core/src/missions.rs`).
+
+- The brief call gives at most 7 missions for today, the most important first. It costs no extra AI call.
+- The home page shows only these missions. "Needs you now" shows the urgent items that are in no mission. The other open items are behind the line "Show other open items (N)". "See all tasks" opens the Tasks page with all items.
+- Before the brief makes missions, the home page shows the list in groups, as before.
+- A mission shows the reason, the next action, and the goal of its first item. Its first item is the item of the next action.
+- When the first item is a subtask, the mission shows its parent: "Part of DEV-123 Checkout totals". Click the parent to open it.
+- An item is in at most one mission. A mission has only the items that the brief named, not their full tree (see "Subtasks"). A mission is the next small piece of work.
+- AIfred groups items into a mission by itself. It does not ask you first.
+- A mission keeps its checklist from day to day while its items stay. The brief keeps a mission when it gives the same mission id and some items stay, or when half of its open items or more stay.
+- A new mission with more than one action gets 2 to 6 steps from the brief.
+- Progress is (steps done + items closed) / (all steps + all items). The panel shows the numbers. For example, 1 of 2 steps done and 1 of 3 items closed is (1 + 1) / (2 + 3) = 40%.
+- Click a mission to open its panel. The panel shows its items, its checklist, and these actions:
+  - "Start": starts the work timer on the first open item.
+  - "Done": asks which items are finished too. Then each picked item closes. One Undo opens the mission and its closed tasks and emails again. A closed ClickUp task keeps its own Undo. A GitHub item cannot close here, because AIfred only reads GitHub.
+  - "Not today" and "Wrong priority": a correction of each open item of the mission (see "Corrections of the brief"). The mission leaves the home page for today. The message has an undo.
+  - "Take out" on an item: the item leaves the mission. The brief never puts it back in this mission. It can still get a mission of its own. The last open item cannot go out: use "Done" or "Not today".
+  - "Add an item": pick an open item. It leaves its other mission. The brief does not take it away from this mission.
+  - Each "Take out" and "Add an item" message has an undo. The item goes back to where it was.
+- In the chat, you can ask AIfred to add an item to a mission or to take one out (the `add_to_mission` and `remove_from_mission` tools). The same rules apply. The chat has no undo button: ask the chat to change it back. The home page shows the change when the answer comes.
+- A tick in the checklist does not change the items.
+- An open mission that did not change for 14 days, and that today's brief did not rank, goes away.
 
 ## Suggested work
 

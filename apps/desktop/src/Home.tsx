@@ -1,15 +1,17 @@
-// Home: the brief from AIfred, the day plan in one line, and the list in
-// groups. The box at the bottom adds a task or asks AIfred.
+// Home: the brief from AIfred, the day plan in one line, and today's
+// missions. The other open items are behind one line. Before the brief
+// has missions, the home page shows the list in groups. The box at the
+// bottom adds a task or asks AIfred.
 import { useEffect, useMemo, useState } from "react";
 import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
 import { GoalTag, GoalsCard } from "./Goals";
 import { DayCheckCard, WeekReviewCard } from "./Review";
-import { LinksCard, srcText } from "./Links";
+import { srcText } from "./Links";
 import { WaitingCard } from "./Waiting";
-import { NextStep } from "./Steps";
-import { SRC_NAME, addDays, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, type Item } from "./items";
+import { NextStep, stepTaskKey } from "./Steps";
+import { SRC_NAME, addDays, parentOf, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, type Item } from "./items";
 
 export function Check(props: { item: Item }) {
   const { toggleDone } = useApp();
@@ -90,6 +92,8 @@ export function DueChip({ day }: { day: string | null }) {
 /** The reason from the brief, and two buttons to correct it. AIfred learns from the corrections. */
 function Why({ item: i }: { item: Item }) {
   const { correctBrief } = useApp();
+  // A tree row can show the reason of a subtask: the buttons correct that subtask.
+  const name = i.linked?.find((l) => l.key === i.whyKey)?.title ?? i.title;
   return (
     <div className="why-line">
       <span className="why">
@@ -98,7 +102,7 @@ function Why({ item: i }: { item: Item }) {
       <span className="fix">
         <button
           className="linkbtn"
-          aria-label={`Not today: ${i.title}`}
+          aria-label={`Not today: ${name}`}
           title="This does not need you today. The brief stops counting it for today."
           onClick={() => correctBrief(i, "not_today")}
         >
@@ -106,7 +110,7 @@ function Why({ item: i }: { item: Item }) {
         </button>
         <button
           className="linkbtn"
-          aria-label={`Wrong priority: ${i.title}`}
+          aria-label={`Wrong priority: ${name}`}
           title="The brief ranked this too high. AIfred ranks it lower from now on, and learns from repeated corrections."
           onClick={() => correctBrief(i, "wrong_priority")}
         >
@@ -133,7 +137,7 @@ function useTick(on: boolean) {
 }
 
 function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: boolean }) {
-  const { sel, open, sched, addToPlan, tomorrow, today, work, startWork } = useApp();
+  const { sel, open, sched, addToPlan, tomorrow, today, work, startWork, links, byKey } = useApp();
   const i = props.item;
   // A row of linked items is in the plan when one of its items is.
   const keys = [i.key, ...(i.linked ?? []).map((l) => l.key)];
@@ -145,8 +149,10 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
   const heldByLinked = (i.linked ?? []).some((l) => l.due !== null && l.due < addDays(today, 1));
   const working = !!work && keys.includes(work.key) && !i.done;
   useTick(working);
-  // The steps of your task, also when the task is linked under this row.
-  const stepTask = i.task ?? (i.linked ?? []).find((l) => l.task)?.task;
+  // The steps of your task, or of the task that "Suggest steps" fills: an
+  // open task directly under this item that you placed there.
+  const stepKey = i.task ? undefined : stepTaskKey(i, links.links, byKey);
+  const stepTask = i.task ?? (stepKey ? byKey.get(stepKey)?.task : undefined);
   const sub = stepTask?.checklist.length ? `${stepTask.checklist.filter((c) => c.done).length}/${stepTask.checklist.length} steps` : null;
   return (
     <li className={`row${i.done ? " done" : ""}${sel === i.key ? " sel" : ""}`} id={`row-${i.key}`}>
@@ -170,7 +176,7 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
         </div>
         {i.linked && i.linked.length > 0 && (
           <div className="linked-src">
-            <span>Also in</span>
+            <span>Subtasks</span>
             {i.linked.map((l) => (
               <button key={l.key} className="linkbtn" title={l.title} aria-label={`Open details: ${l.title}`} onClick={() => open(l.key)}>
                 {srcText(l)}
@@ -359,6 +365,83 @@ function PlanStrip() {
   );
 }
 
+/** The brief note shows this many lines of moves. A button shows the rest.
+ * The first sort after an update can move many old items. */
+const MOVES_SHOWN = 5;
+
+/** AIfred's moves of new items into subtasks (sort.rs), as a short note in
+ * the brief. Moves to one parent with one reason are one line. Each line has
+ * an Undo. The app writes this text from the move log, not the AI. */
+function MovesNote(props: { moves: api.Moved[]; more?: number }) {
+  const { open, byKey, undoMoves } = useApp();
+  const [busy, setBusy] = useState(false);
+  const [all, setAll] = useState(false);
+  const groups: api.Moved[][] = [];
+  for (const m of props.moves) {
+    const g = groups.find((x) => x[0].main === m.main && x[0].why === m.why);
+    if (g) g.push(m);
+    else groups.push([m]);
+  }
+  if (!groups.length) return null;
+  const name = (key: string, title: string) =>
+    byKey.has(key) ? (
+      <button className="linkbtn" onClick={() => open(key)}>
+        {title}
+      </button>
+    ) : (
+      <span>{title}</span>
+    );
+  const names = (g: api.Moved[]) =>
+    g.map((m, i) => (
+      <span key={m.id}>
+        {i > 0 && (i === g.length - 1 ? (g.length > 2 ? ", and " : " and ") : ", ")}
+        {name(m.key, m.title)}
+      </span>
+    ));
+  const undo = async (g: api.Moved[]) => {
+    setBusy(true);
+    await undoMoves(g);
+    setBusy(false);
+  };
+  const line = (g: api.Moved[], first: boolean) => (
+    <>
+      {first ? "I made " : ""}
+      {names(g)}
+      {first ? " a subtask of " : g.length > 1 ? " are now subtasks of " : " is now a subtask of "}
+      {name(g[0].main, g[0].main_title)}. {g[0].why}{" "}
+      <button className="linkbtn" disabled={busy} aria-label={`Undo: ${g.map((m) => m.title).join(", ")}`} onClick={() => undo(g)}>
+        Undo
+      </button>
+    </>
+  );
+  return (
+    <div className="btext moves" aria-label="What AIfred sorted">
+      {groups.length === 1 && groups[0].length === 1 ? (
+        <p>{line(groups[0], true)}</p>
+      ) : (
+        <>
+          <p>I reorganized several tasks:</p>
+          <ul>
+            {(all ? groups : groups.slice(0, MOVES_SHOWN)).map((g) => (
+              <li key={g[0].id}>{line(g, false)}</li>
+            ))}
+          </ul>
+          {!all && groups.length > MOVES_SHOWN && (
+            <button className="linkbtn" onClick={() => setAll(true)}>
+              Show {groups.length - MOVES_SHOWN} more
+            </button>
+          )}
+        </>
+      )}
+      {!!props.more && (
+        <p className="hintx">
+          {props.more} older {props.more === 1 ? "move is" : "moves are"} not in this list. Open an item to see its subtasks and AIfred's reasons. "Move out" there takes an item out of a tree.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function BriefCard(props: { needYou: number }) {
   const { brief, briefState, writeBrief, open, byKey, sendMain, main } = useApp();
   const written = brief ? new Date(brief.written * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
@@ -378,7 +461,10 @@ function BriefCard(props: { needYou: number }) {
         </button>
       </div>
       {brief ? (
-        <Md className="btext" text={brief.text} onItem={open} hasItem={(k) => byKey.has(k)} />
+        <>
+          <Md className="btext" text={brief.text} onItem={open} hasItem={(k) => byKey.has(k)} />
+          {!!brief.moves?.length && <MovesNote moves={brief.moves} more={brief.moves_more} />}
+        </>
       ) : briefState === "writing" ? (
         <div className="btext wait">AIfred is reading your tasks, GitHub, ClickUp, and email to write today's brief…</div>
       ) : (
@@ -479,16 +565,9 @@ function useGroups(given?: Groups): Groups {
   return given ?? own!;
 }
 
-/** The user's raw list in groups: "Needs you now", "Today", "New", "Open",
- * with "Later" and "Finished" behind buttons. Home and the Tasks page show it.
- * `before` goes before the buttons under the groups. `empty` is the text for
- * an empty list. `groups`: the groups when the caller has them already. */
-export function TaskGroups(props: { before?: React.ReactNode; empty?: string; groups?: Groups }) {
+/** The state of the lists: loading, errors, and warnings. */
+function ListNotes() {
   const { githubState, clickupState, githubWarning, clickupWarning, mailState, mailWarning, tasksError } = useApp();
-  const [showLater, setShowLater] = useState(false);
-  const [showDone, setShowDone] = useState(false);
-  const g = useGroups(props.groups);
-  const nothing = !g.now.length && !g.today.length && !g.isNew.length && !g.soon.length;
   return (
     <>
       {tasksError && <div className="note-line err">Cannot load your tasks: {tasksError}</div>}
@@ -500,6 +579,24 @@ export function TaskGroups(props: { before?: React.ReactNode; empty?: string; gr
       {!["loading", "ok", "off"].includes(clickupState) && <div className="note-line err">ClickUp: {clickupState}</div>}
       {mailWarning && mailState === "ok" && <div className="note-line warn">{mailWarning}</div>}
       {!["loading", "ok", "off"].includes(mailState) && <div className="note-line err">Gmail: {mailState}</div>}
+    </>
+  );
+}
+
+/** The user's raw list in groups: "Needs you now", "Today", "New", "Open",
+ * with "Later" and "Finished" behind buttons. Home and the Tasks page show it.
+ * `before` goes before the buttons under the groups. `empty` is the text for
+ * an empty list. `groups`: the groups when the caller has them already.
+ * `noNotes`: the caller shows the state of the lists itself. */
+export function TaskGroups(props: { before?: React.ReactNode; empty?: string; groups?: Groups; noNotes?: boolean }) {
+  const { githubState, tasksError } = useApp();
+  const [showLater, setShowLater] = useState(false);
+  const [showDone, setShowDone] = useState(false);
+  const g = useGroups(props.groups);
+  const nothing = !g.now.length && !g.today.length && !g.isNew.length && !g.soon.length;
+  return (
+    <>
+      {!props.noNotes && <ListNotes />}
       <Group title="Needs you now" list={g.now} alert why />
       <Group title="Today" list={g.today} hideToday why />
       <Group title="New" list={g.isNew} why />
@@ -538,9 +635,340 @@ export function TaskGroups(props: { before?: React.ReactNode; empty?: string; gr
   );
 }
 
+/** The text that says how AIfred got the progress of a mission. */
+function progressText(p: api.MissionProgress): string {
+  return `${p.steps_done} of ${p.steps} steps done and ${p.items_closed} of ${p.items} items closed: (${p.steps_done} + ${p.items_closed}) / (${p.steps} + ${p.items}) = ${p.percent}%`;
+}
+
+/** Why an item of a mission can or cannot close from the "Done" question. */
+function closeTip(i: Item | undefined): string {
+  if (!i) return "This item is not in your list now.";
+  if (i.gh) return "GitHub is read-only. The item leaves the list when it closes on GitHub.";
+  if (i.cu) return "Close this task in ClickUp";
+  if (i.mail) return "No answer needed: hide this email until a new message comes. Gmail does not change.";
+  return "Finish this task";
+}
+
+/** "Done" on a mission: you pick the items that are finished too. */
+function FinishMission({ m, onCancel }: { m: api.Mission; onCancel: () => void }) {
+  const { byKey, finishMission } = useApp();
+  const open = m.items.filter((i) => i.open);
+  const canClose = (k: string) => {
+    const i = byKey.get(k);
+    return !!i && !i.gh;
+  };
+  const [pick, setPick] = useState(() => new Set(open.filter((i) => canClose(i.key)).map((i) => i.key)));
+  const [busy, setBusy] = useState(false);
+  const flip = (k: string) =>
+    setPick((s) => {
+      const n = new Set(s);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
+  return (
+    <div className="m-panel" role="group" aria-label={`Finish mission: ${m.title}`}>
+      <div className="d-sec">Which items are finished too?</div>
+      {open.length === 0 ? (
+        <p className="m-note">All items of this mission are closed.</p>
+      ) : (
+        <ul className="m-items">
+          {open.map((i) => (
+            <li key={i.key}>
+              <label title={closeTip(byKey.get(i.key))}>
+                <input type="checkbox" disabled={!canClose(i.key)} checked={pick.has(i.key)} onChange={() => flip(i.key)} /> {i.title}
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="m-acts">
+        <button
+          className="btn pri"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            if (!(await finishMission(m, [...pick]))) setBusy(false);
+          }}
+        >
+          Finish mission
+        </button>
+        <button className="btn" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The panel of an open mission: its items, its checklist, how AIfred got
+ * the progress, and the actions. A tick in the checklist does not change the items. */
+function MissionPanel({ m, onDone }: { m: api.Mission; onDone: () => void }) {
+  const { byKey, items, open, startWork, work, missionStep, correctMission, addToMission, removeFromMission } = useApp();
+  const [busy, setBusy] = useState(false);
+  // The last open item cannot go out: for that, use Done or Not today.
+  const openCount = m.items.filter((i) => i.open).length;
+  // The open items that you can add: all open items that are not in this mission.
+  const addable = useMemo(() => {
+    const inIt = new Set(m.items.map((i) => i.key));
+    return items.filter((i) => !i.done && !inIt.has(i.key)).sort((a, b) => a.title.localeCompare(b.title));
+  }, [items, m.items]);
+  const act = (f: () => Promise<boolean>) => {
+    setBusy(true);
+    void f().finally(() => setBusy(false));
+  };
+  // Start works on the item of the next action, or else on the first open item.
+  const first = m.items.find((i) => i.open);
+  const working = !!work && m.items.some((i) => i.key === work.key);
+  const p = m.progress;
+  return (
+    <div className="m-panel" role="group" aria-label={`Mission: ${m.title}`}>
+      <div className="d-sec">
+        Items <span className="c">{p.items_closed}/{p.items} closed</span>
+      </div>
+      <ul className="m-items">
+        {m.items.map((i) => {
+          const it = byKey.get(i.key);
+          return (
+            <li key={i.key} className={i.open ? "" : "sd"}>
+              {it ? (
+                <button className="linkbtn" aria-label={`Open details: ${i.title}`} onClick={() => open(i.key)}>
+                  {i.title}
+                </button>
+              ) : (
+                <span>{i.title}</span>
+              )}
+              {it && <span className="m-src">{srcText(it)}</span>}
+              {/* AIfred cannot see why an outside item left your list: it is closed there, or it is not yours now. */}
+              {!i.open && <span className="m-src">{i.key.startsWith("task:") ? "Closed" : "Left your list"}</span>}
+              {i.open && i.by === "you" && <span className="m-src">You added it</span>}
+              {i.open && openCount > 1 && (
+                <button
+                  className="linkbtn m-out"
+                  disabled={busy}
+                  aria-label={`Take out of the mission: ${i.title}`}
+                  title="This item is not part of this work. AIfred does not put it back in this mission."
+                  onClick={() => act(() => removeFromMission(m, i.key))}
+                >
+                  Take out
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {addable.length > 0 && (
+        <select
+          className="m-add"
+          aria-label={`Add an item to the mission: ${m.title}`}
+          title="The item leaves its other mission. AIfred keeps it in this one."
+          disabled={busy}
+          value=""
+          onChange={(e) => {
+            const key = e.target.value;
+            if (key) act(() => addToMission(m, key));
+          }}
+        >
+          <option value="">Add an item…</option>
+          {addable.map((i) => (
+            <option key={i.key} value={i.key}>
+              {i.title}
+            </option>
+          ))}
+        </select>
+      )}
+      {m.checklist.length > 0 && (
+        <>
+          <div className="d-sec">
+            Checklist <span className="c">{p.steps_done}/{p.steps}</span>
+          </div>
+          <ul className="steps m-steps">
+            {m.checklist.map((c, n) => (
+              <li key={`${n}-${c.text}`}>
+                <button className="chk" aria-pressed={c.done} aria-label={`Step done: ${c.text}`} onClick={() => missionStep(m, n)} />
+                <span className={`st${c.done ? " sd" : ""}`}>{c.text}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <p className="m-note">Progress: {progressText(p)}. A tick in the checklist does not close an item.</p>
+      <div className="m-acts">
+        {first && !working && (
+          <button className="btn" title="Start work on this. AIfred keeps the real time, to make better time guesses." onClick={() => startWork(first.key)}>
+            Start
+          </button>
+        )}
+        <button className="btn pri" onClick={onDone}>
+          Done
+        </button>
+        <span className="sp" />
+        {/* A correction is for open items. With none left, finish the mission. */}
+        {first && (
+          <>
+            <button
+              className="linkbtn"
+              aria-label={`Not today: ${m.title}`}
+              title="This does not need you today. The brief stops counting it for today."
+              onClick={() => correctMission(m, "not_today")}
+            >
+              Not today
+            </button>
+            <button
+              className="linkbtn"
+              aria-label={`Wrong priority: ${m.title}`}
+              title="The brief ranked this too high. AIfred ranks its items lower from now on."
+              onClick={() => correctMission(m, "wrong_priority")}
+            >
+              Wrong priority
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** One mission of today: the title, the progress, and the reason and the
+ * next action of its first open item. A click opens its panel. */
+function MissionCard({ m }: { m: api.Mission }) {
+  const { byKey, work, links, open } = useApp();
+  const [show, setShow] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  // The first item has the next action. When it closed, the next open item leads.
+  const leadKey = m.items.find((i) => i.open)?.key;
+  const lead = leadKey ? byKey.get(leadKey) : undefined;
+  const working = !!work && m.items.some((i) => i.key === work.key);
+  useTick(working);
+  // The parent of the lead item is the context of the mission: "Part of DEV-123".
+  const parentKey = leadKey ? parentOf(links.links, leadKey) : undefined;
+  const parent = parentKey && !m.items.some((i) => i.key === parentKey) ? byKey.get(parentKey) : undefined;
+  const p = m.progress;
+  const toggle = () => {
+    setShow((s) => !s);
+    setFinishing(false);
+  };
+  return (
+    <li className={`row mission${show ? " sel" : ""}`} id={`mission-${m.id}`}>
+      <span className="m-pct" title={progressText(p)} aria-hidden>
+        {p.percent}%
+      </span>
+      <div className="t-col">
+        <div
+          className="t-main"
+          role="button"
+          tabIndex={0}
+          aria-expanded={show}
+          aria-label={`${show ? "Close" : "Open"} mission: ${m.title}`}
+          onClick={toggle}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              toggle();
+            }
+          }}
+        >
+          <span className="t-title">{m.title}</span>
+          <div className="meta">
+            <span title={progressText(p)}>{p.percent}% done</span>
+            <span>
+              {m.items.length} item{m.items.length === 1 ? "" : "s"}
+            </span>
+            {m.checklist.length > 0 && (
+              <span>
+                {p.steps_done}/{p.steps} steps
+              </span>
+            )}
+            {m.doer === "aifred" && <span className="tagc">AIfred does the next step</span>}
+            {working && <span className="planned working">Working {dur(workMinutes(work!))}</span>}
+          </div>
+        </div>
+        {parent && (
+          <div className="part-of">
+            Part of{" "}
+            <button className="linkbtn" aria-label={`Open details: ${parent.title}`} onClick={() => open(parent.key)}>
+              {parent.title}
+            </button>
+          </div>
+        )}
+        {lead?.why && (
+          <div className="why-line">
+            <span className="why">
+              {lead.why} <GoalTag goal={lead.goal} ranked />
+            </span>
+          </div>
+        )}
+        {lead && <NextStep item={lead} />}
+        {show && (finishing ? <FinishMission m={m} onCancel={() => setFinishing(false)} /> : <MissionPanel m={m} onDone={() => setFinishing(true)} />)}
+      </div>
+      <span />
+    </li>
+  );
+}
+
+/** Today's missions, the urgent items in no mission, and the other open
+ * items behind one closed line. */
+function Missions({ missions, more }: { missions: api.Mission[]; more: React.ReactNode }) {
+  const { items, links, today } = useApp();
+  const [showOther, setShowOther] = useState(false);
+  // The rows are built again from the items that are in no mission: the
+  // missions show the others. So each tree row gets its due day, priority,
+  // reason, and next action only from the items that it still shows. An
+  // urgent subtask in no mission stays in "Needs you now", also when the
+  // top item of its tree is in a mission: it is then the row.
+  const other = useMemo(() => {
+    const inMission = new Set(missions.flatMap((m) => m.items.map((i) => i.key)));
+    return groupItems(
+      joinLinked(
+        items.filter((i) => !inMission.has(i.key)),
+        links.links,
+      ),
+      today,
+    );
+  }, [missions, items, links.links, today]);
+  // "Needs you now" always shows: an urgent item must not hide behind the line.
+  const hidden = useMemo(() => ({ ...other, now: [] }), [other]);
+  const n = other.today.length + other.isNew.length + other.soon.length + other.later.length;
+  return (
+    <>
+      <ListNotes />
+      <div className="group-h">
+        Today's missions <span className="c">{missions.length}</span>
+      </div>
+      <ul className="list card-list" aria-label="Today's missions">
+        {missions.map((m) => (
+          <MissionCard key={m.id} m={m} />
+        ))}
+      </ul>
+      <Group title="Needs you now" list={other.now} alert why />
+      <div className="more">
+        <button className="linkbtn" aria-expanded={showOther} onClick={() => setShowOther((s) => !s)} title="The open items that are in no mission today">
+          {showOther ? "Hide" : "Show"} other open items ({n})
+        </button>
+        {more}
+      </div>
+      {showOther && <TaskGroups groups={hidden} noNotes empty="No other open items." />}
+    </>
+  );
+}
+
 export function Home() {
-  const { reviewCards, setReviewCard, today, goTasks } = useApp();
+  const { reviewCards, setReviewCard, today, goTasks, brief } = useApp();
   const g = useGroups();
+  const missions = brief?.missions ?? [];
+  const more = (
+    <>
+      <button className="linkbtn" onClick={() => setReviewCard("day", "open")} title="What you finished today, and what moves to tomorrow">
+        End the day
+      </button>
+      <button className="linkbtn" onClick={() => setReviewCard("week", "open")} title="Check your goals and the items that did not move for 3 weeks">
+        Weekly review
+      </button>
+      <button className="linkbtn" onClick={goTasks} title="Your tasks and AIfred's tasks">
+        See all tasks
+      </button>
+    </>
+  );
   const hour = new Date().getHours();
   const hello = hour < 12 ? "Good morning." : hour < 18 ? "Good afternoon." : "Good evening.";
   return (
@@ -556,23 +984,8 @@ export function Home() {
           <BriefCard needYou={g.now.length + g.today.length} />
           {reviewCards.week !== "hidden" && <WeekReviewCard force={reviewCards.week === "open"} onClose={() => setReviewCard("week", "hidden")} />}
           <WaitingCard />
-          <LinksCard />
-          <TaskGroups
-            groups={g}
-            before={
-              <>
-                <button className="linkbtn" onClick={() => setReviewCard("day", "open")} title="What you finished today, and what moves to tomorrow">
-                  End the day
-                </button>
-                <button className="linkbtn" onClick={() => setReviewCard("week", "open")} title="Check your goals and the items that did not move for 3 weeks">
-                  Weekly review
-                </button>
-                <button className="linkbtn" onClick={goTasks} title="Your tasks and AIfred's tasks">
-                  See all tasks
-                </button>
-              </>
-            }
-          />
+          {/* Before the brief makes missions, the list in groups. */}
+          {missions.length > 0 ? <Missions missions={missions} more={more} /> : <TaskGroups groups={g} before={more} />}
         </div>
       </div>
       <div className="a-foot">

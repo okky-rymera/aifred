@@ -45,7 +45,7 @@ use aifred_core::{Answer, Assistant, default_data_dir};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Runtime, State, Window, ipc::Channel};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, Window, ipc::Channel};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use tokio::sync::Mutex;
 
@@ -228,6 +228,8 @@ struct App {
     /// number, not a signal: a login started before the change sees it
     /// also when it was not waiting yet.
     google_login: tokio::sync::watch::Sender<u64>,
+    /// The app, for events to the window. The setup sets it. The tests have none.
+    handle: Arc<std::sync::OnceLock<AppHandle>>,
 }
 
 impl App {
@@ -243,6 +245,7 @@ impl App {
             background,
             meaning,
             update: Arc::new(update),
+            handle: Arc::default(),
         }
     }
 
@@ -300,6 +303,28 @@ impl App {
         tauri::async_runtime::spawn(async move {
             if let Err(e) = a.summarize_items().await {
                 eprintln!("aifred: cannot write the item summaries: {e:#}");
+            }
+        });
+    }
+
+    /// Puts the new items into the subtask trees in the background
+    /// (sort.rs). Each group of new items is one AI call. It does nothing
+    /// when no item is new.
+    fn sort_items(&self) {
+        if !self.background {
+            return;
+        }
+        let (a, handle) = (self.assistant.clone(), self.handle.clone());
+        tauri::async_runtime::spawn(async move {
+            match a.sort_items().await {
+                // The window reads the trees and the brief again.
+                Ok(n) if n > 0 => {
+                    if let Some(h) = handle.get() {
+                        let _ = h.emit("items-sorted", ()); // api.ts ITEMS_SORTED
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("aifred: cannot sort the new items: {e:#}"),
             }
         });
     }
@@ -408,6 +433,7 @@ async fn ask(
     app.fill_vectors();
     app.summarize(None);
     app.summarize_items();
+    app.sort_items();
     Ok(answer)
 }
 
@@ -533,6 +559,7 @@ async fn add_task(app: State<'_, App>, task: TaskFields) -> CmdResult<Task> {
     let t = blocking(&app, move |a| a.tasks().create(task, "you")).await?;
     app.fill_vectors();
     app.summarize_items();
+    app.sort_items();
     Ok(t)
 }
 
@@ -784,6 +811,7 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
             // Only new and changed items get new vectors and summaries.
             app.fill_vectors();
             app.summarize_items();
+            app.sort_items();
             Ok(list)
         }
         Err(e) => {
@@ -877,7 +905,10 @@ async fn gmail_threads(app: State<'_, App>, force: bool) -> CmdResult<Option<Mai
         }
     }
     match gmail::download_and_save(&dir).await {
-        Ok(list) => Ok(list),
+        Ok(list) => {
+            app.sort_items();
+            Ok(list)
+        }
         Err(e) => {
             let e = err(e);
             let saved = blocking(&app, move |_| gmail::cached(&dir, u64::MAX, now())).await;
@@ -934,27 +965,41 @@ async fn delete_waiting(app: State<'_, App>, id: i64) -> CmdResult<()> {
     blocking(&app, move |a| waiting::delete(&a.dir, id)).await
 }
 
-/// One piece of work in many places (links.rs): the links and the suggestions.
+/// Subtasks (links.rs): each item under its parent.
 #[tauri::command]
 async fn item_links(app: State<'_, App>) -> CmdResult<Links> {
     blocking(&app, |a| links::get(&a.dir)).await
 }
 
-/// Puts `key` and its group under the main item of `main`.
+/// Puts `key` under `main` as a subtask, with its own subtasks. The answer
+/// also has how things were before, for the Undo (restore_link).
 #[tauri::command]
-async fn link_items(app: State<'_, App>, main: String, key: String) -> CmdResult<Links> {
-    blocking(&app, move |a| links::link(&a.dir, &main, &key, now())).await
+async fn link_items(app: State<'_, App>, main: String, key: String) -> CmdResult<links::Changed> {
+    blocking(&app, move |a| {
+        links::link_undoable(&a.dir, &main, &key, now())
+    })
+    .await
 }
 
+/// The Undo of a move by the user (link_items or unlink_item): the item
+/// and the sort marks go back to how they were before (`before`).
 #[tauri::command]
-async fn unlink_item(app: State<'_, App>, key: String) -> CmdResult<Links> {
-    blocking(&app, move |a| links::unlink(&a.dir, &key, now())).await
+async fn restore_link(app: State<'_, App>, before: links::Before) -> CmdResult<Links> {
+    blocking(&app, move |a| links::restore(&a.dir, &before, now())).await
 }
 
-/// "Not the same work" for a suggestion (`no` true), or its Undo (`no` false).
+/// Moves `key` out from under its parent, with its own subtasks. The
+/// answer also has how things were before, for the Undo (restore_link).
 #[tauri::command]
-async fn reject_link(app: State<'_, App>, a: String, b: String, no: bool) -> CmdResult<Links> {
-    blocking(&app, move |x| links::reject(&x.dir, &a, &b, no, now())).await
+async fn unlink_item(app: State<'_, App>, key: String) -> CmdResult<links::Changed> {
+    blocking(&app, move |a| links::unlink_undoable(&a.dir, &key, now())).await
+}
+
+/// Undoes AIfred's moves of items (sort.rs): each item goes back to where
+/// it was before. AIfred does not move these items again.
+#[tauri::command]
+async fn undo_moves(app: State<'_, App>, ids: Vec<i64>) -> CmdResult<Links> {
+    blocking(&app, move |a| aifred_core::sort::undo(&a.dir, &ids, now())).await
 }
 
 /// The Google connection (google.rs): the registration, the account, and the
@@ -1073,6 +1118,7 @@ async fn clickup_items(app: State<'_, App>, force: bool) -> CmdResult<ClickupLis
             .await?;
             app.fill_vectors();
             app.summarize_items();
+            app.sort_items();
             Ok(list)
         }
         Err(e) => {
@@ -1411,6 +1457,94 @@ async fn correct_brief(
     blocking(&app, move |a| learn::add(&a.dir, &key, &kind, &day, now())).await
 }
 
+/// The user ticks step `index` of a mission's checklist, or takes the
+/// tick away (missions.rs). The items of the mission do not change.
+#[tauri::command]
+async fn set_mission_step(
+    app: State<'_, App>,
+    id: i64,
+    index: usize,
+    done: bool,
+) -> CmdResult<aifred_core::missions::Mission> {
+    blocking(&app, move |a| {
+        aifred_core::missions::set_step(&a.dir, id, index, done, now())
+    })
+    .await
+}
+
+/// The mission is done. The app closes the items that the user picked
+/// first, with the commands of each item.
+#[tauri::command]
+async fn finish_mission(app: State<'_, App>, id: i64) -> CmdResult<()> {
+    blocking(&app, move |a| {
+        aifred_core::missions::finish(&a.dir, id, now())
+    })
+    .await
+}
+
+/// The undo of finish_mission: the mission is open again.
+#[tauri::command]
+async fn reopen_mission(app: State<'_, App>, id: i64) -> CmdResult<()> {
+    blocking(&app, move |a| {
+        aifred_core::missions::reopen(&a.dir, id, now())
+    })
+    .await
+}
+
+/// The user says that the brief of `day` is wrong about a mission: a
+/// correction of each open item of it (learn.rs), all saved or none.
+#[tauri::command]
+async fn correct_mission(
+    app: State<'_, App>,
+    id: i64,
+    kind: String,
+    day: String,
+) -> CmdResult<Vec<Corrected>> {
+    blocking(&app, move |a| {
+        aifred_core::missions::correct(&a.dir, id, &kind, &day, now())
+    })
+    .await
+}
+
+/// The user adds an open item to a mission (missions.rs). The brief does
+/// not take it away. The answer has what restore_mission_item needs to undo it.
+#[tauri::command]
+async fn add_mission_item(
+    app: State<'_, App>,
+    id: i64,
+    key: String,
+) -> CmdResult<aifred_core::missions::Changed> {
+    blocking(&app, move |a| {
+        aifred_core::missions::add_item(&a.dir, id, &key, now())
+    })
+    .await
+}
+
+/// The user takes an item out of a mission. The brief does not put it back.
+#[tauri::command]
+async fn remove_mission_item(
+    app: State<'_, App>,
+    id: i64,
+    key: String,
+) -> CmdResult<aifred_core::missions::Changed> {
+    blocking(&app, move |a| {
+        aifred_core::missions::remove_item(&a.dir, id, &key, now())
+    })
+    .await
+}
+
+/// The undo of add_mission_item and remove_mission_item.
+#[tauri::command]
+async fn restore_mission_item(
+    app: State<'_, App>,
+    before: aifred_core::missions::Before,
+) -> CmdResult<()> {
+    blocking(&app, move |a| {
+        aifred_core::missions::restore(&a.dir, &before, now())
+    })
+    .await
+}
+
 #[tauri::command]
 async fn undo_correction(app: State<'_, App>, id: i64) -> CmdResult<()> {
     blocking(&app, move |a| learn::undo(&a.dir, id)).await
@@ -1592,8 +1726,9 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         delete_waiting,
         item_links,
         link_items,
+        restore_link,
         unlink_item,
-        reject_link,
+        undo_moves,
         google_status,
         set_google_client,
         set_google_feature,
@@ -1639,6 +1774,13 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         estimates,
         set_estimate,
         correct_brief,
+        set_mission_step,
+        finish_mission,
+        reopen_mission,
+        correct_mission,
+        add_mission_item,
+        remove_mission_item,
+        restore_mission_item,
         undo_correction,
         day_check,
         finish_day,
@@ -1776,6 +1918,10 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
             // The plugin does not save or restore "visible", so this is the
             // only place that shows the window.
             show_main(app.handle());
+            let _ = app.state::<App>().handle.set(app.handle().clone());
+            // Items that came in while the app was closed, for example from
+            // the command-line program. After the handle: the sort tells the window.
+            app.state::<App>().sort_items();
             // AIfred's own jobs run while the app runs, also in the tray.
             scheduler::start(app.handle().clone());
             // Check for updates after the start, then on each interval.
@@ -1972,6 +2118,68 @@ mod tests {
             },
         )
         .map(|b| b.deserialize::<Value>().unwrap())
+    }
+
+    #[test]
+    fn mission_commands() {
+        let (_app, win, dir) = window("mission");
+        let key = |t: &str| {
+            let t = call(&win, "add_task", json!({ "task": { "title": t } })).unwrap();
+            format!("task:{}", t["id"].as_str().unwrap())
+        };
+        let (a, b) = (key("Write the post"), key("Send the post"));
+        let day = "2026-11-08";
+        aifred_core::brief::save(
+            &dir,
+            &Brief {
+                day: day.into(),
+                written: now(),
+                text: "Hi.".into(),
+                ..Default::default()
+            },
+            &Default::default(),
+            &[aifred_core::missions::Proposal {
+                id: None,
+                title: "Ship the post".into(),
+                keys: vec![a.clone(), b.clone()],
+                steps: vec!["Write".into(), "Send".into()],
+                doer: "you".into(),
+            }],
+        )
+        .unwrap();
+        let brief = call(&win, "brief", json!({ "day": day })).unwrap();
+        let m = &brief["missions"][0];
+        assert_eq!(m["title"], "Ship the post");
+        assert_eq!(m["items"][1]["key"], json!(b));
+        let id = m["id"].clone();
+        let m = call(
+            &win,
+            "set_mission_step",
+            json!({ "id": id, "index": 1, "done": true }),
+        )
+        .unwrap();
+        assert_eq!(m["checklist"][1]["done"], true);
+        assert_eq!(m["progress"]["percent"], 25);
+        let c = call(
+            &win,
+            "correct_mission",
+            json!({ "id": id, "kind": "not_today", "day": day }),
+        )
+        .unwrap();
+        assert_eq!(
+            c.as_array().unwrap().len(),
+            2,
+            "one correction for each item"
+        );
+        assert_eq!(
+            call(&win, "brief", json!({ "day": day })).unwrap()["missions"],
+            json!([]),
+            "a corrected mission is not in the list of that day"
+        );
+        call(&win, "finish_mission", json!({ "id": id })).unwrap();
+        assert!(call(&win, "finish_mission", json!({ "id": id })).is_err());
+        call(&win, "reopen_mission", json!({ "id": id })).unwrap();
+        assert!(call(&win, "reopen_mission", json!({ "id": id })).is_err());
     }
 
     #[test]
@@ -2258,7 +2466,7 @@ mod tests {
     fn link_commands_give_the_new_links() {
         let (_app, win, dir) = window("links");
         let l = call(&win, "item_links", json!({})).unwrap();
-        assert_eq!(l, json!({ "links": [], "suggestions": [] }));
+        assert_eq!(l, json!({ "links": [] }));
         let a = call(
             &win,
             "add_task",
@@ -2271,10 +2479,15 @@ mod tests {
             format!("task:{}", b["id"].as_str().unwrap()),
         );
         let l = call(&win, "link_items", json!({ "main": ka, "key": kb })).unwrap();
-        assert_eq!(l["links"], json!([{ "key": kb, "main": ka }]));
+        assert_eq!(
+            l["links"],
+            json!([{ "key": kb, "main": ka, "by": "you", "why": "" }])
+        );
         let l = call(&win, "unlink_item", json!({ "key": kb })).unwrap();
         assert_eq!(l["links"], json!([]));
-        call(&win, "reject_link", json!({ "a": ka, "b": kb, "no": true })).unwrap();
+        // The Undo puts the link back.
+        let l = call(&win, "restore_link", json!({ "before": l["before"] })).unwrap();
+        assert_eq!(l["links"][0]["main"], json!(ka));
         assert!(
             call(
                 &win,

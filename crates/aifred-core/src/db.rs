@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 19;
+const VERSION: i64 = 26;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -573,7 +573,7 @@ ALTER TABLE task ADD COLUMN updated INTEGER NOT NULL DEFAULT 0;
 UPDATE task SET updated = CAST(strftime('%s', 'now') AS INTEGER);
 ";
 
-/// One piece of work in many places (links.rs): the items that show under
+/// Subtasks (links.rs; one level only before SCHEMA_22): the items that show under
 /// another item, and the pairs that the user said are not one piece of work.
 const SCHEMA_16: &str = "
 CREATE TABLE item_link (
@@ -715,6 +715,99 @@ CREATE TRIGGER task_aifred_done AFTER UPDATE OF status ON task
 END;
 ";
 
+/// Missions (missions.rs): units of work that the brief makes from one or
+/// more items. `mission_item` gives each item at most one mission.
+const SCHEMA_20: &str = "
+CREATE TABLE mission (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  title     TEXT NOT NULL,
+  doer      TEXT NOT NULL DEFAULT 'you',  -- 'you' or 'aifred'
+  checklist TEXT NOT NULL DEFAULT '[]',   -- [{\"text\": \"...\", \"done\": false}]
+  day       TEXT,                         -- the day of the last brief that ranked it
+  rank      INTEGER,                      -- 1 is first in that brief; NULL: not ranked
+  status    TEXT NOT NULL DEFAULT 'open', -- 'open' or 'done'
+  created   INTEGER NOT NULL,
+  updated   INTEGER NOT NULL
+);
+CREATE INDEX mission_by_day ON mission(day, rank);
+
+CREATE TABLE mission_item (
+  key     TEXT PRIMARY KEY,               -- an item key: one item is in at most one mission
+  mission INTEGER NOT NULL REFERENCES mission(id) ON DELETE CASCADE,
+  pos     INTEGER NOT NULL                -- 0 is the item that the next action is about
+);
+CREATE INDEX mission_item_by_mission ON mission_item(mission, pos);
+";
+
+/// The "Same work?" card is gone (plan part 3b). So are the pairs that the
+/// user rejected in it: nothing blocks the brief for good.
+const SCHEMA_21: &str = "
+DROP TABLE link_no;
+";
+
+/// Subtasks (links.rs, plan part 3b): a row of `item_link` puts an item
+/// under its parent, with many levels. The old links were made by the user.
+const SCHEMA_22: &str = "
+ALTER TABLE item_link ADD COLUMN placed_by TEXT NOT NULL DEFAULT 'you';  -- 'you' or 'aifred'
+ALTER TABLE item_link ADD COLUMN why TEXT NOT NULL DEFAULT '';    -- AIfred's reason
+";
+
+/// The AI sort (sort.rs, plan part 3b step 2). `item_sort` has the items
+/// that the sort has seen. `fixed` = 1: the user placed the item (a move,
+/// "Move out", or an undo of an AI move), so the AI never moves it. `link_move` logs each
+/// move of the AI, for the brief and its Undo. The links from before were
+/// made by the user. (SCHEMA_25 fixes their parents too.)
+const SCHEMA_23: &str = "
+CREATE TABLE item_sort (
+  key   TEXT PRIMARY KEY,
+  ts    INTEGER NOT NULL,
+  fixed INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO item_sort (key, ts, fixed) SELECT key, ts, 1 FROM item_link;
+CREATE TABLE link_move (
+  id       INTEGER PRIMARY KEY,
+  ts       INTEGER NOT NULL,
+  key      TEXT NOT NULL,
+  main     TEXT NOT NULL,             -- the new parent
+  old_main TEXT NOT NULL DEFAULT '',  -- '' = it had no parent
+  old_by   TEXT NOT NULL DEFAULT '',
+  old_why  TEXT NOT NULL DEFAULT '',
+  why      TEXT NOT NULL
+);
+CREATE INDEX link_move_by_ts ON link_move(ts);
+";
+
+/// Smaller missions (missions.rs, plan part 3b step 3). `placed_by` of
+/// `mission_item` says who put the item in the mission: an item that the
+/// user added stays, and the brief cannot take it away. `mission_out` has
+/// the items that the user took out of a mission: the brief never puts them
+/// back in that mission. Only the user can add them again.
+const SCHEMA_24: &str = "
+ALTER TABLE mission_item ADD COLUMN placed_by TEXT NOT NULL DEFAULT 'aifred';  -- 'you' or 'aifred'
+CREATE TABLE mission_out (
+  mission INTEGER NOT NULL REFERENCES mission(id) ON DELETE CASCADE,
+  key     TEXT NOT NULL,
+  ts      INTEGER NOT NULL,
+  PRIMARY KEY (mission, key)
+);
+";
+
+/// SCHEMA_23 fixed only the subtask of each link that the user made. The
+/// parent must be fixed too: else the AI sort could move the top item of a
+/// tree that the user built. A parent that the sort saw already becomes
+/// fixed too. The parents of the AI's links stay free.
+const SCHEMA_25: &str = "
+INSERT INTO item_sort (key, ts, fixed)
+  SELECT main, MAX(ts), 1 FROM item_link WHERE placed_by = 'you' GROUP BY main
+  ON CONFLICT (key) DO UPDATE SET fixed = 1;
+";
+
+/// The brief and the Undo of AIfred's moves look up the last move of each
+/// item (sort.rs). Without this index, each lookup reads all of `link_move`.
+const SCHEMA_26: &str = "
+CREATE INDEX link_move_by_key ON link_move(key, id);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -842,6 +935,27 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 19 {
         tx.execute_batch(SCHEMA_19)?;
+    }
+    if version < 20 {
+        tx.execute_batch(SCHEMA_20)?;
+    }
+    if version < 21 {
+        tx.execute_batch(SCHEMA_21)?;
+    }
+    if version < 22 {
+        tx.execute_batch(SCHEMA_22)?;
+    }
+    if version < 23 {
+        tx.execute_batch(SCHEMA_23)?;
+    }
+    if version < 24 {
+        tx.execute_batch(SCHEMA_24)?;
+    }
+    if version < 25 {
+        tx.execute_batch(SCHEMA_25)?;
+    }
+    if version < 26 {
+        tx.execute_batch(SCHEMA_26)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -1278,6 +1392,94 @@ pub(crate) mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, VERSION);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_update_from_22_fixes_both_sides_of_the_old_links() {
+        let d = temp("v23");
+        // Load sqlite-vec into new connections, then make a version 22 file by hand.
+        let vec_dir = temp("v23-vec");
+        drop(open(&vec_dir).unwrap());
+        std::fs::remove_dir_all(&vec_dir).unwrap();
+        let c = Connection::open(path(&d)).unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        c.execute_batch(
+            &[
+                SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4, SCHEMA_5, SCHEMA_6, SCHEMA_7, SCHEMA_8,
+                SCHEMA_9, SCHEMA_10, SCHEMA_11, SCHEMA_12, SCHEMA_13, SCHEMA_14, SCHEMA_15,
+                SCHEMA_16, SCHEMA_17, SCHEMA_18, SCHEMA_19, SCHEMA_20, SCHEMA_21, SCHEMA_22,
+            ]
+            .concat(),
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 22).unwrap();
+        // The user put a pull request under a ClickUp task, which has a parent too.
+        c.execute_batch(
+            "INSERT INTO item_link (key, main, ts) VALUES ('github:a/b#1', 'clickup:c1', 5);
+             INSERT INTO item_link (key, main, ts) VALUES ('clickup:c1', 'clickup:top', 3);",
+        )
+        .unwrap();
+        drop(c);
+
+        let c = open(&d).unwrap();
+        let mut q = c
+            .prepare("SELECT key FROM item_sort WHERE fixed = 1 ORDER BY key")
+            .unwrap();
+        let fixed: Vec<String> = q
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(fixed, ["clickup:c1", "clickup:top", "github:a/b#1"]);
+        drop(q);
+        drop(c);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_update_to_25_fixes_the_parents_of_your_links_only() {
+        let d = temp("v25");
+        // Load sqlite-vec into new connections, then make a version 24 file by hand.
+        let vec_dir = temp("v25-vec");
+        drop(open(&vec_dir).unwrap());
+        std::fs::remove_dir_all(&vec_dir).unwrap();
+        let c = Connection::open(path(&d)).unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        c.execute_batch(
+            &[
+                SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4, SCHEMA_5, SCHEMA_6, SCHEMA_7, SCHEMA_8,
+                SCHEMA_9, SCHEMA_10, SCHEMA_11, SCHEMA_12, SCHEMA_13, SCHEMA_14, SCHEMA_15,
+                SCHEMA_16, SCHEMA_17, SCHEMA_18, SCHEMA_19, SCHEMA_20, SCHEMA_21, SCHEMA_22,
+                SCHEMA_23, SCHEMA_24,
+            ]
+            .concat(),
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 24).unwrap();
+        // Your link: its parent was seen by the sort, but is not fixed.
+        // AIfred's link: its parent stays free.
+        c.execute_batch(
+            "INSERT INTO item_link (key, main, ts, placed_by) VALUES ('github:a/b#1', 'clickup:c1', 5, 'you');
+             INSERT INTO item_link (key, main, ts, placed_by, why) VALUES ('github:a/b#2', 'clickup:c2', 6, 'aifred', 'x');
+             INSERT INTO item_sort (key, ts, fixed) VALUES ('github:a/b#1', 5, 1), ('clickup:c1', 4, 0),
+                                                         ('github:a/b#2', 6, 0), ('clickup:c2', 4, 0);",
+        )
+        .unwrap();
+        drop(c);
+
+        let c = open(&d).unwrap();
+        let mut q = c
+            .prepare("SELECT key FROM item_sort WHERE fixed = 1 ORDER BY key")
+            .unwrap();
+        let fixed: Vec<String> = q
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(fixed, ["clickup:c1", "github:a/b#1"]);
+        drop(q);
+        drop(c);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

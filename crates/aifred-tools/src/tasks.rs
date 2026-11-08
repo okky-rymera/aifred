@@ -8,6 +8,9 @@
 //!
 //! The goal tools change the user's goals (goals.rs) in the same database.
 //!
+//! The move tool puts an item under another item as a subtask (links.rs),
+//! in AIfred only.
+//!
 //! The waiting tools change the user's "waiting for" list (waiting.rs) in
 //! the same database. They cannot send or change email.
 
@@ -173,6 +176,22 @@ struct SetPlanArgs {
     day: Option<String>,
     /// All items of the plan, in the order of the day: the first item first. It replaces the old plan.
     items: Vec<PlanItemArg>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MoveArgs {
+    /// The item key of the item to move, from overview. For example github:acme/shop#7.
+    key: String,
+    /// The item key of the new parent. Leave it out to move the item out, with no parent.
+    parent: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MissionItemArgs {
+    /// The mission id, from `missions` in overview.
+    mission: i64,
+    /// The item key, from overview. For example github:acme/shop#7.
+    key: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -476,6 +495,45 @@ impl TaskTools {
     }
 
     #[tool(
+        description = "Put an item under another item as its subtask, or move it out with no parent. Any item can be a parent or a subtask: a task, a GitHub item, a ClickUp task, or an email. The subtasks of the item move with it. This is in AIfred only: GitHub and ClickUp do not change. AIfred does not move this item by itself again. Use it only when the user asks. The answer is all the links: key is the subtask, main is its parent."
+    )]
+    async fn move_item(
+        &self,
+        Parameters(a): Parameters<MoveArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = a.key.trim();
+        let links = match a.parent.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => aifred_core::links::link(&self.dir, p, key, now()),
+            None => aifred_core::links::unlink(&self.dir, key, now()),
+        };
+        json(&links.map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Add an open item to one of today's missions. The item leaves its other mission. The brief does not take it away from this mission. Use it only when the user asks. The answer is the mission with its items."
+    )]
+    async fn add_to_mission(
+        &self,
+        Parameters(a): Parameters<MissionItemArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let c = aifred_core::missions::add_item(&self.dir, a.mission, a.key.trim(), now())
+            .map_err(fail)?;
+        json(&c.mission)
+    }
+
+    #[tool(
+        description = "Take an item out of a mission. The brief never puts it back in this mission, but it can get a mission of its own. The last open item of a mission cannot go out: then the user can finish the mission or say \"Not today\" on the home page. Use it only when the user asks. The answer is the mission with its items."
+    )]
+    async fn remove_from_mission(
+        &self,
+        Parameters(a): Parameters<MissionItemArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let c = aifred_core::missions::remove_item(&self.dir, a.mission, a.key.trim(), now())
+            .map_err(fail)?;
+        json(&c.mission)
+    }
+
+    #[tool(
         description = "Mark a local task as done. Only do this when the user says the task is done."
     )]
     async fn complete_task(
@@ -580,6 +638,84 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(all.as_array().unwrap().len(), 2);
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn move_item_puts_an_item_under_another_and_out() {
+        let t = tools("move");
+        let a = t.store().add("Parent", "", "you").unwrap();
+        let b = t.store().add("Child", "", "you").unwrap();
+        let (ka, kb) = (format!("task:{}", a.id), format!("task:{}", b.id));
+        let l = body(
+            t.move_item(Parameters(MoveArgs {
+                key: kb.clone(),
+                parent: Some(ka.clone()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(l["links"][0]["main"], ka.as_str());
+        assert_eq!(l["links"][0]["by"], "you");
+        let l = body(
+            t.move_item(Parameters(MoveArgs {
+                key: kb.clone(),
+                parent: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(l["links"].as_array().unwrap().is_empty());
+        assert!(
+            t.move_item(Parameters(MoveArgs {
+                key: ka.clone(),
+                parent: Some(ka.clone()),
+            }))
+            .await
+            .is_err()
+        );
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_chat_adds_an_item_to_a_mission_and_takes_it_out() {
+        let t = tools("mission");
+        let k: Vec<String> = ["A", "B", "C"]
+            .iter()
+            .map(|n| format!("task:{}", t.store().add(n, "", "you").unwrap().id))
+            .collect();
+        let p = |keys: &[&String]| aifred_core::missions::Proposal {
+            id: None,
+            title: "Ship".into(),
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+            steps: Vec::new(),
+            doer: "you".into(),
+        };
+        aifred_core::db::write(&t.dir, |tx| {
+            aifred_core::missions::save_in(tx, "2026-11-08", &[p(&[&k[0], &k[1]])], 1)
+        })
+        .unwrap();
+        let id = aifred_core::missions::today(&t.dir, "2026-11-08").unwrap()[0].id;
+        let arg = |key: &String| {
+            Parameters(MissionItemArgs {
+                mission: id,
+                key: key.clone(),
+            })
+        };
+        let m = body(t.add_to_mission(arg(&k[2])).await.unwrap());
+        assert_eq!(m["items"][2]["key"], k[2].as_str());
+        assert_eq!(m["items"][2]["by"], "you");
+        let m = body(t.remove_from_mission(arg(&k[1])).await.unwrap());
+        assert_eq!(m["items"].as_array().unwrap().len(), 2);
+        assert!(
+            t.remove_from_mission(arg(&k[1])).await.is_err(),
+            "it is out"
+        );
+        t.remove_from_mission(arg(&k[0])).await.unwrap();
+        assert!(
+            t.remove_from_mission(arg(&k[2])).await.is_err(),
+            "the last open item stays"
+        );
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 

@@ -204,6 +204,41 @@ export type Brief = {
   next?: Record<string, string>;
   /** The next actions that AIfred can draft later. A next action that is not here is for you. */
   draft?: Record<string, DraftKind>;
+  /** Today's missions, the most important first (missions.rs). */
+  missions?: Mission[];
+  /** AIfred's moves of items into subtasks since the brief of the day
+   * before, that are still in place (sort.rs). */
+  moves?: Moved[];
+  /** The count of older moves that `moves` does not give: it gives only the newest. */
+  moves_more?: number;
+};
+
+/** One move of AIfred: `key` is now a subtask of `main`, for the reason `why`. */
+export type Moved = { id: number; ts: number; key: string; title: string; main: string; main_title: string; why: string };
+
+/** One item of a mission. `open` is false when the item is done or closed. */
+export type MissionItem = {
+  key: string;
+  title: string;
+  open: boolean;
+  /** Who put the item in the mission. The brief does not move an item that you added. */
+  by: "you" | "aifred";
+};
+/** How far a mission is: (steps_done + items_closed) / (steps + items). */
+export type MissionProgress = { steps_done: number; steps: number; items_closed: number; items: number; percent: number };
+/** One unit of work that the brief made from one or more items. The first
+ * item is the item of the next action: the mission shows its reason, its
+ * next action, and its goal. */
+export type Mission = {
+  id: number;
+  title: string;
+  doer: "you" | "aifred";
+  day: string | null;
+  rank: number | null;
+  status: "open" | "done";
+  items: MissionItem[];
+  checklist: ChecklistItem[];
+  progress: MissionProgress;
 };
 
 /** One of the user's goals (goals.rs). */
@@ -269,6 +304,28 @@ export type CorrectionKind = "not_today" | "wrong_priority";
 export type Correction = { id: number; key: string; kind: CorrectionKind; day: string; title: string; place: string; ts: number };
 /** `learned`: the memory fact that AIfred saved from this and earlier corrections. */
 export type Corrected = { correction: Correction; learned?: Fact };
+/** Ticks step `index` of a mission, or takes the tick away. The items do not change. */
+export const setMissionStep = (id: number, index: number, done: boolean) => invoke<Mission>("set_mission_step", { id, index, done });
+/** The mission is done. Close the items that you picked with their own commands. */
+export const finishMission = (id: number) => invoke<null>("finish_mission", { id });
+/** The undo of finishMission: the mission is open again, with its checklist. */
+export const reopenMission = (id: number) => invoke<null>("reopen_mission", { id });
+/** Where an item was before you added it to a mission or took it out (missions.rs). */
+export type MissionBefore = {
+  key: string;
+  mission: number;
+  spot: { mission: number; pos: number; by: string } | null;
+  out: boolean;
+};
+export type MissionChanged = { mission: Mission; before: MissionBefore };
+/** Adds an open item to a mission. It leaves its other mission. The brief does not take it away. */
+export const addMissionItem = (id: number, key: string) => invoke<MissionChanged>("add_mission_item", { id, key });
+/** Takes an item out of a mission. The brief does not put it back. The last open item cannot go out. */
+export const removeMissionItem = (id: number, key: string) => invoke<MissionChanged>("remove_mission_item", { id, key });
+/** The undo of addMissionItem and removeMissionItem. */
+export const restoreMissionItem = (before: MissionBefore) => invoke<null>("restore_mission_item", { before });
+/** A correction of each open item of the mission, all saved or none. A mission with no open item is an error. */
+export const correctMission = (id: number, kind: CorrectionKind, day: string) => invoke<Corrected[]>("correct_mission", { id, kind, day });
 /** Your correction of the brief of `day` (learn.rs). The brief stops showing a reason for the item that day. */
 export const correctBrief = (key: string, kind: CorrectionKind, day: string) => invoke<Corrected>("correct_brief", { key, kind, day });
 /** Removes a correction. A fact that it made is forgotten. */
@@ -508,17 +565,25 @@ export type Waiting = {
 export type NewWaiting = { what?: string; who?: string; since?: string; follow_up?: string; thread?: string };
 /** Only the fields that are set change. follow_up "": no follow-up day. */
 export type WaitingChanges = { what?: string; who?: string; follow_up?: string; done?: boolean };
-/** One item that shows under another item: both are one piece of work (links.rs). */
-export type ItemLink = { key: string; main: string };
-/** Two items that AIfred thinks are one piece of work. `main` is the suggested main row. */
-export type LinkSuggestion = { main: string; key: string; why: string };
-export type Links = { links: ItemLink[]; suggestions: LinkSuggestion[] };
+/** One item under its parent item, in AIfred only (links.rs). `by`: who placed
+ * it, "you" or "aifred". `why`: AIfred's reason, empty when you placed it. */
+export type ItemLink = { key: string; main: string; by?: "you" | "aifred"; why?: string };
+export type Links = { links: ItemLink[] };
 export const itemLinks = () => invoke<Links>("item_links");
-/** Puts `key` and its group under the main item of `main`. */
-export const linkItems = (main: string, key: string) => invoke<Links>("link_items", { main, key });
-export const unlinkItem = (key: string) => invoke<Links>("unlink_item", { key });
-/** "Not the same work" (`no` true), or its undo (`no` false). */
-export const rejectLink = (a: string, b: string, no: boolean) => invoke<Links>("reject_link", { a, b, no });
+/** How things were before a move by the user (links.rs Before): the old
+ * link of the item, and the sort marks of the item and its parents. The
+ * Undo sends it back. */
+export type LinkBefore = { key: string; link: ItemLink | null; marks: { key: string; fixed: boolean | null }[] };
+/** The links after a move by the user, and how things were before it. */
+export type LinkChanged = Links & { before: LinkBefore };
+/** Puts `key` under `main` as a subtask, with its own subtasks. */
+export const linkItems = (main: string, key: string) => invoke<LinkChanged>("link_items", { main, key });
+/** The Undo of a move by the user: the item and the sort marks go back to how they were. */
+export const restoreLink = (before: LinkBefore) => invoke<Links>("restore_link", { before });
+/** Moves `key` out from under its parent, with its own subtasks. */
+export const unlinkItem = (key: string) => invoke<LinkChanged>("unlink_item", { key });
+/** Undoes AIfred's moves (sort.rs): each item goes back to where it was. AIfred does not move these items again. */
+export const undoMoves = (ids: number[]) => invoke<Links>("undo_moves", { ids });
 
 /** The open items, then the items that closed in the last 3 days. */
 export const waitingItems = () => invoke<Waiting[]>("waiting_items");
@@ -631,3 +696,7 @@ export function describe(e: ProgressEvent): string {
 export const TASKS_CHANGED = "tasks-changed";
 /** Calls `f` each time AIfred adds a task by itself. Returns the stop function. */
 export const onTasksChanged = (f: () => void) => listen(TASKS_CHANGED, () => f());
+/** The event that AIfred sends when its sort moved new items into subtasks (sort.rs). */
+export const ITEMS_SORTED = "items-sorted";
+/** Calls `f` each time AIfred's sort moved items. Returns the stop function. */
+export const onItemsSorted = (f: () => void) => listen(ITEMS_SORTED, () => f());

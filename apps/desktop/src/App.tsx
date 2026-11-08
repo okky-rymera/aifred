@@ -5,12 +5,12 @@ import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
 import { Ctx, useApp, type AppCtx, type CardMode, type ChatState, type ListState } from "./ctx";
 import { Detail } from "./Detail";
 import { Home } from "./Home";
-import { addDays, buildItems, dayOf, dur, groupOf, meetingsOn, schedule, type Item } from "./items";
+import { addDays, buildItems, dayOf, dur, meetingsOn, schedule, type Item } from "./items";
 import { TasksPage } from "./Tasks";
 import { MemoryList } from "./Memory";
 import { PlanChat, PlanView } from "./Plan";
 import { RestartButton, SettingsPage } from "./Settings";
-import { useTasksChanged } from "./useTasksChanged";
+import { useItemsSorted, useTasksChanged } from "./useTasksChanged";
 
 type Page = "home" | "plan" | "tasks" | "memory" | "settings";
 type Toast = { text: string; undo?: () => void; error?: boolean };
@@ -113,7 +113,7 @@ export default function App() {
   const [restartError, setRestartError] = useState("");
   const [meta, setMeta] = useState<api.ItemMeta[]>([]);
   const [est, setEst] = useState<Record<string, api.Estimate>>({});
-  const [links, setLinks] = useState<api.Links>({ links: [], suggestions: [] });
+  const [links, setLinks] = useState<api.Links>({ links: [] });
   const [brief, setBrief] = useState<api.Brief | null>(null);
   const [goals, setGoals] = useState<api.Goals | null>(null);
   const [briefLoaded, setBriefLoaded] = useState("");
@@ -185,7 +185,6 @@ export default function App() {
   const loadMeta = useCallback(() => {
     api.itemMeta().then(setMeta).catch(() => {});
     api.estimates().then(setEst).catch(() => {});
-    // The suggestions come from the open items, so they change with each list.
     api.itemLinks().then(setLinks).catch(() => {});
   }, []);
 
@@ -377,6 +376,29 @@ export default function App() {
 
   // A repeating task: AIfred adds the new task by itself. Show it at once.
   useTasksChanged(loadTasks);
+
+  /** Reads the brief of `day` again, when it is still on the screen. */
+  const reloadBrief = useCallback((day: string | undefined) => {
+    if (day) api.brief(day).then((b) => b && setBrief((old) => (old?.day === day ? b : old))).catch(() => {});
+  }, []);
+
+  /** Reads today's brief again and shows it. Only a newer brief of the same
+   * day on the screen stays. The brief can change with no new text: for
+   * example its missions or its note about AIfred's moves. */
+  const loadTodayBrief = useCallback(() => {
+    api
+      .brief(today)
+      .then((b) => b && setBrief((old) => (old && old.day === b.day && old.written > b.written ? old : b)))
+      .catch(() => {});
+  }, [today]);
+
+  // AIfred's sort moved new items into subtasks in the background. Show the
+  // new trees, and the brief with its note about the moves, at once.
+  const afterSort = useCallback(() => {
+    api.itemLinks().then(setLinks).catch(() => {});
+    loadTodayBrief();
+  }, [loadTodayBrief]);
+  useItemsSorted(afterSort);
 
   // AIfred's jobs can write the brief in the background (for example when you
   // finish a task). Check for a newer brief each minute.
@@ -572,7 +594,7 @@ export default function App() {
    * the Undo of the hide.
    */
   const hideMail = useCallback(
-    async (m: api.Mail, list: "reply" | "sent", text: string, workKey?: string): Promise<boolean> => {
+    async (m: api.Mail, list: "reply" | "sent", text: string, workKey?: string, keepUndo?: (undo: () => void) => void): Promise<boolean> => {
       if (mailBusy.current.has(m.id)) return false;
       mailBusy.current.add(m.id);
       try {
@@ -590,13 +612,14 @@ export default function App() {
             note = ` The work time is not saved: ${e}`;
           }
         }
-        toast(`${text}${tookText(d)}${note}`, () =>
+        const undo = () =>
           run(api.hideEmail(m.id, false), () => {
             mailEdits.current++;
             setMail((l) => ({ ...l, [list]: putBack(l[list], m) }));
             if (d && workKey) api.unfinishWork(workKey).catch(() => {});
-          }),
-        );
+          });
+        if (keepUndo) keepUndo(undo);
+        else toast(`${text}${tookText(d)}${note}`, undo);
         return true;
       } finally {
         mailBusy.current.delete(m.id);
@@ -608,8 +631,13 @@ export default function App() {
   const startWork = useCallback((key: string) => void run(api.startWork(key), setWork), [run]);
   const stopWork = useCallback(() => void run(api.stopWork(), () => setWork(null)), [run]);
 
+  /** Closes or opens `i`. Each close shows a toast with an undo. With
+   * `keepUndo`, a task or an email gives its undo to the caller and shows
+   * no toast: finishMission() puts all undos in one toast. A ClickUp close
+   * keeps its own undo in the list of closed ClickUp tasks, and with
+   * `keepUndo` it shows no toast either. */
   const toggleDone = useCallback(
-    (i: Item) => {
+    (i: Item, keepUndo?: (undo: () => void) => void) => {
       if (i.task) {
         const done = !i.done;
         // The backend ends the work with the task and keeps its real time,
@@ -618,28 +646,34 @@ export default function App() {
         // task: the check for an item that closed elsewhere (below) must
         // not finish it a second time. A failed change keeps the timer,
         // because the work still runs.
-        run(api.setTaskDone(i.task.id, done), ({ task: t, work: d }) => {
+        return run(api.setTaskDone(i.task.id, done), ({ task: t, work: d }) => {
           if (done) setWork((w) => (w?.key === i.key ? null : w));
           putTask(t);
           // The undo opens the task again. Then the backend forgets its real time.
           const undo = () => run(api.setTaskDone(t.id, false), (r) => putTask(r.task));
-          if (done) finishedToast(i.key, `Finished: ${i.title}`, d, undo, true);
+          if (done && keepUndo) keepUndo(undo);
+          else if (done) finishedToast(i.key, `Finished: ${i.title}`, d, undo, true);
         });
       } else if (i.mail) {
-        void hideMail(i.mail, "reply", `Hidden: ${i.mail.subject}. It comes back when a new message comes.`, i.key);
+        return hideMail(i.mail, "reply", `Hidden: ${i.mail.subject}. It comes back when a new message comes.`, i.key, keepUndo);
       } else if (i.cu) {
         const c = i.cu;
-        if (closing.current.has(c.id)) return;
+        if (closing.current.has(c.id)) return Promise.resolve(false);
         closing.current.add(c.id);
         // This changes the real task in ClickUp, so there is an undo.
-        run(api.clickupMarkDone(c.id), (before) => {
+        return run(api.clickupMarkDone(c.id), (before) => {
           setClickup((l) => ({ ...l, items: l.items.filter((x) => x.id !== c.id) }));
           setClosed((l) => [...l.filter((x) => x.id !== c.id), { id: c.id, title: c.title, before }]);
-          void afterFinish(i.key, null);
+          // In a mission, the work ends with no toast of its own: it must
+          // not replace the toast of the mission and its Undo. A failed save
+          // keeps the timer on the screen, so you can click Done again.
+          if (keepUndo) void endWork(i.key).catch(() => {});
+          else void afterFinish(i.key, null);
         }).finally(() => closing.current.delete(c.id));
       }
+      return Promise.resolve(false);
     },
-    [run, hideMail, afterFinish, finishedToast],
+    [run, hideMail, afterFinish, finishedToast, endWork],
   );
 
   /** The "Done" button of the work timer. AIfred only reads GitHub, so a
@@ -926,7 +960,9 @@ export default function App() {
     goalQueue.current = goals;
     goals.then(setGoals).catch(() => {});
     api.dayPlan(today).then((p) => putPlan(today, p)).catch(() => {});
-  }, [loadTasks, loadMeta, today, putPlan]);
+    // AIfred can add items to a mission or take them out (missions.rs).
+    loadTodayBrief();
+  }, [loadTasks, loadMeta, today, putPlan, loadTodayBrief]);
 
   /** Runs one question in a chat and puts the messages in `set`. */
   async function chat(
@@ -1223,75 +1259,203 @@ export default function App() {
       // counts for today, and today's brief gets it.
       const day = today;
       const shown = brief.day;
-      // A row of linked items can show the reason of one of its linked items.
-      const keys = new Set([i.key, ...(i.linked ?? []).map((x) => x.key)]);
-      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => !keys.has(k)));
-      run(api.correctBrief(i.key, kind, day), (c) => {
-        setBrief((b) => (b && b.day === shown ? { ...b, why: drop(b.why)!, goal: drop(b.goal) } : b));
+      // A tree row can show the reason of one of its subtasks: the
+      // correction goes to that item. The backend corrects only this one
+      // item, so the screen drops only its reason and its missions. The other
+      // items of the tree keep theirs.
+      const key = i.whyKey ?? i.key;
+      const title = i.linked?.find((l) => l.key === key)?.title ?? i.title;
+      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => k !== key));
+      run(api.correctBrief(key, kind, day), (c) => {
+        // Like missions::today: a mission with the corrected item leaves the list.
+        setBrief((b) =>
+          b && b.day === shown
+            ? { ...b, why: drop(b.why)!, goal: drop(b.goal), missions: b.missions?.filter((m) => !m.items.some((x) => x.key === key)) }
+            : b,
+        );
         if (c.learned) api.memoryFacts().then(setFacts).catch(() => {});
         const undo = () =>
           run(api.undoCorrection(c.correction.id), () => {
-            api.brief(shown).then((b) => b && setBrief((old) => (old?.day === shown ? b : old))).catch(() => {});
+            reloadBrief(shown);
             if (c.learned) api.memoryFacts().then(setFacts).catch(() => {});
           });
         const text = c.learned
           ? `AIfred learned: ${c.learned.text}`
           : kind === "not_today"
-            ? `AIfred will not count this for today: ${i.title}`
-            : `AIfred will rank this lower from now on: ${i.title}`;
+            ? `AIfred will not count this for today: ${title}`
+            : `AIfred will rank this lower from now on: ${title}`;
         toast(text, undo);
       });
     },
-    [brief, today, run, toast],
+    [brief, today, run, toast, reloadBrief],
   );
 
-  // ---------- One piece of work in many places (links.rs) ----------
+  // ---------- Missions (missions.rs) ----------
+
+  /** Puts a changed mission into the brief on the screen. */
+  const putMission = useCallback((m: api.Mission) => {
+    setBrief((b) => (b?.missions ? { ...b, missions: b.missions.map((x) => (x.id === m.id ? m : x)) } : b));
+  }, []);
+
+  /** Ticks a step of the mission, or takes the tick away. The items do not change.
+   * A second click on the same step waits for the first answer: else both
+   * clicks send the same value, from the same step on the screen. */
+  const stepBusy = useRef(new Set<string>());
+  const missionStep = useCallback(
+    (m: api.Mission, index: number) => {
+      const k = `${m.id}:${index}`;
+      if (stepBusy.current.has(k)) return;
+      stepBusy.current.add(k);
+      void run(api.setMissionStep(m.id, index, !m.checklist[index]?.done), putMission).finally(() => stepBusy.current.delete(k));
+    },
+    [run, putMission],
+  );
+
+  /** You say that the brief is wrong about a mission: a correction of each
+   * of its open items. The mission leaves the list at once. */
+  const correctMission = useCallback(
+    (m: api.Mission, kind: api.CorrectionKind) => {
+      if (!brief) return;
+      // As for one item: the correction is for today (see correctBrief).
+      const day = today;
+      const shown = brief.day;
+      // Like missions::correct: only the open items get a correction, so
+      // only they lose their reason. A closed item keeps its reason.
+      const keys = new Set(m.items.filter((i) => i.open).map((i) => i.key));
+      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => !keys.has(k)));
+      run(api.correctMission(m.id, kind, day), (cs) => {
+        setBrief((b) =>
+          b && b.day === shown ? { ...b, missions: b.missions?.filter((x) => x.id !== m.id), why: drop(b.why)!, goal: drop(b.goal) } : b,
+        );
+        const learned = cs.map((c) => c.learned).filter((f) => !!f);
+        if (learned.length) api.memoryFacts().then(setFacts).catch(() => {});
+        const undo = () =>
+          run(
+            cs.reduce<Promise<unknown>>((p, c) => p.then(() => api.undoCorrection(c.correction.id)), Promise.resolve()),
+            () => {
+              reloadBrief(shown);
+              if (learned.length) api.memoryFacts().then(setFacts).catch(() => {});
+            },
+          );
+        const text = learned.length
+          ? `AIfred learned: ${learned[learned.length - 1]!.text}`
+          : kind === "not_today"
+            ? `AIfred will not count this for today: ${m.title}`
+            : `AIfred will rank this lower from now on: ${m.title}`;
+        toast(text, undo);
+      });
+    },
+    [brief, today, run, toast, reloadBrief],
+  );
+
+  /** You add an item to a mission or take one out. The item can come from
+   * or go to another mission, so the brief loads again. The undo puts the
+   * item back where it was. */
+  const changeMission = useCallback(
+    (change: Promise<api.MissionChanged>, text: string) => {
+      const shown = brief?.day;
+      return run(change, (c) => {
+        putMission(c.mission);
+        reloadBrief(shown);
+        toast(text, () => run(api.restoreMissionItem(c.before), () => reloadBrief(shown)));
+      });
+    },
+    [brief, run, putMission, reloadBrief, toast],
+  );
+  const addToMission = useCallback(
+    (m: api.Mission, key: string) =>
+      changeMission(api.addMissionItem(m.id, key), `Added to ${m.title}: ${byKey.get(key)?.title ?? key}. AIfred keeps it there.`),
+    [changeMission, byKey],
+  );
+  const removeFromMission = useCallback(
+    (m: api.Mission, key: string) =>
+      changeMission(
+        api.removeMissionItem(m.id, key),
+        `Taken out of ${m.title}: ${m.items.find((i) => i.key === key)?.title ?? key}. AIfred does not put it back.`,
+      ),
+    [changeMission],
+  );
+
+  /** First the items in `close` close, one at a time, each with its own
+   * command. GitHub items cannot close here: AIfred only reads GitHub. When
+   * all of them closed, the mission is done. Its one undo opens the mission
+   * and the closed tasks and emails again. The app shows one toast at a
+   * time, so each item cannot have its own toast. A ClickUp task keeps its
+   * own undo in the list of closed ClickUp tasks. When one item did not
+   * close, the mission stays open. */
+  const finishMission = useCallback(
+    async (m: api.Mission, close: string[]) => {
+      const items = close.map((k) => byKey.get(k)).filter((i): i is Item => !!i && !i.done && !i.gh);
+      const undos: (() => void)[] = [];
+      const undoItems = () => undos.forEach((u) => u());
+      for (const i of items) {
+        if (!(await toggleDone(i, (u) => undos.push(u)))) {
+          // The failed close showed its reason a moment ago. Keep it in the text.
+          clearTimeout(toastTimer.current);
+          setToast((t) => ({
+            text: `The mission stays open: AIfred could not close ${i.title}.${t?.error ? ` ${t.text}` : ""}${undos.length ? " Undo opens the items that closed." : ""}`,
+            undo: undos.length ? undoItems : undefined,
+            error: true,
+          }));
+          toastTimer.current = window.setTimeout(() => setToast(null), 8000);
+          return false;
+        }
+      }
+      return run(api.finishMission(m.id), () => {
+        setBrief((b) => (b?.missions ? { ...b, missions: b.missions.filter((x) => x.id !== m.id) } : b));
+        const shown = brief?.day;
+        // The undo opens the mission and its closed tasks and emails again.
+        // A closed ClickUp task stays closed: open it in the list of
+        // closed ClickUp tasks.
+        const undo = () =>
+          run(api.reopenMission(m.id), () => {
+            undoItems();
+            reloadBrief(shown);
+          });
+        const n = undos.length;
+        toast(n ? `Mission done: ${m.title}. Undo opens it and its ${n === 1 ? "closed item" : `${n} closed items`} again.` : `Mission done: ${m.title}`, undo);
+      });
+    },
+    [run, byKey, toggleDone, toast, brief, reloadBrief],
+  );
+
+  // ---------- Subtasks (links.rs) ----------
 
   const titleOf = useCallback((key: string) => byKey.get(key)?.title ?? key, [byKey]);
 
-  /** Puts `key` (and its group) under `main`. The undo puts the old links back. */
+  /** A move takes the subtasks of the item with it (links.rs). So the undo
+   * only puts the item back under its old parent, or out again. It also
+   * puts back the sort marks: the AI sort can move the items again, as
+   * before the move. */
   const linkItems = useCallback(
-    (main: string, key: string) => {
-      const before = links.links;
-      return run(api.linkItems(main, key), (l) => {
-        setLinks(l);
-        // The main row of the new group, and all its items.
-        const group = groupOf(l.links, key);
-        const target = group[0];
-        const members = new Set(group);
-        toast(`Linked: ${titleOf(key)} shows under ${titleOf(target)}`, () => {
-          // Back to the old groups: take each item out, then link the old pairs again.
-          let p: Promise<api.Links> = Promise.resolve(l);
-          for (const k of members) if (k !== target) p = p.then(() => api.unlinkItem(k));
-          for (const b of before) if (members.has(b.key)) p = p.then(() => api.linkItems(b.main, b.key));
-          run(p, setLinks);
-        });
-      });
-    },
-    [links, run, toast, titleOf],
+    (main: string, key: string) =>
+      run(api.linkItems(main, key), (c) => {
+        setLinks({ links: c.links });
+        toast(`${titleOf(key)} is now a subtask of ${titleOf(main)}`, () => run(api.restoreLink(c.before), setLinks));
+      }),
+    [run, toast, titleOf],
   );
 
   const unlinkItem = useCallback(
-    (key: string) => {
-      const was = links.links.find((l) => l.key === key);
-      const wasMain = !was && links.links.find((l) => l.main === key);
-      return run(api.unlinkItem(key), (l) => {
-        setLinks(l);
-        // The undo links it again. A main item becomes the main item again:
-        // linking it to any item of its old group puts the whole group under it.
-        const back = was ? () => run(api.linkItems(was.main, key), setLinks) : wasMain ? () => run(api.linkItems(key, wasMain.key), setLinks) : undefined;
-        toast(`Unlinked: ${titleOf(key)}`, back);
-      });
-    },
-    [links, run, toast, titleOf],
+    (key: string) =>
+      run(api.unlinkItem(key), (c) => {
+        setLinks({ links: c.links });
+        toast(`Moved out: ${titleOf(key)}`, c.before.link ? () => run(api.restoreLink(c.before), setLinks) : undefined);
+      }),
+    [run, toast, titleOf],
   );
 
-  const rejectLink = useCallback(
-    (sug: api.LinkSuggestion) =>
-      run(api.rejectLink(sug.main, sug.key, true), (l) => {
+  /** Undoes AIfred's moves from the brief. The lines go away from the brief. */
+  const undoMoves = useCallback(
+    (moves: api.Moved[]) => {
+      const ids = moves.map((m) => m.id);
+      return run(api.undoMoves(ids), (l) => {
         setLinks(l);
-        toast("AIfred will not suggest these two again", () => run(api.rejectLink(sug.main, sug.key, false), setLinks));
-      }),
+        setBrief((b) => (b?.moves ? { ...b, moves: b.moves.filter((m) => !ids.includes(m.id)) } : b));
+        const names = moves.map((m) => m.title).join(", ");
+        toast(`Put back: ${names}. AIfred does not move ${moves.length > 1 ? "them" : "it"} again.`);
+      });
+    },
     [run, toast],
   );
 
@@ -1338,7 +1502,7 @@ export default function App() {
     links,
     linkItems,
     unlinkItem,
-    rejectLink,
+    undoMoves,
     trackEmail,
     hideSent,
     addWaiting,
@@ -1368,6 +1532,11 @@ export default function App() {
     stopWork,
     finishItem,
     correctBrief,
+    missionStep,
+    correctMission,
+    finishMission,
+    addToMission,
+    removeFromMission,
     addTask,
     addSteps,
     homeMode,

@@ -1,12 +1,12 @@
 // The full window with a fake backend: Home (brief and list), the task
 // panel, the chats, Day plan, Settings, and Memory.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import App from "./App";
-import { DEFAULT_SETTINGS, type Answer } from "./api";
+import { DEFAULT_SETTINGS, type Answer, type Mission } from "./api";
 import { addDays, dayOf } from "./items";
 import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, mail, meeting, task } from "./test/fakeBackend";
 
@@ -246,57 +246,23 @@ describe("reviews", () => {
   });
 });
 
-describe("same work", () => {
+describe("subtasks", () => {
   const lists = () => ({
     clickupToken: "pk_test",
     github: [githubItem(12, "your_pr", "DEV-42: round the tax")],
     clickup: [clickupItem("86a", "Checkout totals", { custom_id: "DEV-42" })],
   });
 
-  it("links a suggested pair into one row, with an undo", async () => {
-    const fake = await startApp({
-      ...lists(),
-      linkSuggestions: [{ main: "clickup:86a", key: "github:acme/shop#12", why: "The GitHub item names DEV-42" }],
-    });
-    const card = await screen.findByRole("region", { name: "Same work?" });
-    expect(within(card).getByText("The GitHub item names DEV-42")).toBeInTheDocument();
-    await userEvent.click(within(card).getByRole("button", { name: "Link: Checkout totals and DEV-42: round the tax" }));
-    expect(fake.links).toEqual([{ key: "github:acme/shop#12", main: "clickup:86a" }]);
-    await waitFor(() => expect(screen.queryByRole("region", { name: "Same work?" })).not.toBeInTheDocument());
-    const open = screen.getByRole("list", { name: "Open" });
+  it("a tree of subtasks shows as one row", async () => {
+    await startApp({ ...lists(), links: [{ key: "github:acme/shop#12", main: "clickup:86a" }] });
+    const open = await screen.findByRole("list", { name: "Open" });
     expect(within(open).getAllByRole("listitem")).toHaveLength(1);
-    expect(within(open).getByText("Also in")).toBeInTheDocument();
+    expect(within(open).getByText("Subtasks")).toBeInTheDocument();
     // The source under the row opens that item.
     await userEvent.click(within(open).getByRole("button", { name: "Open details: DEV-42: round the tax" }));
     expect(within(details()).getByText("main row", { exact: false })).toBeInTheDocument();
-
-    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
-    await waitFor(() => expect(fake.links).toEqual([]));
-    await waitFor(() => expect(within(screen.getByRole("list", { name: "Open" })).getAllByRole("listitem")).toHaveLength(2));
-  });
-
-  it("Not the same hides a suggestion, with an undo", async () => {
-    const fake = await startApp({
-      ...lists(),
-      linkSuggestions: [{ main: "clickup:86a", key: "github:acme/shop#12", why: "Same words in the titles: tax" }],
-    });
-    const card = await screen.findByRole("region", { name: "Same work?" });
-    await userEvent.click(within(card).getByRole("button", { name: "Not the same: Checkout totals and DEV-42: round the tax" }));
-    expect(fake.linkNo).toEqual(["clickup:86a|github:acme/shop#12"]);
-    await waitFor(() => expect(screen.queryByRole("region", { name: "Same work?" })).not.toBeInTheDocument());
-    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
-    expect(await screen.findByRole("region", { name: "Same work?" })).toBeInTheDocument();
-  });
-
-  it("the Link button names the main row of the group that the link goes under", async () => {
-    await startApp({
-      ...lists(),
-      tasks: [task("Tax work", { id: "t1" })],
-      links: [{ key: "github:acme/shop#12", main: "task:t1" }],
-      linkSuggestions: [{ main: "github:acme/shop#12", key: "clickup:86a", why: "The GitHub item names DEV-42" }],
-    });
-    const card = await screen.findByRole("region", { name: "Same work?" });
-    expect(within(card).getByRole("button", { name: /^Link: / })).toHaveAttribute("title", 'Show them as one row, under "Tax work"');
+    // The "Same work?" card is gone (plan part 3b).
+    expect(screen.queryByRole("region", { name: "Same work?" })).not.toBeInTheDocument();
   });
 
   it("Tomorrow does not show on a row that a late linked item keeps in place", async () => {
@@ -311,12 +277,12 @@ describe("same work", () => {
     expect(within(open).queryByRole("button", { name: "Tomorrow" })).not.toBeInTheDocument();
   });
 
-  it("a deleted task leaves its group on screen too", async () => {
+  it("a deleted task gives its subtasks to its parent, on screen too", async () => {
     const fake = await startApp({
       ...lists(),
       tasks: [task("Tax work", { id: "t1" })],
       links: [
-        { key: "clickup:86a", main: "task:t1" },
+        { key: "task:t1", main: "clickup:86a" },
         { key: "github:acme/shop#12", main: "task:t1" },
       ],
     });
@@ -324,32 +290,132 @@ describe("same work", () => {
     await userEvent.click(within(details()).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(fake.links).toEqual([{ key: "github:acme/shop#12", main: "clickup:86a" }]));
     await openItem("Checkout totals");
-    const group = await within(details()).findByRole("list", { name: "Same work" });
+    const group = await within(details()).findByRole("list", { name: "Task tree" });
     await waitFor(() => expect(within(group).queryByText(/Not in your list now/)).not.toBeInTheDocument());
     expect(within(group).getAllByRole("listitem")).toHaveLength(2);
   });
 
-  it("a link fails like the real app: an unknown item, or a group that is too large", async () => {
+  it("a move fails like the real app: an unknown item, a loop, or a tree that is too large", async () => {
     const fake = await startApp({ ...lists(), tasks: [task("Tax work", { id: "t1" })] });
     await expect(invoke("link_items", { main: "task:t1", key: "github:none#1" })).rejects.toBe("AIfred does not know the item github:none#1");
+    fake.links = [{ key: "task:t1", main: "clickup:86a" }];
+    await expect(invoke("link_items", { main: "task:t1", key: "clickup:86a" })).rejects.toBe("task:t1 is a subtask of clickup:86a. An item cannot go under its own subtask");
     fake.links = Array.from({ length: 9 }, (_, n) => ({ key: `task:x${n}`, main: "clickup:86a" }));
     fake.tasks.push(...Array.from({ length: 9 }, (_, n) => task(`X ${n}`, { id: `x${n}` })));
-    await expect(invoke("link_items", { main: "clickup:86a", key: "task:t1" })).rejects.toBe("one piece of work can have at most 10 items");
+    await expect(invoke("link_items", { main: "clickup:86a", key: "task:t1" })).rejects.toBe("one tree can have at most 10 items");
   });
 
-  it("links another item from the item panel, and unlinks it", async () => {
+  it("adds a subtask from the item panel, moves it out, and undoes each change", async () => {
     const fake = await startApp({ ...lists(), tasks: [task("Tax rounding notes")] });
     await openItem("Checkout totals");
-    await userEvent.click(within(details()).getByRole("button", { name: "+ Link another item" }));
-    await userEvent.type(within(details()).getByRole("textbox", { name: "Find an item to link" }), "tax");
+    await userEvent.click(within(details()).getByRole("button", { name: "+ Add a subtask" }));
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Find an item to add as a subtask" }), "tax");
     // The search finds the open items by title, not the item itself.
-    await userEvent.click(within(details()).getByRole("button", { name: "Link: DEV-42: round the tax" }));
-    expect(fake.links).toEqual([{ key: "github:acme/shop#12", main: "clickup:86a" }]);
-    const group = await within(details()).findByRole("list", { name: "Same work" });
+    await userEvent.click(within(details()).getByRole("button", { name: "Add as subtask: DEV-42: round the tax" }));
+    expect(fake.links).toMatchObject([{ key: "github:acme/shop#12", main: "clickup:86a", by: "you" }]);
+    expect(await screen.findByText("DEV-42: round the tax is now a subtask of Checkout totals")).toBeInTheDocument();
+    const group = await within(details()).findByRole("list", { name: "Task tree" });
     expect(within(group).getByText("This item")).toBeInTheDocument();
-    await userEvent.click(within(group).getByRole("button", { name: "Unlink: DEV-42: round the tax" }));
+    await userEvent.click(within(group).getByRole("button", { name: "Move out: DEV-42: round the tax" }));
     await waitFor(() => expect(fake.links).toEqual([]));
-    expect(within(details()).queryByRole("list", { name: "Same work" })).not.toBeInTheDocument();
+    expect(within(details()).queryByRole("list", { name: "Task tree" })).not.toBeInTheDocument();
+    // The undo puts it back under its old parent.
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.links).toMatchObject([{ key: "github:acme/shop#12", main: "clickup:86a" }]));
+  });
+
+  it("the brief says what AIfred sorted, and Undo puts the item back", async () => {
+    const move = { id: 1, ts: 2, key: "github:acme/shop#12", title: "DEV-42: round the tax", main: "clickup:86a", main_title: "Checkout totals", why: "The pull request names DEV-42." };
+    const fake = await startApp({
+      ...lists(),
+      links: [{ key: "github:acme/shop#12", main: "clickup:86a", by: "aifred", why: move.why }],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, moves: [move] } },
+    });
+    const note = await screen.findByLabelText("What AIfred sorted");
+    expect(note).toHaveTextContent("I made DEV-42: round the tax a subtask of Checkout totals. The pull request names DEV-42.");
+    // The item names open the items.
+    await userEvent.click(within(note).getByRole("button", { name: "Checkout totals" }));
+    expect(await within(details()).findByRole("list", { name: "Task tree" })).toBeInTheDocument();
+    await userEvent.click(within(note).getByRole("button", { name: "Undo: DEV-42: round the tax" }));
+    await waitFor(() => expect(fake.links).toEqual([]));
+    expect(fake.calls.find((c) => c.cmd === "undo_moves")?.args).toEqual({ ids: [1] });
+    expect(screen.queryByLabelText("What AIfred sorted")).not.toBeInTheDocument();
+    expect(await screen.findByText("Put back: DEV-42: round the tax. AIfred does not move it again.")).toBeInTheDocument();
+  });
+
+  it("many moves of AIfred are one list, with one line for each parent and reason", async () => {
+    const m = (id: number, key: string, title: string, main: string, main_title: string, why: string) => ({ id, ts: 2, key, title, main, main_title, why });
+    await startApp({
+      ...lists(),
+      tasks: [task("Tax notes", { id: "t1" }), task("Tax email", { id: "t2" })],
+      links: [
+        { key: "github:acme/shop#12", main: "clickup:86a", by: "aifred" },
+        { key: "task:t1", main: "clickup:86a", by: "aifred" },
+        { key: "task:t2", main: "task:t1", by: "aifred" },
+      ],
+      briefs: {
+        [today()]: {
+          day: today(),
+          written: 3,
+          text: "One thing.",
+          why: {},
+          moves: [
+            m(1, "github:acme/shop#12", "DEV-42: round the tax", "clickup:86a", "Checkout totals", "Both are about the tax."),
+            m(2, "task:t1", "Tax notes", "clickup:86a", "Checkout totals", "Both are about the tax."),
+            m(3, "task:t2", "Tax email", "task:t1", "Tax notes", "The email is about the notes."),
+            // The user moved it again: the brief does not show this move.
+            m(4, "task:t2", "Tax email", "clickup:86a", "Checkout totals", "Old."),
+          ],
+        },
+      },
+    });
+    const note = await screen.findByLabelText("What AIfred sorted");
+    expect(note).toHaveTextContent("I reorganized several tasks:");
+    const lines = within(note).getAllByRole("listitem");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toHaveTextContent("DEV-42: round the tax and Tax notes are now subtasks of Checkout totals. Both are about the tax.");
+    expect(lines[1]).toHaveTextContent("Tax email is now a subtask of Tax notes. The email is about the notes.");
+  });
+
+  it("a sort in the background shows at once, and a long note shows 5 lines first", async () => {
+    const titles = ["A", "B", "C", "D", "E", "F", "G"];
+    const fake = await startApp({
+      ...lists(),
+      tasks: titles.map((t) => task(t, { id: t })),
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {} } },
+    });
+    await screen.findByText("One thing.");
+    expect(screen.queryByLabelText("What AIfred sorted")).not.toBeInTheDocument();
+    // Each task goes under its own parent, so each is one line.
+    const parents = ["clickup:86a", "github:acme/shop#12", "task:A", "task:B", "task:C", "task:D", "task:E"];
+    const moves = titles.slice(1).map((t, n) => ({ id: n + 1, ts: 4, key: `task:${t}`, title: t, main: parents[n], main_title: parents[n], why: `Reason ${n + 1}.` }));
+    fake.links = moves.map((m) => ({ key: m.key, main: m.main, by: "aifred" as const, why: m.why }));
+    fake.briefs[today()] = { ...fake.briefs[today()], moves };
+    await emit("items-sorted");
+    const note = await screen.findByLabelText("What AIfred sorted");
+    expect(within(note).getAllByRole("listitem")).toHaveLength(5);
+    await userEvent.click(within(note).getByRole("button", { name: "Show 1 more" }));
+    expect(within(note).getAllByRole("listitem")).toHaveLength(6);
+  });
+
+  it("a subtask can have its own subtasks, and the tree shows each level", async () => {
+    await startApp({
+      ...lists(),
+      tasks: [task("Tax rounding notes", { id: "t1" })],
+      links: [
+        { key: "github:acme/shop#12", main: "clickup:86a" },
+        { key: "task:t1", main: "github:acme/shop#12", by: "aifred", why: "The notes are about the pull request" },
+      ],
+    });
+    const open = await screen.findByRole("list", { name: "Open" });
+    expect(within(open).getAllByRole("listitem")).toHaveLength(1);
+    await openItem("Checkout totals");
+    const tree = await within(details()).findByRole("list", { name: "Task tree" });
+    const rows = within(tree).getAllByRole("listitem");
+    expect(rows.map((r) => r.style.paddingLeft)).toEqual(["0px", "16px", "32px"]);
+    expect(within(tree).getByText(/AIfred: The notes are about the pull request/)).toBeInTheDocument();
+    // The top item has no parent, so it cannot move out.
+    expect(within(tree).queryByRole("button", { name: "Move out: Checkout totals" })).not.toBeInTheDocument();
   });
 });
 
@@ -506,7 +572,7 @@ describe("suggested work", () => {
     expect(await screen.findByText('Made the task "Checkout totals" with 2 steps, under this item')).toBeInTheDocument();
     expect(fake.calls.filter((c) => c.cmd === "add_steps")).toHaveLength(1);
     expect(fake.tasks).toHaveLength(1);
-    expect(fake.links).toEqual([{ key: `task:${fake.tasks[0].id}`, main: "clickup:86a" }]);
+    expect(fake.links).toMatchObject([{ key: `task:${fake.tasks[0].id}`, main: "clickup:86a", by: "you" }]);
     const open = screen.getByRole("list", { name: "Open" });
     await waitFor(() => expect(within(open).getByText("0/2 steps")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: "Undo" }));
@@ -529,6 +595,23 @@ describe("suggested work", () => {
     await userEvent.click(within(box).getByRole("button", { name: "Add 1 step" }));
     expect(await screen.findByText('Added 1 step to "Fix totals"')).toBeInTheDocument();
     expect(fake.tasks[0].checklist).toEqual([{ text: "Read the tax log", done: false }]);
+  });
+
+  it("does not put the steps on a task that AIfred placed under the item", async () => {
+    const fake = await startApp({
+      clickupToken: "pk_test",
+      clickup: [clickupItem("86a", "Checkout totals")],
+      tasks: [task("Email Ana about refund", { id: "t1" })],
+      links: [{ key: "task:t1", main: "clickup:86a", by: "aifred", why: "Same customer." }],
+      onSuggestSteps: () => [{ text: "Read the tax log" }],
+    });
+    await openItem("Checkout totals");
+    await userEvent.click(within(details()).getByRole("button", { name: "✦ Suggest steps" }));
+    const box = await within(details()).findByRole("group", { name: "Suggested steps" });
+    expect(within(box).getByText(/a new task of yours, under this item/)).toBeInTheDocument();
+    await userEvent.click(within(box).getByRole("button", { name: "Add 1 step" }));
+    await waitFor(() => expect(fake.tasks).toHaveLength(2));
+    expect(fake.tasks.find((t) => t.id === "t1")?.checklist).toEqual([]);
   });
 
   it("shows an error when AIfred cannot suggest steps", async () => {
@@ -714,6 +797,19 @@ describe("corrections of the brief", () => {
     expect(fake.corrections).toEqual([]);
   });
 
+  it("Not today on a tree row corrects the subtask whose reason the row shows", async () => {
+    const r = ranked();
+    // Only the subtask "Fix typo" has a reason. Its row is "Bulk edit".
+    const b = r.briefs[today()];
+    (b as { why: Record<string, string> }).why = { "github:acme/shop#10": "It waits 3 days." };
+    const fake = await startApp({ ...r, links: [{ key: "github:acme/shop#10", main: "github:acme/shop#9", by: "aifred", why: "Same PR." }] });
+    expect(await screen.findByText("It waits 3 days.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Not today: Fix typo" }));
+    expect(await screen.findByText("AIfred will not count this for today: Fix typo")).toBeInTheDocument();
+    expect(fake.corrections).toMatchObject([{ key: "github:acme/shop#10", kind: "not_today" }]);
+    expect(screen.queryByText("It waits 3 days.")).not.toBeInTheDocument();
+  });
+
   it("three Wrong priority clicks from one place teach AIfred a memory fact", async () => {
     const fake = await startApp(ranked());
     for (const t of ["Bulk edit", "Fix typo"]) {
@@ -727,6 +823,292 @@ describe("corrections of the brief", () => {
     await userEvent.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(fake.memory.filter((f) => !f.forgotten)).toHaveLength(0));
     expect(await screen.findByText("It is new.")).toBeInTheDocument();
+  });
+});
+
+describe("missions on the home page", () => {
+  /** Two tasks and a GitHub item in one mission, and a task in no mission. */
+  const setup = () => {
+    const a = task("Write the post", { id: "ta" });
+    const b = task("Send the post", { id: "tb" });
+    const other = task("Pay rent", { id: "tc" });
+    const gh = githubItem(7, "assigned", "Fix the post page");
+    const m: Mission = {
+      id: 5,
+      title: "Ship the launch post",
+      doer: "you",
+      day: today(),
+      rank: 1,
+      status: "open",
+      items: [
+        { key: "task:ta", title: "Write the post", open: true, by: "aifred" },
+        { key: "task:tb", title: "Send the post", open: true, by: "aifred" },
+        { key: "github:acme/shop#7", title: "Fix the post page", open: true, by: "aifred" },
+      ],
+      checklist: [
+        { text: "Draft the post", done: false },
+        { text: "Ask Ana to check it", done: false },
+      ],
+      progress: { steps_done: 0, steps: 2, items_closed: 0, items: 3, percent: 0 },
+    };
+    return {
+      tasks: [a, b, other],
+      github: [gh],
+      briefs: {
+        [today()]: {
+          day: today(),
+          written: 1,
+          text: "One mission.",
+          why: { "task:ta": "The launch is on Friday." },
+          next: { "task:ta": "Write the first draft." },
+          missions: [m],
+        },
+      },
+    };
+  };
+
+  it("shows the missions, and the other items behind one line", async () => {
+    await startApp(setup());
+    const list = await screen.findByRole("list", { name: "Today's missions" });
+    expect(within(list).getByText("Ship the launch post")).toBeInTheDocument();
+    expect(within(list).getByText("The launch is on Friday.")).toBeInTheDocument();
+    expect(within(list).getByText("Write the first draft.")).toBeInTheDocument();
+    // The items of the mission are not rows of their own. The other item is behind the line.
+    expect(screen.queryByRole("button", { name: "Open details: Pay rent" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show other open items (1)" }));
+    expect(await screen.findByRole("button", { name: "Open details: Pay rent" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open details: Send the post" })).not.toBeInTheDocument();
+  });
+
+  it("a tree with one subtask in a mission still shows its other open subtasks", async () => {
+    const s = setup();
+    s.tasks.push(task("Plan the launch", { id: "tp" }));
+    // "Write the post" is a mission. "Pay rent" is its sister subtask in no mission.
+    await startApp({
+      ...s,
+      links: [
+        { key: "task:ta", main: "task:tp", by: "aifred", why: "Launch work." },
+        { key: "task:tc", main: "task:tp", by: "aifred", why: "Launch work." },
+      ],
+    });
+    await screen.findByRole("list", { name: "Today's missions" });
+    // The mission card names its parent ("Part of"), so count the buttons.
+    const parents = () => screen.queryAllByRole("button", { name: "Open details: Plan the launch" }).length;
+    const before = parents();
+    expect(screen.queryByRole("button", { name: "Open details: Pay rent" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show other open items (1)" }));
+    await waitFor(() => expect(parents()).toBe(before + 1));
+    expect(screen.getByRole("button", { name: "Open details: Pay rent" })).toBeInTheDocument();
+    // The subtask in the mission does not show twice.
+    expect(screen.queryByRole("button", { name: "Open details: Write the post" })).not.toBeInTheDocument();
+  });
+
+  it("when the row item is a mission, its open sister subtask is the row", async () => {
+    const s = setup();
+    // "Write the post" (a mission) is the parent of "Pay rent" (no mission).
+    await startApp({ ...s, links: [{ key: "task:tc", main: "task:ta", by: "aifred", why: "Launch work." }] });
+    await screen.findByRole("list", { name: "Today's missions" });
+    const posts = () => screen.queryAllByRole("button", { name: "Open details: Write the post" }).length;
+    const before = posts();
+    await userEvent.click(screen.getByRole("button", { name: "Show other open items (1)" }));
+    expect(await screen.findByRole("button", { name: "Open details: Pay rent" })).toBeInTheDocument();
+    expect(posts()).toBe(before);
+  });
+
+  it("an urgent item in no mission does not hide behind the line", async () => {
+    const s = setup();
+    s.tasks.push(task("Renew the domain", { id: "td", priority: "urgent" }));
+    await startApp(s);
+    await screen.findByRole("list", { name: "Today's missions" });
+    expect(screen.getByText("Needs you now")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open details: Renew the domain" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show other open items (1)" })).toBeInTheDocument();
+  });
+
+  it("an urgent subtask in no mission shows when the top item of its tree is a mission", async () => {
+    const s = setup();
+    s.tasks.push(task("Renew the domain", { id: "td", priority: "urgent" }));
+    // "Write the post" (a mission) is the parent of the urgent "Renew the domain" (no mission).
+    await startApp({ ...s, links: [{ key: "task:td", main: "task:ta", by: "aifred", why: "Launch work." }] });
+    const now = await screen.findByRole("list", { name: "Needs you now" });
+    expect(within(now).getByRole("button", { name: "Open details: Renew the domain" })).toBeInTheDocument();
+  });
+
+  it("a tree row does not keep the reason of its subtask in a mission", async () => {
+    const s = setup();
+    s.tasks.push(task("Plan the launch", { id: "tp", priority: "urgent" }));
+    // "Write the post" (a mission, with the brief's reason) is under the urgent
+    // "Plan the launch" (no mission). "Needs you now" shows the reasons of its rows.
+    await startApp({
+      ...s,
+      links: [
+        { key: "task:ta", main: "task:tp", by: "aifred", why: "Launch work." },
+        { key: "task:tc", main: "task:tp", by: "aifred", why: "Launch work." },
+      ],
+    });
+    const now = await screen.findByRole("list", { name: "Needs you now" });
+    expect(within(now).getByRole("button", { name: "Open details: Plan the launch" })).toBeInTheDocument();
+    // Only the mission card shows the reason and the next action.
+    expect(screen.getAllByText("The launch is on Friday.")).toHaveLength(1);
+    expect(screen.getAllByText("Write the first draft.")).toHaveLength(1);
+  });
+
+  it("when the first item closed, the next open item gives the reason", async () => {
+    const s = setup();
+    const b = s.briefs[today()];
+    b.missions[0].items[0].open = false;
+    s.tasks[0].done = true;
+    (b.why as Record<string, string>)["task:tb"] = "Ana waits for it.";
+    await startApp(s);
+    const list = await screen.findByRole("list", { name: "Today's missions" });
+    expect(within(list).getByText("Ana waits for it.")).toBeInTheDocument();
+    expect(within(list).queryByText("Write the first draft.")).not.toBeInTheDocument();
+  });
+
+  it("shows the parent of the first item as the context of the mission", async () => {
+    const s = setup();
+    await startApp({ ...s, links: [{ key: "task:ta", main: "task:tc", by: "aifred", why: "" }] });
+    const list = await screen.findByRole("list", { name: "Today's missions" });
+    expect(within(list).getByText(/Part of/)).toBeInTheDocument();
+    await userEvent.click(within(list).getByRole("button", { name: "Open details: Pay rent" }));
+    expect(await within(details()).findByDisplayValue("Pay rent")).toBeInTheDocument();
+  });
+
+  it("takes an item out of a mission, with an undo", async () => {
+    const fake = await startApp(setup());
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const panel = screen.getByRole("group", { name: "Mission: Ship the launch post" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Take out of the mission: Send the post" }));
+    expect(await screen.findByText(/Taken out of Ship the launch post: Send the post\. AIfred does not put it back\./)).toBeInTheDocument();
+    await waitFor(() => expect(within(panel).queryByRole("button", { name: "Open details: Send the post" })).not.toBeInTheDocument());
+    expect(fake.missionOut).toEqual(["5:task:tb"]);
+    // The undo puts it back in its place.
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(within(panel).getByRole("button", { name: "Open details: Send the post" })).toBeInTheDocument());
+    expect(fake.missionOut).toEqual([]);
+    expect(fake.briefs[today()]!.missions![0]!.items.map((i) => i.key)).toEqual(["task:ta", "task:tb", "github:acme/shop#7"]);
+  });
+
+  it("the last open item of a mission cannot go out", async () => {
+    const s = setup();
+    const m = s.briefs[today()].missions[0];
+    m.items = [m.items[0]!, { ...m.items[1]!, open: false }];
+    s.tasks[1].done = true;
+    await startApp(s);
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const panel = screen.getByRole("group", { name: "Mission: Ship the launch post" });
+    expect(within(panel).queryByRole("button", { name: /Take out of the mission/ })).not.toBeInTheDocument();
+  });
+
+  it("adds an item to a mission, with an undo", async () => {
+    const fake = await startApp(setup());
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const panel = screen.getByRole("group", { name: "Mission: Ship the launch post" });
+    await userEvent.selectOptions(within(panel).getByRole("combobox", { name: "Add an item to the mission: Ship the launch post" }), "task:tc");
+    expect(await screen.findByText(/Added to Ship the launch post: Pay rent\. AIfred keeps it there\./)).toBeInTheDocument();
+    expect(await within(panel).findByText("You added it")).toBeInTheDocument();
+    expect(fake.briefs[today()]!.missions![0]!.items.at(-1)).toMatchObject({ key: "task:tc", by: "you" });
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(within(panel).queryByText("You added it")).not.toBeInTheDocument());
+    expect(fake.briefs[today()]!.missions![0]!.items).toHaveLength(3);
+  });
+
+  it("a fast second tick waits for the first answer", async () => {
+    const fake = await startApp(setup());
+    let free = () => {};
+    fake.onMissionStep = () => new Promise<void>((r) => (free = r));
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const panel = screen.getByRole("group", { name: "Mission: Ship the launch post" });
+    // The second click comes before the first answer. It must not send "done" a second time.
+    await userEvent.dblClick(within(panel).getByRole("button", { name: "Step done: Draft the post" }));
+    free();
+    expect(await within(panel).findByText(/= 20%/)).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "set_mission_step")).toMatchObject([{ args: { done: true } }]);
+  });
+
+  it("a tick in the checklist changes the progress, not the items", async () => {
+    const fake = await startApp(setup());
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const panel = screen.getByRole("group", { name: "Mission: Ship the launch post" });
+    expect(within(panel).getByText(/Progress: 0 of 2 steps done and 0 of 3 items closed/)).toBeInTheDocument();
+    await userEvent.click(within(panel).getByRole("button", { name: "Step done: Draft the post" }));
+    expect(await within(panel).findByText(/= 20%/)).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "set_mission_step")).toMatchObject([{ args: { id: 5, index: 0, done: true } }]);
+    expect(fake.tasks.every((t) => !t.done)).toBe(true);
+  });
+
+  it("Done asks which items to close, and GitHub items cannot close", async () => {
+    const fake = await startApp(setup());
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    const ask = screen.getByRole("group", { name: "Finish mission: Ship the launch post" });
+    expect(within(ask).getByRole("checkbox", { name: "Fix the post page" })).toBeDisabled();
+    // Keep "Send the post" open.
+    await userEvent.click(within(ask).getByRole("checkbox", { name: "Send the post" }));
+    await userEvent.click(within(ask).getByRole("button", { name: "Finish mission" }));
+    await waitFor(() => expect(fake.tasks.find((t) => t.id === "ta")?.done).toBe(true));
+    expect(fake.tasks.find((t) => t.id === "tb")?.done).toBe(false);
+    expect(screen.queryByRole("list", { name: "Today's missions" })).not.toBeInTheDocument();
+    // With no mission left, the home page shows the list in groups again.
+    expect(await screen.findByRole("button", { name: "Open details: Send the post" })).toBeInTheDocument();
+    // The one undo opens the mission and its closed task again.
+    expect(screen.getByText("Mission done: Ship the launch post. Undo opens it and its closed item again.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByRole("list", { name: "Today's missions" })).toBeInTheDocument();
+    await waitFor(() => expect(fake.tasks.find((t) => t.id === "ta")?.done).toBe(false));
+  });
+
+  it("a ClickUp item with a running timer does not hide the Undo of the mission", async () => {
+    const s = setup();
+    s.briefs[today()].missions[0].items.push({ key: "clickup:86a", title: "Checkout totals", open: true, by: "aifred" });
+    const fake = await startApp({
+      ...s,
+      clickupToken: "pk_test",
+      clickup: [clickupItem("86a", "Checkout totals")],
+      sessions: [{ key: "clickup:86a", started: Math.floor(Date.now() / 1000) - 600, ended: null }],
+    });
+    // The work ends after the mission is done, as it can in the app.
+    let endWork = () => {};
+    fake.beforeFinishWork = () => new Promise<void>((r) => (endWork = r));
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const panel = screen.getByRole("group", { name: "Mission: Ship the launch post" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Done" }));
+    const ask = screen.getByRole("group", { name: "Finish mission: Ship the launch post" });
+    await userEvent.click(within(ask).getByRole("button", { name: "Finish mission" }));
+    expect(await screen.findByText(/^Mission done: Ship the launch post\./)).toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "finish_work" && c.args.key === "clickup:86a")).toBe(true);
+    endWork();
+    await waitFor(() => expect(fake.workDone["clickup:86a"]).toBeDefined());
+    // Let the app handle the answer.
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    // The work ends with no toast of its own: the toast of the mission stays, with its Undo.
+    expect(screen.getByText(/^Mission done: Ship the launch post\./)).toBeInTheDocument();
+    expect(screen.queryByText(/^Finished:/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Undo" })).toBeInTheDocument();
+  });
+
+  it("when an item does not close, the mission stays open", async () => {
+    const fake = await startApp(setup());
+    fake.fail.set_task_done = "the disk is full";
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await userEvent.click(screen.getByRole("button", { name: "Finish mission" }));
+    // The reason of the failed close stays in the text.
+    expect(await screen.findByText(/^The mission stays open: AIfred could not close Write the post\. .*the disk is full/)).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "finish_mission")).toEqual([]);
+    expect(screen.getByRole("list", { name: "Today's missions" })).toBeInTheDocument();
+  });
+
+  it("Not today hides the mission for today, with an undo", async () => {
+    const fake = await startApp(setup());
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    await userEvent.click(screen.getByRole("button", { name: "Not today: Ship the launch post" }));
+    expect(await screen.findByText("AIfred will not count this for today: Ship the launch post")).toBeInTheDocument();
+    expect(screen.queryByText("Ship the launch post")).not.toBeInTheDocument();
+    expect(fake.corrections.map((c) => c.key).sort()).toEqual(["github:acme/shop#7", "task:ta", "task:tb"]);
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("Ship the launch post")).toBeInTheDocument();
+    expect(fake.corrections).toEqual([]);
   });
 });
 
@@ -1702,7 +2084,7 @@ describe("Tasks page", () => {
     // The panel stays open when you show AIfred's tasks.
     await userEvent.click(within(screen.getByRole("group", { name: "Whose tasks" })).getByRole("button", { name: "AIfred's" }));
     expect(screen.queryByRole("region", { name: "Your tasks" })).not.toBeInTheDocument();
-    const group = await within(details()).findByRole("list", { name: "Same work" });
+    const group = await within(details()).findByRole("list", { name: "Task tree" });
     await userEvent.click(within(group).getByRole("button", { name: "Open details: Checkout totals" }));
     expect(screen.getByRole("button", { name: "Both" })).toHaveAttribute("aria-pressed", "true");
     expect(within(screen.getByRole("region", { name: "Your tasks" })).getByText("Tax work")).toBeInTheDocument();

@@ -20,8 +20,12 @@
 //! reminders and checks (doer "aifred", jobs.rs) in one list. So the AI
 //! plans with all work, and it knows what AIfred already does.
 //!
-//! `same_work` lists the items that the user linked as one piece of work
-//! (links.rs). The AI must treat each list as one item.
+//! Each item that is a subtask (links.rs) has a `parent`: the key of the
+//! nearest open item above it. So the AI sees the trees, and it can pick
+//! the next small subtask as a mission, with its parent as context.
+//!
+//! `missions` lists the open missions (missions.rs), so the brief can keep
+//! a mission when its work stays the same.
 
 use std::path::Path;
 
@@ -67,6 +71,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
     let google_account = crate::google::account(dir);
     let gmail_account = crate::gmail::login(dir);
     db::read(dir, |c| {
+        let parents = crate::links::parents_for_ai(c)?;
         let mut q = c.prepare(
             "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM user_task WHERE done = 0 ORDER BY created DESC",
         )?;
@@ -97,8 +102,9 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             })?
             .collect::<Result<_, _>>()?;
         tasks.extend(aifred_tasks(c)?);
+        add_parents(&mut tasks, &parents);
 
-        let github: Vec<Value> = rows(c, "github", None)?
+        let mut github: Vec<Value> = rows(c, "github", None)?
             .into_iter()
             .map(|(data, summary)| {
                 let i: GithubItem = serde_json::from_str(&data)?;
@@ -114,6 +120,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 Ok(v)
             })
             .collect::<anyhow::Result<_>>()?;
+        add_parents(&mut github, &parents);
 
         let goals: Vec<Value> = crate::goals::list_in(c)?
             .into_iter()
@@ -138,7 +145,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             }
         }
 
-        let mail: Vec<Value> = match &gmail_account {
+        let mut mail: Vec<Value> = match &gmail_account {
             Some(a) => rows(c, crate::gmail::SOURCE, Some(a))?
                 .into_iter()
                 .map(|(data, summary)| {
@@ -148,6 +155,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 .collect::<anyhow::Result<_>>()?,
             None => Vec::new(),
         };
+        add_parents(&mut mail, &parents);
         if let Some(email) = crate::gmail::for_ai(c, gmail_account.as_deref(), mail)? {
             out["email"] = email;
         }
@@ -168,10 +176,9 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             out["waiting_for"] = waiting.into();
         }
 
-        // Items in more than one place that are one piece of work (links.rs).
-        let same = crate::links::for_ai(c)?;
-        if !same.is_empty() {
-            out["same_work"] = json!(same);
+        let missions = crate::missions::for_ai(c)?;
+        if !missions.is_empty() {
+            out["missions"] = missions.into();
         }
 
         // What AIfred learned from the user: the corrections of the brief
@@ -195,7 +202,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 .map(|(data, summary)| Ok((serde_json::from_str(&data)?, summary)))
                 .collect::<anyhow::Result<_>>()?;
             items.sort_by_key(|(i, _)| std::cmp::Reverse(i.updated));
-            let tasks: Vec<Value> = items
+            let mut tasks: Vec<Value> = items
                 .into_iter()
                 .map(|(i, summary)| {
                     let mut v = json!({
@@ -210,11 +217,23 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                     v
                 })
                 .collect();
+            add_parents(&mut tasks, &parents);
             out["clickup"] =
                 json!({ "fetched_at": fetched_at(c, "clickup", Some(account))?, "tasks": tasks });
         }
         Ok(out)
     })
+}
+
+/// Puts `parent` into each item of a list of items (tasks, GitHub,
+/// ClickUp, email) that has one in `parents`. Only these lists get it: a
+/// correction or a review pick also has a `key`, but it is not an item.
+fn add_parents(items: &mut [Value], parents: &std::collections::HashMap<String, String>) {
+    for v in items {
+        if let Some(p) = v["key"].as_str().and_then(|k| parents.get(k)).cloned() {
+            v["parent"] = p.into();
+        }
+    }
 }
 
 /// The data and the summary to show of each item in the saved list of `source`.
@@ -501,12 +520,14 @@ mod tests {
             "Write the notes for the release."
         );
         assert_eq!(o["clickup"]["fetched_at"], 2000);
-        assert!(o.get("same_work").is_none(), "no links: no same_work");
-        crate::links::link(&d, "clickup:86a", "github:acme/shop#7", 1).unwrap();
-        assert_eq!(
-            build(&d, Some("acct")).unwrap()["same_work"],
-            json!([["clickup:86a", "github:acme/shop#7"]])
+        assert!(
+            o["github"]["items"][0].get("parent").is_none(),
+            "no links: no parent"
         );
+        crate::links::link(&d, "clickup:86a", "github:acme/shop#7", 1).unwrap();
+        let o = build(&d, Some("acct")).unwrap();
+        assert_eq!(o["github"]["items"][0]["parent"], "clickup:86a");
+        assert!(o["clickup"]["tasks"][0].get("parent").is_none());
         assert!(
             build(&d, None).unwrap().get("clickup").is_none(),
             "no ClickUp part when it is not connected"

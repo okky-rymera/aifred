@@ -31,6 +31,9 @@ export type Item = {
   minutesBy: "you" | "aifred" | null;
   /** Why it needs you, from the brief. */
   why?: string;
+  /** The item that `why` is about, when it is not this item: a tree row can
+   * show the reason of one of its subtasks (joinLinked). A correction goes to it. */
+  whyKey?: string;
   /** The goal that it serves, from the brief. */
   goal?: string;
   /** The next action, from the brief. */
@@ -43,7 +46,7 @@ export type Item = {
   gh?: api.GithubItem;
   cu?: api.ClickupItem;
   mail?: api.Mail;
-  /** The other open items of the same piece of work, shown under this row (joinLinked). */
+  /** The other open items of the same tree of subtasks, shown under this row (joinLinked). */
   linked?: Item[];
 };
 
@@ -220,27 +223,61 @@ export function buildItems(
   return out;
 }
 
-// ---------- One piece of work in many places (links.rs) ----------
+// ---------- Subtasks (links.rs) ----------
 
-/** The most items in one piece of work, like links::MAX_GROUP. */
+/** The most items in one tree, like links::MAX_GROUP. */
 export const MAX_GROUP = 10;
 
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** The groups of linked items, by main item. Each group has the main item
- * first, then the other items in key order, like links.rs. This is the one
- * place that reads groups from the links: the home list, the item panel,
- * the link actions, and the test fake all use it. */
+/** The parent of `key`, or undefined for a top item. */
+export const parentOf = (links: api.ItemLink[], key: string) => links.find((l) => l.key === key)?.main;
+
+/** The top item of `key`'s tree. The walk stops after MAX_GROUP levels, like links::head_in. */
+export function rootOf(links: api.ItemLink[], key: string): string {
+  let at = key;
+  for (let n = 0; n < MAX_GROUP; n++) {
+    const p = parentOf(links, at);
+    if (!p) break;
+    at = p;
+  }
+  return at;
+}
+
+/** How many levels `key` is under its top item: 0 for a top item. */
+export const depthOf = (links: api.ItemLink[], key: string) => {
+  let n = 0;
+  for (let at = parentOf(links, key); at && n < MAX_GROUP; at = parentOf(links, at)) n++;
+  return n;
+};
+
+/** The trees, by top item. Each tree has the top item first, then each item
+ * before its subtasks, the subtasks of one item in key order, like
+ * links::members_in. This is the one place that reads trees from the links:
+ * the home list, the item panel, the link actions, and the test fake all use it. */
 export function linkGroups(links: api.ItemLink[]): Map<string, string[]> {
+  const kids = new Map<string, string[]>();
+  for (const l of [...links].sort((a, b) => byText(a.key, b.key))) kids.set(l.main, [...(kids.get(l.main) ?? []), l.key]);
+  const under = new Set(links.map((l) => l.key));
   const out = new Map<string, string[]>();
-  for (const l of [...links].sort((a, b) => byText(a.key, b.key))) out.set(l.main, [...(out.get(l.main) ?? [l.main]), l.key]);
+  for (const top of kids.keys()) {
+    if (under.has(top)) continue;
+    const tree: string[] = [];
+    const todo = [top];
+    while (todo.length && tree.length <= MAX_GROUP * 2) {
+      const k = todo.pop()!;
+      if (tree.includes(k)) break;
+      tree.push(k);
+      todo.push(...[...(kids.get(k) ?? [])].reverse());
+    }
+    out.set(top, tree);
+  }
   return out;
 }
 
-/** The keys of the group of `key`, the main item first. Only `key` when it has no links. */
+/** The keys of the tree of `key`, the top item first. Only `key` when it has no links. */
 export function groupOf(links: api.ItemLink[], key: string): string[] {
-  const head = links.find((l) => l.key === key)?.main ?? key;
-  return linkGroups(links).get(head) ?? [key];
+  return linkGroups(links).get(rootOf(links, key)) ?? [key];
 }
 
 /** The item of a group that shows as the row in the home list: the main
@@ -249,8 +286,8 @@ export function rowKey(group: string[], byKey: Map<string, Item>): string {
   return group.find((k) => byKey.get(k)?.done === false) ?? group[0];
 }
 
-/** The rows of the home list: each piece of work in many places is one row.
- * The row is rowKey() of the group. The other open items go in `linked`.
+/** The rows of the home list: each tree of subtasks is one row.
+ * The row is rowKey() of the tree. The other open items go in `linked`.
  * The row has the earliest due day and the highest priority of its open
  * items, so late work in a linked item is not hidden. For the same reason,
  * the row starts later only when all its open items start later. Done
@@ -277,6 +314,7 @@ export function joinLinked(items: Item[], links: api.ItemLink[]): Item[] {
       start: starts.some((d) => !d) ? null : (starts as string[]).sort()[0],
       priority: pri[0] ?? null,
       why: ranked.why,
+      whyKey: ranked.key === head.key ? undefined : ranked.key,
       goal: head.goal ?? withWhy?.goal,
       next: ranked.next,
       draft: ranked.draft,
