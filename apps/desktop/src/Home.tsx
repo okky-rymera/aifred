@@ -10,6 +10,7 @@ import { GoalTag, GoalsCard } from "./Goals";
 import { DayCheckCard, WeekReviewCard } from "./Review";
 import { srcText } from "./Links";
 import { WaitingCard } from "./Waiting";
+import { HelpCard } from "./Context";
 import { NextStep, stepTaskKey } from "./Steps";
 import { SRC_NAME, addDays, parentOf, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, type Item } from "./items";
 
@@ -982,6 +983,7 @@ export function Home() {
           {reviewCards.day !== "hidden" && <DayCheckCard force={reviewCards.day === "open"} onClose={() => setReviewCard("day", "hidden")} />}
           <GoalsCard />
           <BriefCard needYou={g.now.length + g.today.length} />
+          <HelpCard />
           {reviewCards.week !== "hidden" && <WeekReviewCard force={reviewCards.week === "open"} onClose={() => setReviewCard("week", "hidden")} />}
           <WaitingCard />
           {/* Before the brief makes missions, the list in groups. */}

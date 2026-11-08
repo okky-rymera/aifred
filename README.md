@@ -291,6 +291,18 @@ A mission is the next small piece of work: usually one open item, sometimes two 
 - A tick in the checklist does not change the items.
 - An open mission that did not change for 14 days, and that today's brief did not rank, goes away.
 
+## What AIfred knows about an item
+
+AIfred keeps short notes about an item: what it is, how it links to other work, and how urgent it is. The notes come from your answers (`crates/aifred-core/src/context.rs`).
+
+- Each brief finds the items that AIfred cannot rank. Such an item has a title of 4 words or fewer, no description, no due day, no parent, no goal, and no notes. Your tasks, GitHub items, and ClickUp tasks can be such items. Emails and AIfred's own tasks are never asked about.
+- The card "Help AIfred understand" on the home page asks about at most 3 of these items each day. The items of the brief come first. It costs no AI call: a fixed rule picks the items.
+- Type your answer in the card. The item panel opens, and the answer goes to the chat of the item. AIfred saves a short summary with the `set_item_context` tool (at most 600 characters). Then the item leaves the card.
+- "Skip": AIfred does not ask about the item again. The message has an undo.
+- The brief, the overview, and the chat of the item get the notes. In the chat of any item, tell AIfred new facts, and it changes the notes.
+- The item panel shows the notes under "What AIfred knows", closed at the start. You can change them or clear them. Each change has an undo.
+- AIfred saves only facts that you gave. It never saves text from emails, GitHub, or ClickUp as notes.
+
 ## Suggested work
 
 - For each item that the brief names, the brief also gives the next action, for example "Next: Reply to Ana with the price." It shows under the reason in the home list and in the item panel. It costs no extra AI call: the brief call writes it.

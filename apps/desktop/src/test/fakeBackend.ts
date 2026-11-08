@@ -23,6 +23,7 @@ import type {
   Goals,
   GoogleStatus,
   GithubItem,
+  ItemContext,
   ItemDetails,
   ItemLink,
   Job,
@@ -74,6 +75,8 @@ export type Fake = {
   onMissionStep?: () => Promise<void> | void;
   /** Runs before day_plan answers. A test can hold the plan load with it. */
   onDayPlan?: (day: string) => Promise<void> | void;
+  /** Runs before item_context answers. A test can hold the notes load with it. */
+  onItemContext?: (key: string) => Promise<void> | void;
   /** Runs before connect_google answers, like a user in the browser. A
    * rejected promise is a login that stopped. */
   onConnectGoogle?: () => Promise<void> | void;
@@ -201,11 +204,22 @@ export type Fake = {
   links: ItemLink[];
   /** The items that the user took out of a mission, as "id:key" (mission_out). */
   missionOut: string[];
+  /** AIfred's notes about items, by key (context.rs). */
+  contexts: Record<string, ItemContext>;
+  /** The items that the user skipped in "Help AIfred understand". */
+  contextSkip: string[];
 };
 
 let nextId = 1;
 /** Unix seconds, like the Rust app (tasks.rs). Not milliseconds. */
 const nowSecs = () => Math.floor(Date.now() / 1000);
+
+/** Like items::split in Rust: the trimmed key, or an error for a key that is not an item key. */
+const itemKey = (key: unknown) => {
+  const k = String(key).trim();
+  if (!/^(task|github|clickup|gmail):./.test(k)) throw `"${k}" is not an item key`;
+  return k;
+};
 
 export function task(title: string, extra: Partial<Task> = {}): Task {
   const n = nextId++;
@@ -390,6 +404,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     picks: [],
     goalDone: {},
     links: [],
+    contexts: {},
+    contextSkip: [],
     missionOut: [],
     ...init,
   };
@@ -1204,6 +1220,10 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         if (b?.missions) b.missions = b.missions.filter((m) => m.status === "open" && m.items.length > 0 && !m.items.some((i) => corrected.has(i.key)));
         // Like sort::moves_since_in: only AIfred's moves that are still in place.
         if (b?.moves) b.moves = b.moves.filter((m) => fake.links.some((l) => l.key === m.key && l.main === m.main && l.by === "aifred"));
+        // Like brief::get: no question about an item with notes, a skipped item, or a corrected item.
+        if (b?.ask) b.ask = b.ask.filter((k) => !fake.contexts[k] && !fake.contextSkip.includes(k) && !corrected.has(k));
+        // Like brief::get: the question comes from the Rust app (context::QUESTION).
+        if (b) b.question = "What is this? Is it part of other work? Is it urgent, and by when must it be done?";
         return b;
       }
       case "correct_brief":
@@ -1353,6 +1373,36 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         if (fake.summaries[args.key]) d.summary = fake.summaries[args.key];
         return d;
       }
+      // Like context.rs: get, set (with shorten and the key check), restore, and skip.
+      case "item_context": {
+        const key = itemKey(args.key);
+        await fake.onItemContext?.(key);
+        return structuredClone(fake.contexts[key] ?? null);
+      }
+      case "set_item_context": {
+        const key = itemKey(args.key);
+        const before = fake.contexts[key] ?? null;
+        const full = String(args.text).trim();
+        const chars = Array.from(full);
+        const text = chars.length <= 600 ? full : `${chars.slice(0, 599).join("").trimEnd()}…`;
+        if (text) fake.contexts[key] = { key, text, by: "you", updated: nowSecs() };
+        else delete fake.contexts[key];
+        return before;
+      }
+      case "restore_item_context": {
+        const key = itemKey(args.key);
+        if (args.before) {
+          if (args.before.key !== key) throw `the note is for ${args.before.key}, not for ${key}`;
+          if (args.before.by !== "you" && args.before.by !== "aifred") throw `"${args.before.by}" is not "you" or "aifred"`;
+          fake.contexts[key] = args.before;
+        } else delete fake.contexts[key];
+        return null;
+      }
+      case "skip_context_question":
+        itemKey(args.key);
+        fake.contextSkip = fake.contextSkip.filter((k) => k !== args.key);
+        if (!args.undo) fake.contextSkip.push(args.key);
+        return null;
       case "update_status":
         return fake.update;
       case "check_update":

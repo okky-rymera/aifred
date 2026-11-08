@@ -7,6 +7,7 @@ pub mod brief;
 pub mod calendar;
 pub mod clickup;
 pub mod clickup_list;
+pub mod context;
 pub mod db;
 pub mod docs;
 pub mod drafts;

@@ -190,7 +190,6 @@ export type PlanItem = { key: string; why?: string; goal?: number };
 /** `mode` "review": a review put items in a day with no plan. You did not pick yet how to plan the day. */
 export type DayPlan = { day: string; mode: "ai" | "self" | "review"; items: PlanItem[]; updated: number };
 export type Estimate = { minutes: number; by: "you" | "aifred" };
-/** `goal`: the id of the goal that an item serves, by item key. */
 /** The text that AIfred can draft for a step later: an email, text in a Google Doc, or a change in a Google Sheet. */
 export type DraftKind = "email" | "doc" | "sheet";
 
@@ -199,6 +198,7 @@ export type Brief = {
   written: number;
   text: string;
   why: Record<string, string>;
+  /** The id of the goal that an item serves, by item key. */
   goal?: Record<string, number>;
   /** The next action for each item in `why`. */
   next?: Record<string, string>;
@@ -211,6 +211,10 @@ export type Brief = {
   moves?: Moved[];
   /** The count of older moves that `moves` does not give: it gives only the newest. */
   moves_more?: number;
+  /** The items that AIfred cannot rank, at most 3. "Help AIfred understand" asks about them. */
+  ask?: string[];
+  /** The question about the items in `ask` (context::QUESTION in Rust). */
+  question?: string;
 };
 
 /** One move of AIfred: `key` is now a subtask of `main`, for the reason `why`. */
@@ -420,6 +424,16 @@ export const jobRuns = (id: string | null, limit: number, skipped: boolean, brie
 export const setJobStatus = (id: string, status: "active" | "paused") => invoke<Job>("set_job_status", { id, status });
 export const deleteJob = (id: string) => invoke<void>("delete_job", { id });
 export const itemDetails = (key: string) => invoke<ItemDetails>("item_details", { key });
+
+/** AIfred's short notes about one item, from your answers (context.rs). */
+export type ItemContext = { key: string; text: string; by: "you" | "aifred"; updated: number };
+/** Loads AIfred's notes about one item. null: the item has no notes. */
+export const itemContext = (key: string) => invoke<ItemContext | null>("item_context", { key });
+/** Saves your notes. "" clears them. It gives the notes from before, for the Undo. */
+export const setItemContext = (key: string, text: string) => invoke<ItemContext | null>("set_item_context", { key, text });
+export const restoreItemContext = (key: string, before: ItemContext | null) => invoke<null>("restore_item_context", { key, before });
+/** AIfred does not ask about the item again. `undo` true asks again. */
+export const skipContextQuestion = (key: string, undo = false) => invoke<null>("skip_context_question", { key, undo });
 /** One step that AIfred suggests for an item. `draft`: AIfred can draft its text later. */
 export type Step = { text: string; draft?: DraftKind };
 /** AIfred splits an item into steps (steps.rs). One AI call. It saves nothing. */

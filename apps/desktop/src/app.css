@@ -328,6 +328,13 @@ button.chip:hover { filter: brightness(.95); }
 .waiting .eyebrow .linkbtn { text-transform: none; letter-spacing: 0; font-family: var(--f-body); }
 .waiting .eyebrow .sp { flex: 1; }
 .w-empty { margin: -4px 0 8px; }
+.help .h-row { display: flex; flex-direction: column; gap: 4px; }
+.help .h-q { display: flex; align-items: baseline; gap: 4px; font-size: 13.5px; min-width: 0; }
+.help .h-q .ttl { padding: 0; text-align: left; }
+.help .h-ans { display: flex; align-items: center; gap: 8px; }
+.help .h-ans input { flex: 1; min-width: 0; }
+.d-ctx summary { cursor: pointer; }
+.d-ctx .d-ctx-body { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .w-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .w-row { display: flex; align-items: center; gap: 8px; font-size: 13.5px; min-width: 0; }
 .w-row.done { color: var(--muted); }

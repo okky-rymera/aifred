@@ -21,6 +21,8 @@ export type AppCtx = {
   planItems: Item[];
   sched: Schedule;
   brief: api.Brief | null;
+  /** Reads the brief of `day` again, when it is still on the screen. */
+  reloadBrief: (day: string | undefined) => void;
   /** null until the goals are loaded. */
   goals: api.Goals | null;
   /** The text of a goal by its id. */

@@ -1709,6 +1709,52 @@ async fn item_details(app: State<'_, App>, key: String) -> CmdResult<ItemDetails
     blocking(&app, move |a| aifred_core::items::details(&a.dir, &key)).await
 }
 
+/// AIfred's notes about one item (context.rs), or None.
+#[tauri::command]
+async fn item_context(
+    app: State<'_, App>,
+    key: String,
+) -> CmdResult<Option<aifred_core::context::ItemContext>> {
+    blocking(&app, move |a| aifred_core::context::get(&a.dir, &key)).await
+}
+
+/// The user's change of the notes of an item. "" clears them. It gives the
+/// notes from before, for the Undo.
+#[tauri::command]
+async fn set_item_context(
+    app: State<'_, App>,
+    key: String,
+    text: String,
+) -> CmdResult<Option<aifred_core::context::ItemContext>> {
+    blocking(&app, move |a| {
+        Ok(aifred_core::context::set(&a.dir, &key, &text, "you", now())?.before)
+    })
+    .await
+}
+
+/// The undo of set_item_context.
+#[tauri::command]
+async fn restore_item_context(
+    app: State<'_, App>,
+    key: String,
+    before: Option<aifred_core::context::ItemContext>,
+) -> CmdResult<()> {
+    blocking(&app, move |a| {
+        aifred_core::context::restore(&a.dir, &key, before.as_ref())
+    })
+    .await
+}
+
+/// "Skip" on a question of "Help AIfred understand": AIfred does not ask
+/// about the item again. `undo` true asks again.
+#[tauri::command]
+async fn skip_context_question(app: State<'_, App>, key: String, undo: bool) -> CmdResult<()> {
+    blocking(&app, move |a| {
+        aifred_core::context::skip(&a.dir, &key, undo, now())
+    })
+    .await
+}
+
 /// Adds the app state and all commands. The tests use the same list.
 fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tauri::Builder<R> {
     builder.manage(app).invoke_handler(tauri::generate_handler![
@@ -1802,6 +1848,10 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         delete_job,
         item_meta,
         item_details,
+        item_context,
+        set_item_context,
+        restore_item_context,
+        skip_context_question,
         suggest_steps,
         add_steps,
         write_reply,
@@ -2180,6 +2230,53 @@ mod tests {
         assert!(call(&win, "finish_mission", json!({ "id": id })).is_err());
         call(&win, "reopen_mission", json!({ "id": id })).unwrap();
         assert!(call(&win, "reopen_mission", json!({ "id": id })).is_err());
+    }
+
+    #[test]
+    fn task_context_commands() {
+        let (_app, win, _dir) = window("context");
+        let key = "task:t1";
+        assert_eq!(
+            call(&win, "item_context", json!({ "key": key })).unwrap(),
+            Value::Null
+        );
+        let before = call(
+            &win,
+            "set_item_context",
+            json!({ "key": key, "text": "Rent." }),
+        )
+        .unwrap();
+        assert_eq!(before, Value::Null);
+        let saved = call(&win, "item_context", json!({ "key": key })).unwrap();
+        assert_eq!(
+            (saved["text"].clone(), saved["by"].clone()),
+            (json!("Rent."), json!("you"))
+        );
+        let before = call(&win, "set_item_context", json!({ "key": key, "text": "" })).unwrap();
+        assert_eq!(before, saved);
+        call(
+            &win,
+            "restore_item_context",
+            json!({ "key": key, "before": before }),
+        )
+        .unwrap();
+        assert_eq!(
+            call(&win, "item_context", json!({ "key": key })).unwrap(),
+            saved
+        );
+        call(
+            &win,
+            "skip_context_question",
+            json!({ "key": key, "undo": false }),
+        )
+        .unwrap();
+        call(
+            &win,
+            "skip_context_question",
+            json!({ "key": key, "undo": true }),
+        )
+        .unwrap();
+        assert!(call(&win, "item_context", json!({ "key": "jira:1" })).is_err());
     }
 
     #[test]

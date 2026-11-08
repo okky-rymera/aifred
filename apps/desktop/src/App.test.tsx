@@ -2382,3 +2382,211 @@ describe("Sheet comments", () => {
     expect(await within(details()).findByText(/Cannot suggest comments: this is not the link of a Google Sheet/)).toBeInTheDocument();
   });
 });
+
+describe("task context", () => {
+  it("asks about the items that AIfred cannot rank, and the answer goes to the item chat", async () => {
+    const sync = task("Fix sync");
+    const call = task("Call Bo");
+    const fake = await startApp({
+      tasks: [sync, call],
+      briefs: { [today()]: { day: today(), written: 3, text: "Two things.", why: {}, ask: [`task:${sync.id}`, `task:${call.id}`] } },
+    });
+    // The answer waits until the panel shows the notes from before.
+    const hold = deferred<void>();
+    fake.onAskSide = async (p) => {
+      await hold.promise;
+      // Like the set_item_context tool: AIfred saves a short summary.
+      fake.contexts[`task:${sync.id}`] = { key: `task:${sync.id}`, text: "The ClickUp sync bug. Due Friday.", by: "aifred", updated: 5 };
+      return answer(`Saved: ${p}`);
+    };
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    expect(within(card).getByText(/What is this\?/)).toBeInTheDocument();
+    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about Fix sync" }), "the sync bug, due Friday{Enter}");
+    expect(await within(details()).findByText("nothing yet")).toBeInTheDocument();
+    hold.resolve();
+    // The panel of the item opens with the answer in its chat.
+    expect(await within(details()).findByText("Saved: the sync bug, due Friday")).toBeInTheDocument();
+    expect(fake.side[`item:task:${sync.id}`]?.[0].text).toBe("the sync bug, due Friday");
+    // The item has notes now, so the card asks only about the other item.
+    await waitFor(() => expect(within(card).queryByRole("textbox", { name: "Your answer about Fix sync" })).not.toBeInTheDocument());
+    expect(within(card).getByRole("textbox", { name: "Your answer about Call Bo" })).toBeInTheDocument();
+    // The panel shows what AIfred knows.
+    expect(await within(details()).findByRole("textbox", { name: "What AIfred knows" })).toHaveValue("The ClickUp sync bug. Due Friday.");
+    // AIfred says that it saved the notes, with an undo.
+    expect(await screen.findByText("AIfred saved what it knows about this item.")).toBeInTheDocument();
+
+    // Skip: AIfred does not ask again. Undo asks again.
+    await userEvent.click(within(card).getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Help AIfred understand" })).not.toBeInTheDocument());
+    expect(fake.contextSkip).toEqual([`task:${call.id}`]);
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.contextSkip).toEqual([]));
+    expect(await screen.findByRole("textbox", { name: "Your answer about Call Bo" })).toBeInTheDocument();
+  });
+
+  it("a failed answer stays in its box on the home page, so you can send it again", async () => {
+    const sync = task("Fix sync");
+    const fake = await startApp({
+      tasks: [sync],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: [`task:${sync.id}`] } },
+    });
+    fake.onAskSide = async () => {
+      throw "the AI is busy";
+    };
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    const box = within(card).getByRole("textbox", { name: "Your answer about Fix sync" });
+    await userEvent.type(box, "the sync bug{Enter}");
+    expect(await within(details()).findByText(/the AI is busy/)).toBeInTheDocument();
+    await waitFor(() => expect(box).toHaveValue("the sync bug"));
+  });
+
+  it("notes that you save in the item panel end the question on the home page", async () => {
+    const sync = task("Fix sync");
+    await startApp({
+      tasks: [sync],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: [`task:${sync.id}`] } },
+    });
+    await screen.findByRole("region", { name: "Help AIfred understand" });
+    await openItem("Fix sync");
+    const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
+    await userEvent.type(box, "The sync bug. Due Friday.");
+    await userEvent.click(within(details()).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Help AIfred understand" })).not.toBeInTheDocument());
+  });
+
+  it("the undo of a skip asks again, also when the brief loaded again after the skip", async () => {
+    const sync = task("Fix sync");
+    const call = task("Call Bo");
+    const fake = await startApp({
+      tasks: [sync, call],
+      briefs: { [today()]: { day: today(), written: 3, text: "Two things.", why: {}, ask: [`task:${call.id}`] } },
+    });
+    fake.onAskSide = () => answer("Noted.");
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    await userEvent.click(within(card).getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(fake.contextSkip).toEqual([`task:${call.id}`]));
+    // A chat answer loads the brief again: the skipped item is not in it.
+    const loads = fake.calls.filter((c) => c.cmd === "brief").length;
+    await openItem("Fix sync");
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Ask AIfred about this item" }), "hi{Enter}");
+    await within(details()).findByText("Noted.");
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "brief").length).toBeGreaterThan(loads));
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    expect(await screen.findByRole("textbox", { name: "Your answer about Call Bo" })).toBeInTheDocument();
+  });
+
+  it("a chat answer does not replace notes that you changed and did not save", async () => {
+    const t = task("Fix sync");
+    const key = `task:${t.id}`;
+    const fake = await startApp({ tasks: [t], contexts: { [key]: { key, text: "A bug.", by: "you", updated: 5 } } });
+    fake.onAskSide = () => answer("Noted.");
+    await openItem("Fix sync");
+    const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
+    await waitFor(() => expect(box).toHaveValue("A bug."));
+    await userEvent.type(box, " Due Friday.");
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Ask AIfred about this item" }), "hi{Enter}");
+    await within(details()).findByText("Noted.");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(box).toHaveValue("A bug. Due Friday.");
+  });
+
+  it("the undo of AIfred's notes from the chat puts back the notes from before", async () => {
+    const t = task("Fix sync");
+    const key = `task:${t.id}`;
+    const fake = await startApp({ tasks: [t], contexts: { [key]: { key, text: "A bug.", by: "you", updated: 5 } } });
+    fake.onAskSide = () => {
+      fake.contexts[key] = { key, text: "The sync bug. Due Friday.", by: "aifred", updated: 6 };
+      return answer("Saved.");
+    };
+    await openItem("Fix sync");
+    const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
+    await waitFor(() => expect(box).toHaveValue("A bug."));
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Ask AIfred about this item" }), "it is due Friday{Enter}");
+    await waitFor(() => expect(box).toHaveValue("The sync bug. Due Friday."));
+    await screen.findByText("AIfred saved what it knows about this item.");
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.contexts[key]?.text).toBe("A bug."));
+    await waitFor(() => expect(box).toHaveValue("A bug."));
+  });
+
+  it("AIfred's clear of the notes in the chat shows a message with an undo", async () => {
+    const t = task("Fix sync");
+    const key = `task:${t.id}`;
+    const fake = await startApp({ tasks: [t], contexts: { [key]: { key, text: "A bug.", by: "you", updated: 5 } } });
+    fake.onAskSide = () => {
+      delete fake.contexts[key];
+      return answer("Cleared.");
+    };
+    await openItem("Fix sync");
+    const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
+    await waitFor(() => expect(box).toHaveValue("A bug."));
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Ask AIfred about this item" }), "forget it{Enter}");
+    await screen.findByText("AIfred cleared what it knows about this item.");
+    expect(box).toHaveValue("");
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.contexts[key]?.text).toBe("A bug."));
+    await waitFor(() => expect(box).toHaveValue("A bug."));
+  });
+
+  it("the undo of AIfred's notes keeps text that you typed and did not save", async () => {
+    const t = task("Fix sync");
+    const key = `task:${t.id}`;
+    const fake = await startApp({ tasks: [t], contexts: { [key]: { key, text: "A bug.", by: "you", updated: 5 } } });
+    fake.onAskSide = () => {
+      fake.contexts[key] = { key, text: "The sync bug.", by: "aifred", updated: 6 };
+      return answer("Saved.");
+    };
+    await openItem("Fix sync");
+    const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
+    await waitFor(() => expect(box).toHaveValue("A bug."));
+    await userEvent.type(box, " Due Friday.");
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Ask AIfred about this item" }), "hi{Enter}");
+    await screen.findByText("AIfred saved what it knows about this item.");
+    await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.contexts[key]?.text).toBe("A bug."));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(box).toHaveValue("A bug. Due Friday.");
+  });
+
+  it("the notes box of one item does not go to the next item", async () => {
+    const a = task("Fix sync");
+    const b = task("Call Bo");
+    const fake = await startApp({
+      tasks: [a, b],
+      contexts: { [`task:${b.id}`]: { key: `task:${b.id}`, text: "About Bo.", by: "you", updated: 5 } },
+    });
+    await openItem("Fix sync");
+    await userEvent.type(await within(details()).findByRole("textbox", { name: "What AIfred knows" }), "Text for sync.");
+    // The notes of the next item load slowly: until then, the box must not keep the text.
+    const hold = deferred<void>();
+    fake.onItemContext = (k) => (k === `task:${b.id}` ? hold.promise : undefined);
+    await openItem("Call Bo");
+    const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
+    expect(box).toHaveValue("");
+    expect(within(details()).getByRole("button", { name: "Save" })).toBeDisabled();
+    hold.resolve();
+    await waitFor(() => expect(box).toHaveValue("About Bo."));
+    expect(within(details()).getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(fake.contexts[`task:${a.id}`]).toBeUndefined();
+  });
+
+  it("you can change and clear what AIfred knows, with Undo", async () => {
+    const t = task("Fix sync");
+    const key = `task:${t.id}`;
+    const fake = await startApp({ tasks: [t], contexts: { [key]: { key, text: "The sync bug.", by: "aifred", updated: 5 } } });
+    await openItem("Fix sync");
+    const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
+    await waitFor(() => expect(box).toHaveValue("The sync bug."));
+    expect(within(details()).getByText(/Written by AIfred/)).toBeInTheDocument();
+    await userEvent.clear(box);
+    await userEvent.type(box, "The sync bug. Due Friday.");
+    await userEvent.click(within(details()).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fake.contexts[key]).toMatchObject({ text: "The sync bug. Due Friday.", by: "you" }));
+    await userEvent.click(within(details()).getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(fake.contexts[key]).toBeUndefined());
+    expect(box).toHaveValue("");
+    await userEvent.click((await screen.findAllByRole("button", { name: "Undo" })).at(-1)!);
+    await waitFor(() => expect(fake.contexts[key]?.text).toBe("The sync bug. Due Friday."));
+    await waitFor(() => expect(box).toHaveValue("The sync bug. Due Friday."));
+  });
+});

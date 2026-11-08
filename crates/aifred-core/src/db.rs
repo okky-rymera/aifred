@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 26;
+const VERSION: i64 = 27;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -808,6 +808,24 @@ const SCHEMA_26: &str = "
 CREATE INDEX link_move_by_key ON link_move(key, id);
 ";
 
+/// Task context (context.rs, plan part 4): AIfred's short notes about one
+/// item, from the user's answers. `context_skip` has the items that the
+/// user did not want to explain: AIfred does not ask about them again.
+/// `brief.ask` has the items that the brief of the day asks about.
+const SCHEMA_27: &str = "
+CREATE TABLE item_context (
+  key     TEXT PRIMARY KEY,               -- an item key
+  text    TEXT NOT NULL,
+  by      TEXT NOT NULL,                  -- 'you' or 'aifred': who wrote it last
+  updated INTEGER NOT NULL
+);
+CREATE TABLE context_skip (
+  key TEXT PRIMARY KEY,
+  ts  INTEGER NOT NULL
+);
+ALTER TABLE brief ADD COLUMN ask TEXT NOT NULL DEFAULT '[]';  -- [\"<item key>\"]
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -956,6 +974,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 26 {
         tx.execute_batch(SCHEMA_26)?;
+    }
+    if version < 27 {
+        tx.execute_batch(SCHEMA_27)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

@@ -150,12 +150,22 @@ Decision E: the sort runs in its own small AI call when new items come in, not i
 
 ## Part 4: Task context (hidden memory for each item)
 
-- [ ] Add a `task_context` table: item key or mission id, the text, the time of the last change.
-- [ ] AIfred finds items that it cannot rank: a short title, no description, no goal, no due day.
-- [ ] A home card "Help AIfred understand" asks about at most 3 items each day. For example: "What is 'Fix sync'? Is it linked to other work? Is it urgent?"
-- [ ] The user answers in a short chat (the item chat thread `item:<key>` already exists). AIfred writes a short summary into the task context.
-- [ ] The overview, the brief, and the item chat get the task context.
-- [ ] The item panel shows "What AIfred knows" as a closed section. The user can open it, change it, or clear it.
+- [x] Add a `task_context` table: item key or mission id, the text, the time of the last change.
+- [x] AIfred finds items that it cannot rank: a short title, no description, no goal, no due day.
+- [x] A home card "Help AIfred understand" asks about at most 3 items each day. For example: "What is 'Fix sync'? Is it linked to other work? Is it urgent?"
+- [x] The user answers in a short chat (the item chat thread `item:<key>` already exists). AIfred writes a short summary into the task context.
+- [x] The overview, the brief, and the item chat get the task context.
+- [x] The item panel shows "What AIfred knows" as a closed section. The user can open it, change it, or clear it.
+
+How part 4 works (2026-11-08):
+
+- SCHEMA_27: the table is `item_context` (key, text, by, updated). It has item keys only, no mission ids: a mission uses the notes of its items, as it uses their reason and next action. `by` says who wrote the notes last ("you" or "aifred").
+- SCHEMA_27 also adds `context_skip` (the items that the user skipped) and `brief.ask` (the items that the brief of the day asks about).
+- A fixed rule picks the items, not the AI (`context::to_ask`). So the brief call does not change, and the pick costs nothing. The rule: a title of 4 words or fewer, no summary, no due day, no parent, no notes, no goal in the brief, not skipped. Only the user's tasks, GitHub items, and ClickUp tasks. The items in the brief's `why` come first. At most 3.
+- `brief::get` drops an item from `ask` when it has notes now, when the user skipped or corrected it, or when it is closed.
+- The question is one fixed text (`context::QUESTION`). The card does not show it in the chat. The item chat gets it in its first note when today's brief asks about the item, so the AI understands the answer.
+- The chat tool `set_item_context` saves the notes ("aifred"). It is not in the read-only tools of AIfred's jobs. The notes are cut at 600 characters.
+- The user's changes in the item panel save as "you". Each save and each clear gives the notes from before, and the Undo puts them back (`restore_item_context`).
 
 ## Part 5: Calendar page
 

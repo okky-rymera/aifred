@@ -13,6 +13,7 @@ import { NextStep, SuggestSteps } from "./Steps";
 import { DocSuggest } from "./Docs";
 import { SheetComments } from "./Sheets";
 import { ReplyDraft, useItemActions } from "./Drafts";
+import { ItemContextSection } from "./Context";
 
 /** Text that saves when you leave the box, or press Enter. */
 function useField(value: string, save: (v: string) => void) {
@@ -311,6 +312,7 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
         {why && !i.done && <span className="why">{why}</span>}
         <NextStep item={i} />
         <Description item={i} />
+        <ItemContextSection key={i.key} itemKey={i.key} version={chat.busy ? -1 : chat.msgs.length} />
         <Links item={i} />
         <SameWork item={i} />
         {i.task && <Steps item={i} />}

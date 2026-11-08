@@ -26,6 +26,9 @@
 //!
 //! `missions` lists the open missions (missions.rs), so the brief can keep
 //! a mission when its work stays the same.
+//!
+//! Each item with a task context (context.rs) has `context`: AIfred's short
+//! notes about it, from the user's own answers.
 
 use std::path::Path;
 
@@ -72,6 +75,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
     let gmail_account = crate::gmail::login(dir);
     db::read(dir, |c| {
         let parents = crate::links::parents_for_ai(c)?;
+        let notes = crate::context::map_in(c)?;
         let mut q = c.prepare(
             "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM user_task WHERE done = 0 ORDER BY created DESC",
         )?;
@@ -102,7 +106,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             })?
             .collect::<Result<_, _>>()?;
         tasks.extend(aifred_tasks(c)?);
-        add_parents(&mut tasks, &parents);
+        add_parent_and_notes(&mut tasks, &parents, &notes);
 
         let mut github: Vec<Value> = rows(c, "github", None)?
             .into_iter()
@@ -120,7 +124,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 Ok(v)
             })
             .collect::<anyhow::Result<_>>()?;
-        add_parents(&mut github, &parents);
+        add_parent_and_notes(&mut github, &parents, &notes);
 
         let goals: Vec<Value> = crate::goals::list_in(c)?
             .into_iter()
@@ -155,7 +159,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 .collect::<anyhow::Result<_>>()?,
             None => Vec::new(),
         };
-        add_parents(&mut mail, &parents);
+        add_parent_and_notes(&mut mail, &parents, &notes);
         if let Some(email) = crate::gmail::for_ai(c, gmail_account.as_deref(), mail)? {
             out["email"] = email;
         }
@@ -217,7 +221,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                     v
                 })
                 .collect();
-            add_parents(&mut tasks, &parents);
+            add_parent_and_notes(&mut tasks, &parents, &notes);
             out["clickup"] =
                 json!({ "fetched_at": fetched_at(c, "clickup", Some(account))?, "tasks": tasks });
         }
@@ -225,13 +229,25 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
     })
 }
 
-/// Puts `parent` into each item of a list of items (tasks, GitHub,
-/// ClickUp, email) that has one in `parents`. Only these lists get it: a
-/// correction or a review pick also has a `key`, but it is not an item.
-fn add_parents(items: &mut [Value], parents: &std::collections::HashMap<String, String>) {
+/// Puts `parent` and `context` into each item of a list of items (tasks,
+/// GitHub, ClickUp, email) that has one in `parents` or `notes`. Only these
+/// lists get them: a correction or a review pick also has a `key`, but it
+/// is not an item.
+fn add_parent_and_notes(
+    items: &mut [Value],
+    parents: &std::collections::HashMap<String, String>,
+    notes: &std::collections::HashMap<String, String>,
+) {
     for v in items {
-        if let Some(p) = v["key"].as_str().and_then(|k| parents.get(k)).cloned() {
+        let Some(k) = v["key"].as_str() else {
+            continue;
+        };
+        let (p, n) = (parents.get(k).cloned(), notes.get(k).cloned());
+        if let Some(p) = p {
             v["parent"] = p.into();
+        }
+        if let Some(n) = n {
+            v["context"] = n.into();
         }
     }
 }

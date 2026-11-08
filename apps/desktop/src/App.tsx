@@ -974,17 +974,21 @@ export default function App() {
   ): Promise<boolean> {
     if (busy || !text.trim()) return false;
     set((c) => ({ busy: true, progress: [], msgs: [...c.msgs, { role: "user", text: text.trim(), files }] }));
+    // False after an error: the box that sent the text puts it back, so
+    // you can send it again.
+    let ok = true;
     try {
       const a = await ask((e) => set((c) => ({ ...c, progress: [...c.progress, api.describe(e)] })));
       set((c) => ({ ...c, msgs: [...c.msgs, { role: "assistant", text: a.text, info: a.info, facts: a.memory }] }));
     } catch (e) {
+      ok = false;
       set((c) => ({ ...c, msgs: [...c.msgs, { role: "error", text: String(e) }] }));
     } finally {
       set((c) => ({ ...c, busy: false, progress: [] }));
       reloadAfterAnswer();
     }
     if (now.current.sel && now.current.side === "task") setUnread(true);
-    return true;
+    return ok;
   }
 
   const sendMain = (text: string, files: api.FileRef[]) => {
@@ -1486,6 +1490,7 @@ export default function App() {
     planItems,
     sched,
     brief,
+    reloadBrief,
     goals,
     goalText,
     changeGoals,
