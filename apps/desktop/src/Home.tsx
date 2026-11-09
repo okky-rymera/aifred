@@ -359,7 +359,7 @@ function PlanStrip() {
       </span>
       <span className="btns">
         <button className="btn" onClick={goPlan}>
-          Open plan
+          Open calendar
         </button>
       </span>
     </div>
@@ -491,7 +491,7 @@ function BriefCard(props: { needYou: number }) {
 /** The home box. Tab switches the mode:
  * - "Ask AIfred": the message goes to AIfred. AIfred answers, adds a task
  *   ("pay rent friday high #home"), or makes a job ("remind me every Monday").
- *   Only "plan my day" opens the Day plan, where AIfred fills the plan.
+ *   Only "plan my day" opens the Calendar, where AIfred fills the plan.
  * - "Add task": the line is a new task at once, with no AI call. The day, the
  *   priority, and the #tags come from the words. */
 function HomeBox() {
@@ -519,7 +519,7 @@ function HomeBox() {
             {ask ? "Ask AIfred" : "Add task"}
           </button>
         );
-        if (ask) return isPlanRequest(text) ? <>{chip}<span>Opens Day plan</span></> : chip;
+        if (ask) return isPlanRequest(text) ? <>{chip}<span>Opens Calendar</span></> : chip;
         const p = parseTask(text, today);
         if (!p) return files.length ? <>{chip}<span>Type a task name to add the files to it</span></> : chip;
         return (

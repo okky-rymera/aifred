@@ -117,6 +117,20 @@ struct PlanItemArg {
     why: Option<String>,
     /// The id of the user's goal that the item serves, from the goals in overview. Leave out when it serves no goal.
     goal: Option<i64>,
+    /// A fixed start time, "HH:MM", only when the user asks for this time or the work must start then. When you leave it out, the item keeps the fixed time that it had. Send "" to remove its fixed time: then the app puts it in the next free time.
+    at: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MoveDayArgs {
+    /// The day that has the item in its plan, "YYYY-MM-DD".
+    from: String,
+    /// The new day, "YYYY-MM-DD": today or one of the next 6 days.
+    to: String,
+    /// The item key, from day_plan or overview.
+    key: String,
+    /// A fixed start time on the new day, "HH:MM". Leave out to put the item in the next free time.
+    at: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -234,7 +248,10 @@ fn chat_item() -> Option<String> {
 fn check_item(bound: Option<&str>, key: &str) -> Result<(), ErrorData> {
     match bound {
         Some(b) if b != key.trim() => Err(ErrorData::invalid_params(
-            format!("This chat is about {b}. It can change only the notes of {b}, not of {}.", key.trim()),
+            format!(
+                "This chat is about {b}. It can change only the notes of {b}, not of {}.",
+                key.trim()
+            ),
             None,
         )),
         _ => Ok(()),
@@ -266,13 +283,27 @@ impl TaskTools {
             .map(|p| &p.items[..])
             .unwrap_or_default()
             .iter()
-            .map(|i| serde_json::json!({ "key": i.key, "why": i.why, "goal": i.goal, "minutes": guesses.get(&i.key).map(|g| g.minutes) }))
+            .map(|i| serde_json::json!({ "key": i.key, "why": i.why, "goal": i.goal, "minutes": guesses.get(&i.key).map(|g| g.minutes), "at": i.at.map(plan::time_text) }))
             .collect();
-        let planned: u32 = items
+        // An item with a fixed time is work only in the part of the work day
+        // that lunch and the meetings do not take: work_minutes takes those
+        // out already. So an item at 19:00 uses no work time. items.ts
+        // schedule() counts the same way.
+        let (cal, spans) = aifred_core::calendar::day_with_spans(&self.dir, day, &s)?;
+        let taken = aifred_core::calendar::taken_spans(&s, &spans);
+        let planned: u32 = p
+            .as_ref()
+            .map(|p| &p.items[..])
+            .unwrap_or_default()
             .iter()
-            .map(|i| i["minutes"].as_u64().unwrap_or(30) as u32)
+            .map(|i| {
+                let m = guesses.get(&i.key).map_or(30, |g| g.minutes);
+                match i.at {
+                    Some(a) => aifred_core::calendar::fixed_work(&s, &taken, a, m),
+                    None => m,
+                }
+            })
             .sum();
-        let cal = aifred_core::calendar::day_for_ai(&self.dir, day, &s)?;
         Ok(serde_json::json!({
             "day": day,
             "work_day": settings::day_text(&s),
@@ -286,7 +317,7 @@ impl TaskTools {
             "work_minutes": cal["free_minutes"],
             "meetings": cal["meetings"],
             "calendar": cal["calendar"],
-            "note": "An item with no minutes counts as 30 minutes. work_minutes is the work day less lunch and the meetings. The app places the items between the meetings."
+            "note": "An item with no minutes counts as 30 minutes. work_minutes is the work day less lunch and the meetings. An item with `at` starts at that fixed time (the user dragged it there, or you set it). The app places the other items in order in the free time between lunch, the meetings, and the fixed items. When planned_minutes is more than work_minutes, the day is too full: tell the user, and say which items can move to another day."
         }))
     }
 }
@@ -426,7 +457,7 @@ impl TaskTools {
     }
 
     #[tool(
-        description = "Save the user's day plan: all items in the order of the day, first item first. It replaces the old plan. Use it only when the user asks you to plan the day or to change the plan. Take the keys from overview. Put urgent and overdue work first, and do not plan more minutes than work_minutes in day_plan (the work day less lunch and meetings). Do not plan a local task whose start day is after the day. Give minutes and a short why for each item. Give the goal id when the item serves one of the user's goals. When two items are equally urgent, put the item that serves a goal first."
+        description = "Save the user's day plan: all items in the order of the day, first item first. It replaces the old plan. Use it only when the user asks you to plan the day or to change the plan. Take the keys from overview. Put urgent and overdue work first, and do not plan more minutes than work_minutes in day_plan (the work day less lunch and meetings). Do not plan a local task whose start day is after the day. Give minutes and a short why for each item. Give the goal id when the item serves one of the user's goals. When two items are equally urgent, put the item that serves a goal first. Give `at` only for a fixed time: when the user asks for a time, or to move a block. The app places the other items in the free time around the meetings and lunch. To move an item to another day, use move_to_day, not this tool: this tool replaces the full plan of a day. When the day is too full, say so and suggest which items can wait."
     )]
     async fn set_day_plan(
         &self,
@@ -434,22 +465,57 @@ impl TaskTools {
     ) -> Result<CallToolResult, ErrorData> {
         let day = a.day.unwrap_or_else(default_day);
         // The plan cleans the spaces around each key. The time guesses use the same clean key.
-        let items: Vec<plan::PlanItem> = a
-            .items
-            .iter()
-            .map(|i| plan::PlanItem {
+        let mut items: Vec<plan::PlanItem> = Vec::new();
+        // The items with `at: ""`: they lose their fixed time.
+        let mut clear_at = std::collections::HashSet::new();
+        for i in &a.items {
+            let at = match i.at.as_deref().map(str::trim) {
+                Some("") => {
+                    clear_at.insert(i.key.trim().to_string());
+                    None
+                }
+                Some(t) => Some(plan::parse_time(t).map_err(|e| {
+                    ErrorData::invalid_params(format!("{}: {e}", i.key.trim()), None)
+                })?),
+                None => None,
+            };
+            items.push(plan::PlanItem {
                 key: i.key.trim().to_string(),
                 why: i.why.clone(),
                 goal: i.goal,
-            })
-            .collect();
-        plan::set(&self.dir, &day, "ai", items, true).map_err(fail)?;
+                at,
+            });
+        }
+        plan::set_ai(&self.dir, &day, items, &clear_at).map_err(fail)?;
         for i in &a.items {
             if i.minutes.is_some() {
                 plan::set_estimate(&self.dir, i.key.trim(), i.minutes, "aifred").map_err(fail)?;
             }
         }
         json(&self.plan_view(&day).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Move one item from the plan of one day to the end of the plan of another day. The other items of the two days stay. Use it only when the user asks to move an item to another day."
+    )]
+    async fn move_to_day(
+        &self,
+        Parameters(a): Parameters<MoveDayArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let at = match a.at.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => Some(
+                plan::parse_time(t).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?,
+            ),
+            None => None,
+        };
+        let (from, to) = (a.from.trim(), a.to.trim());
+        plan::check_shown_day(to, &plan::today())
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        plan::move_item(&self.dir, from, to, a.key.trim(), at, None).map_err(fail)?;
+        json(&serde_json::json!({
+            "from": self.plan_view(from).map_err(fail)?,
+            "to": self.plan_view(to).map_err(fail)?,
+        }))
     }
 
     #[tool(
@@ -813,7 +879,10 @@ mod tests {
 
     #[test]
     fn an_item_chat_changes_only_the_notes_of_its_item() {
-        assert!(check_item(None, "task:t2").is_ok(), "the main chat can change any item");
+        assert!(
+            check_item(None, "task:t2").is_ok(),
+            "the main chat can change any item"
+        );
         assert!(check_item(Some("task:t1"), " task:t1 ").is_ok());
         assert!(
             check_item(Some("task:t1"), "task:t2").is_err(),
@@ -1037,6 +1106,7 @@ mod tests {
             minutes: Some(20),
             why: Some("Due today.".into()),
             goal: Some(g.id),
+            at: Some("15:00".into()),
         };
         let saved = body(
             t.set_day_plan(Parameters(SetPlanArgs {
@@ -1050,11 +1120,68 @@ mod tests {
         assert_eq!(saved["items"][0]["why"], "Due today.");
         assert_eq!(saved["items"][0]["goal"], g.id);
         assert_eq!(saved["made_by"], "AIfred");
+        assert_eq!(saved["items"][0]["at"], "15:00");
+        assert_eq!(saved["planned_minutes"], 20);
+        // At 19:00 the item is after the work day: it uses no work time.
+        // The same case is in items.test.ts ("counts only the work-day part").
+        let evening = |at: &str| PlanItemArg {
+            key: key.clone(),
+            minutes: None,
+            why: None,
+            goal: None,
+            at: Some(at.into()),
+        };
+        let saved = body(
+            t.set_day_plan(Parameters(SetPlanArgs {
+                day: Some("2026-11-04".into()),
+                items: vec![evening("19:00")],
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(saved["planned_minutes"], 0);
+        // At 17:20, only 10 of the 20 minutes are in the work day.
+        let saved = body(
+            t.set_day_plan(Parameters(SetPlanArgs {
+                day: Some("2026-11-04".into()),
+                items: vec![evening("17:20")],
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(saved["planned_minutes"], 10);
+        // "" takes the fixed time away.
+        let saved = body(
+            t.set_day_plan(Parameters(SetPlanArgs {
+                day: Some("2026-11-04".into()),
+                items: vec![evening("")],
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(saved["items"][0]["at"], serde_json::Value::Null);
+        assert_eq!(saved["planned_minutes"], 20);
+        let late = PlanItemArg {
+            key: key.clone(),
+            minutes: None,
+            why: None,
+            goal: None,
+            at: Some("25:00".into()),
+        };
+        let e = t
+            .set_day_plan(Parameters(SetPlanArgs {
+                day: Some("2026-11-04".into()),
+                items: vec![late],
+            }))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("HH:MM"), "{}", e.message);
         let bad = PlanItemArg {
             key: "github:none#1".into(),
             minutes: None,
             why: None,
             goal: None,
+            at: None,
         };
         let e = t
             .set_day_plan(Parameters(SetPlanArgs {
@@ -1064,6 +1191,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.message.contains("github:none#1"), "{}", e.message);
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn moving_an_item_keeps_the_other_items_of_the_new_day() {
+        let t = tools("move-day");
+        let a = t.store().add("Report", "", "you").unwrap();
+        let b = t.store().add("Call bank", "", "you").unwrap();
+        let (ka, kb) = (format!("task:{}", a.id), format!("task:{}", b.id));
+        let item = |key: &str| PlanItemArg {
+            key: key.into(),
+            minutes: None,
+            why: None,
+            goal: None,
+            at: None,
+        };
+        // The AI can move an item only to the days that the app shows.
+        let day = |n: usize| {
+            (0..n).fold(plan::today(), |d, _| {
+                aifred_core::review::next_day(&d).unwrap()
+            })
+        };
+        let (d0, d1) = (day(0), day(1));
+        for (day, key) in [(&d0, &ka), (&d1, &kb)] {
+            t.set_day_plan(Parameters(SetPlanArgs {
+                day: Some(day.clone()),
+                items: vec![item(key)],
+            }))
+            .await
+            .unwrap();
+        }
+        let out = body(
+            t.move_to_day(Parameters(MoveDayArgs {
+                from: d0.clone(),
+                to: d1.clone(),
+                key: ka.clone(),
+                at: Some("10:00".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(out["from"]["items"], serde_json::json!([]));
+        assert_eq!(out["to"]["items"][0]["key"], kb.as_str());
+        assert_eq!(out["to"]["items"][1]["key"], ka.as_str());
+        assert_eq!(out["to"]["items"][1]["at"], "10:00");
+        let far = t
+            .move_to_day(Parameters(MoveDayArgs {
+                from: d1.clone(),
+                to: day(7),
+                key: kb.clone(),
+                at: None,
+            }))
+            .await;
+        assert!(far.is_err(), "a day after the 7 days that the app shows");
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 

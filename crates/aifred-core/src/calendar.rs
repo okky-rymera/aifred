@@ -454,6 +454,15 @@ fn covers(fetched_at: u64, day_start: i64) -> bool {
 /// minutes that are free for work after lunch and the events. `calendar`
 /// says where the meetings come from, and when they are not known.
 pub fn day_for_ai(dir: &Path, day: &str, s: &Settings) -> anyhow::Result<Value> {
+    Ok(day_with_spans(dir, day, s)?.0)
+}
+
+/// day_for_ai(), and the start and end of each busy event of the day.
+pub fn day_with_spans(
+    dir: &Path,
+    day: &str,
+    s: &Settings,
+) -> anyhow::Result<(Value, Vec<(u32, u32)>)> {
     // A Google connection file that AIfred cannot read counts as no connection, as in cached().
     // Read the login once: each read parses google.json.
     let account = login(dir);
@@ -481,11 +490,12 @@ pub fn day_for_ai(dir: &Path, day: &str, s: &Settings) -> anyhow::Result<Value> 
         }
         (Some(l), Some(_)) => format!("Google Calendar, downloaded {}", ago(l.fetched_at)),
     };
-    Ok(json!({
+    let out = json!({
         "meetings": meetings,
         "free_minutes": free_minutes(s, &spans),
         "calendar": calendar,
-    }))
+    });
+    Ok((out, spans))
 }
 
 /// "12 minutes ago", "3 hours ago", or "2 days ago".
@@ -699,14 +709,20 @@ fn next_midnight(day_start: i64) -> i64 {
         .map_or(day_start + 86_400, |d| d.timestamp())
 }
 
-/// The minutes of the work day that are free for work: the work day less
-/// lunch and the busy events in it. Two events at the same time count once.
-/// The Plan page counts the same in schedule() in apps/desktop/src/items.ts,
-/// and its test "counts free time like the backend" uses the cases of the
-/// test below. Change both, or the AI and the user see different free time.
-pub fn free_minutes(s: &Settings, busy: &[(u32, u32)]) -> u32 {
-    let start = minutes_of(&s.work_start).unwrap_or(540);
-    let end = minutes_of(&s.work_end).unwrap_or(1050);
+/// The start and the end of the work day, in minutes after midnight. A
+/// setting that AIfred cannot read gives the default 09:00 to 17:30.
+/// Use this for each count of the work day, so that all counts agree.
+pub fn work_day(s: &Settings) -> (u32, u32) {
+    (
+        minutes_of(&s.work_start).unwrap_or(540),
+        minutes_of(&s.work_end).unwrap_or(1050),
+    )
+}
+
+/// The parts of the work day that lunch and the busy events take, in time
+/// order. Two at the same time join into one part.
+pub fn taken_spans(s: &Settings, busy: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let (start, end) = work_day(s);
     let mut blocks: Vec<(u32, u32)> = busy.to_vec();
     if s.lunch_minutes > 0
         && let Some(l) = minutes_of(&s.lunch_start)
@@ -719,16 +735,42 @@ pub fn free_minutes(s: &Settings, busy: &[(u32, u32)]) -> u32 {
         .filter(|(a, b)| a < b)
         .collect();
     cut.sort();
-    let mut taken = 0;
-    let mut cur = start;
+    let mut out: Vec<(u32, u32)> = Vec::new();
     for (a, b) in cut {
-        let a = a.max(cur);
-        if b > a {
-            taken += b - a;
-            cur = b;
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
         }
     }
+    out
+}
+
+/// The minutes of the work day that are free for work: the work day less
+/// lunch and the busy events in it. Two events at the same time count once.
+/// The Plan page counts the same in schedule() in apps/desktop/src/items.ts,
+/// and its test "counts free time like the backend" uses the cases of the
+/// test below. Change both, or the AI and the user see different free time.
+pub fn free_minutes(s: &Settings, busy: &[(u32, u32)]) -> u32 {
+    let (start, end) = work_day(s);
+    let taken: u32 = taken_spans(s, busy).iter().map(|(a, b)| b - a).sum();
     end.saturating_sub(start).saturating_sub(taken)
+}
+
+/// The work minutes of an item with a fixed time `at`: the part in the work
+/// day that lunch and the meetings (`taken`, from taken_spans()) do not take.
+/// free_minutes() takes those minutes out already, so they count once.
+/// schedule() in apps/desktop/src/items.ts counts the same way.
+pub fn fixed_work(s: &Settings, taken: &[(u32, u32)], at: u32, minutes: u32) -> u32 {
+    let (start, end) = work_day(s);
+    let (a, b) = (at.max(start), (at + minutes).min(end));
+    if b <= a {
+        return 0;
+    }
+    let overlap: u32 = taken
+        .iter()
+        .map(|&(x, y)| y.min(b).saturating_sub(x.max(a)))
+        .sum();
+    (b - a).saturating_sub(overlap)
 }
 
 /// Local midnight of a "YYYY-MM-DD" day, in Unix seconds.
@@ -813,6 +855,30 @@ mod tests {
         assert_eq!(free_minutes(&s, &busy), 510 - 90 - 75);
         let all_day = [(0, 1440)];
         assert_eq!(free_minutes(&s, &all_day), 0);
+    }
+
+    #[test]
+    fn a_fixed_item_on_lunch_or_a_meeting_counts_once() {
+        let s = Settings::default(); // 09:00 to 17:30, lunch 12:30 for 45 minutes
+        let taken = taken_spans(&s, &[(600, 660)]);
+        assert_eq!(taken, vec![(600, 660), (750, 795)]);
+        // On lunch: lunch takes those minutes already.
+        assert_eq!(fixed_work(&s, &taken, 750, 45), 0);
+        // Half on the meeting: only the other 30 minutes are work.
+        assert_eq!(fixed_work(&s, &taken, 630, 60), 30);
+        // After the work day: no work time.
+        assert_eq!(fixed_work(&s, &taken, 19 * 60, 120), 0);
+        assert_eq!(fixed_work(&s, &taken, 17 * 60, 60), 30);
+    }
+
+    #[test]
+    fn a_bad_work_day_setting_gives_the_default_day() {
+        let s = Settings {
+            work_start: "x".into(),
+            work_end: "y".into(),
+            ..Settings::default()
+        };
+        assert_eq!(work_day(&s), (540, 1050));
     }
 
     #[test]

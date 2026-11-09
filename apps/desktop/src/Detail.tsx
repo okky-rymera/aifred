@@ -6,7 +6,7 @@ import * as api from "./api";
 import { Composer, Files, Md, Messages } from "./Chat";
 import { useApp } from "./ctx";
 import { SRC_NAME, dayOfSecs, dueInfo, fmtTime, shortDay, type Item } from "./items";
-import { Minutes } from "./Plan";
+import { Minutes } from "./Calendar";
 import { PriPill } from "./Home";
 import { SameWork } from "./Links";
 import { NextStep, SuggestSteps } from "./Steps";

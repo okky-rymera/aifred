@@ -169,12 +169,28 @@ How part 4 works (2026-11-08):
 
 ## Part 5: Calendar page
 
-- [ ] Rename "Plan" to "Calendar".
-- [ ] Show a day view and a week view, as in Google Calendar. Show the Google events and the planned missions as blocks.
-- [ ] Let the user drag a block to a new time. The plan chat can also move blocks.
-- [ ] AIfred plans missions into free time, around the events. It warns when a day is too full.
+- [x] Rename "Plan" to "Calendar".
+- [x] Show a day view and a week view, as in Google Calendar. Show the Google events and the planned missions as blocks.
+- [x] Let the user drag a block to a new time. The plan chat can also move blocks.
+- [x] AIfred plans missions into free time, around the events. It warns when a day is too full.
 
 Decision B: view-only first. Google Calendar does not change. Writing blocks into Google can come later, with a new Google access and an Undo log.
+
+How part 5 works (2026-11-09):
+
+- The plan still holds item keys, not mission ids. The brief, the reviews, and "Next:" on the home page use item keys. A block of an item in an open mission shows "Mission: <title>".
+- Each plan item can have a fixed start time, `at`, in clock minutes after midnight. It is in the JSON of `day_plan.items`, so no new schema is necessary.
+- The window places an item with a fixed time at that time. It places the other items in order, in the free time around lunch, the meetings, and the fixed items (`schedule` in `items.ts`).
+- The AI sends the full plan again for each change. When it leaves out a time, the item keeps its old time (`plan::set_ai`). So a block that the user dragged does not move. To remove a fixed time, the AI sends `at: ""`. The AI can move an item only to today or one of the next 6 days (`plan::check_shown_day`), because the app shows only these days. The window always sends the times, so it can remove one.
+- The AI tool `set_day_plan` takes `at` as "HH:MM", with two digits for the minutes. `day_plan` shows it, and tells the AI to say when a day is too full.
+- A local task cannot go on a day before its start day. `move_plan_item` refuses the move, and the window refuses a drag or an add to such a day.
+- The week view is today and the next 6 days, not Monday to Sunday. AIfred reads only 7 days of events from the start of today (`calendar::DAYS`).
+- `day_plans` reads the plans of the 7 days in one call. `move_plan_item` moves an item to another day in one change, so it cannot get lost between two saves. Its Undo puts the item back at its old place and time.
+- The AI moves an item to another day with the tool `move_to_day`, which calls `plan::move_item`. `set_day_plan` replaces the full plan of a day, so the AI must not use it for a move: it would delete the other items of that day.
+- When a move empties a plan that a review made, the plan goes away, so the day shows "No plan" again. A "Tomorrow" click on a planned task also moves it to the plan of tomorrow.
+- An all-day event is never busy time. It shows in the "All day" row, and the plan does not place items around it.
+- Each day has its own plan chat (`plan:<day>`). The chat on the screen is the chat of the day on the page. Each day keeps its messages and its running answer when you change the day. Only one plan chat answers at a time.
+- "Too full": the planned minutes are more than the free minutes of the work day. An item with a fixed time counts only its minutes in the work day that lunch and the meetings do not take: an item at 19:00 uses no work time, and an item on lunch does not count lunch two times. The app (`schedule` in `items.ts`) and the AI (`calendar::fixed_work`) count the same way. A work-day setting that AIfred cannot read gives 09:00 to 17:30 in each count. The day view shows a warning with "What can wait?". The week view shows it on each day and in one line above the grid.
 
 ## Decisions
 
@@ -192,6 +208,6 @@ Decision B: view-only first. Google Calendar does not change. Writing blocks int
 
 ## For each part
 
-- [ ] A new table continues the schema list after `SCHEMA_18` (`crates/aifred-core/src/db.rs`).
-- [ ] A new or renamed app command also goes into the fake backend (`apps/desktop/src/test/fakeBackend.ts`).
-- [ ] Update the README sections that the part changes.
+- [x] A new table continues the schema list after `SCHEMA_18` (`crates/aifred-core/src/db.rs`).
+- [x] A new or renamed app command also goes into the fake backend (`apps/desktop/src/test/fakeBackend.ts`).
+- [x] Update the README sections that the part changes.

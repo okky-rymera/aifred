@@ -64,6 +64,9 @@ export function dateOf(day: string): Date {
   return new Date(y, m - 1, d, 12);
 }
 
+/** The Calendar page shows today and the next days: as many days as AIfred reads from Google (calendar::DAYS). */
+export const WEEK = 7;
+
 export function addDays(day: string, n: number): string {
   const d = dateOf(day);
   d.setDate(d.getDate() + n);
@@ -89,6 +92,11 @@ export function shortDay(day: string, today: string): string {
   const d = dateOf(day);
   const year = day.slice(0, 4) === today.slice(0, 4) ? "" : ` ${d.getFullYear()}`;
   return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}${year}`;
+}
+
+/** "today", or "Tue 10 Nov". Use it for each text that names a day of a plan. */
+export function dayName(day: string, today: string): string {
+  return day === today ? "today" : shortDay(day, today);
 }
 
 /** "Wednesday, 4 November". */
@@ -416,6 +424,22 @@ export function minutesOf(hhmm: string): number {
   return (h || 0) * 60 + (m || 0);
 }
 
+/** Minutes after midnight for a strict "HH:MM", or null when it is not a
+ * time of the day. Same as minutes_of() in crates/aifred-core/src/settings.rs. */
+export function timeOf(hhmm: string): number | null {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm);
+  if (!m) return null;
+  const [h, min] = [Number(m[1]), Number(m[2])];
+  return h < 24 && min < 60 ? h * 60 + min : null;
+}
+
+/** The start and the end of the work day, in minutes after midnight. A
+ * setting that AIfred cannot read gives 09:00 to 17:30, as work_day() in
+ * crates/aifred-core/src/calendar.rs. Use it for each count of the work day. */
+export function workDay(s: api.Settings): [number, number] {
+  return [timeOf(s.work_start) ?? 540, timeOf(s.work_end) ?? 1050];
+}
+
 /** "9:00" for 540. */
 export function fmtTime(m: number): string {
   const h = Math.floor(m / 60);
@@ -430,7 +454,7 @@ export function dur(m: number): string {
 
 /** A planned item, lunch, or a meeting from the calendar. Item blocks have neither `lunch` nor `meeting`. */
 export type Block =
-  | { key: string; start: number; end: number; lunch?: false; meeting?: undefined }
+  | { key: string; start: number; end: number; lunch?: false; meeting?: undefined; pinned?: boolean }
   | { key: "lunch"; start: number; end: number; lunch: true; meeting?: undefined }
   | { key: string; start: number; end: number; lunch?: false; meeting: api.CalEvent };
 
@@ -439,10 +463,14 @@ export const isItemBlock = (b: Block) => !b.lunch && !b.meeting;
 /** A busy event of one day, in minutes after midnight. */
 export type Meeting = { start: number; end: number; event: api.CalEvent };
 
-/** The busy events of `day` ("YYYY-MM-DD"), cut to that day. The minutes
- * are clock times: a day when the clocks change has 23 or 25 hours, so
- * seconds since midnight would put a meeting an hour off. */
-export function meetingsOn(events: api.CalEvent[], day: string): Meeting[] {
+/** The events of one day: `busy` for the schedule, `timed` (all timed
+ * events, also the free and the declined ones) and `allDay` for the calendar. */
+export type DayEvents = { busy: Meeting[]; timed: Meeting[]; allDay: api.CalEvent[] };
+
+/** The events of `day` ("YYYY-MM-DD"), cut to that day, in one pass. The
+ * minutes are clock times: a day when the clocks change has 23 or 25 hours,
+ * so seconds since midnight would put a meeting an hour off. */
+export function eventsOn(events: api.CalEvent[], day: string): DayEvents {
   const [y, m, d] = day.split("-").map(Number);
   const t0 = new Date(y, m - 1, d).getTime() / 1000;
   const t1 = new Date(y, m - 1, d + 1).getTime() / 1000;
@@ -450,14 +478,26 @@ export function meetingsOn(events: api.CalEvent[], day: string): Meeting[] {
     const x = new Date(t * 1000);
     return x.getHours() * 60 + x.getMinutes();
   };
-  return events
-    .filter((e) => e.busy && e.start < t1 && e.end > t0)
-    .map((e) => {
-      const start = e.start <= t0 ? 0 : clock(e.start);
-      const end = e.end >= t1 ? 1440 : clock(e.end);
-      return { start, end: Math.max(start, end), event: e };
-    });
+  const out: DayEvents = { busy: [], timed: [], allDay: [] };
+  for (const e of events) {
+    if (!(e.start < t1 && e.end > t0)) continue;
+    // An all-day event is never busy time, also when its busy flag is set,
+    // as in calendar.rs: it would fill the full day and push all items past midnight.
+    if (e.all_day) {
+      out.allDay.push(e);
+      continue;
+    }
+    const start = e.start <= t0 ? 0 : clock(e.start);
+    const end = e.end >= t1 ? 1440 : clock(e.end);
+    const mt = { start, end: Math.max(start, end), event: e };
+    if (e.busy) out.busy.push(mt);
+    out.timed.push(mt);
+  }
+  return out;
 }
+
+/** Midnight at the end of the day, in minutes after midnight. */
+const DAY_END = 1440;
 
 export type Schedule = {
   /** All blocks in time order, lunch included. */
@@ -474,23 +514,36 @@ export type Schedule = {
 };
 
 /** Places the items in order from the start of the work day. An item that
- * would overlap lunch or a meeting starts after it. `meetings`: the busy
- * events of the day (meetingsOn). Only the ones in the work day count. */
-export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = []): Schedule {
-  const dayStart = minutesOf(s.work_start);
-  const dayEnd = minutesOf(s.work_end);
-  const lunch = s.lunch_minutes > 0 ? { start: minutesOf(s.lunch_start), end: minutesOf(s.lunch_start) + s.lunch_minutes } : null;
+ * would overlap lunch, a meeting, or an item with a fixed time starts
+ * after it. `meetings`: the busy events of the day (eventsOn().busy). Only the
+ * ones in the work day count. `pins`: the fixed start times, in minutes
+ * after midnight, by key. An item with a fixed time starts at that time. */
+export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = [], pins: Record<string, number> = {}): Schedule {
+  const [dayStart, dayEnd] = workDay(s);
+  // A lunch time that AIfred cannot read gives no lunch, as in the backend.
+  const lunchAt = timeOf(s.lunch_start);
+  const lunch = s.lunch_minutes > 0 && lunchAt !== null ? { start: lunchAt, end: lunchAt + s.lunch_minutes } : null;
   const inDay = meetings.filter((m) => m.start < dayEnd && m.end > dayStart);
-  const fixed = [...(lunch ? [lunch] : []), ...inDay];
+  const pinned = order.filter((i) => pins[i.key] !== undefined).map((i) => ({ start: pins[i.key], end: pins[i.key] + i.minutes }));
+  // Lunch and the meetings: time that is not free for work.
+  const busy = [...(lunch ? [lunch] : []), ...inDay];
+  const fixed = [...busy, ...pinned];
   const blocks: Block[] = [];
   const at: Record<string, number> = {};
   let cur = dayStart;
   for (const i of order) {
+    const pin = pins[i.key];
+    if (pin !== undefined) {
+      // A block ends at midnight at the latest: the day column ends there.
+      blocks.push({ key: i.key, start: pin, end: Math.min(DAY_END, pin + i.minutes), pinned: true });
+      at[i.key] = pin;
+      continue;
+    }
     // Jump over each fixed block that the item would overlap, until it fits.
     for (let hit = fixed.find((f) => f.start < cur + i.minutes && f.end > cur); hit; hit = fixed.find((f) => f.start < cur + i.minutes && f.end > cur)) {
       cur = Math.max(cur, hit.end);
     }
-    blocks.push({ key: i.key, start: cur, end: cur + i.minutes });
+    blocks.push({ key: i.key, start: Math.min(DAY_END, cur), end: Math.min(DAY_END, cur + i.minutes) });
     at[i.key] = cur;
     cur += i.minutes;
   }
@@ -504,20 +557,62 @@ export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = [
   all.sort((a, b) => a.start - b.start);
   const work = order.reduce((n, i) => n + i.minutes, 0);
   const end = blocks.length ? Math.max(...blocks.map((b) => b.end)) : null;
-  // The minutes of the work day that lunch and the meetings take. Two at the same time count once.
+  // The parts of the work day that lunch and the meetings take, in time
+  // order. Two at the same time count once.
   // calendar::free_minutes in crates/aifred-core/src/calendar.rs gives the AI
   // the same number. A test in items.test.ts checks the same cases as its test.
-  let taken = 0;
-  let upTo = dayStart;
-  for (const f of fixed.map((f) => ({ start: Math.max(f.start, dayStart), end: Math.min(f.end, dayEnd) })).sort((a, b) => a.start - b.start)) {
-    const from = Math.max(f.start, upTo);
-    if (f.end > from) {
-      taken += f.end - from;
-      upTo = f.end;
-    }
+  const takenSpans: { start: number; end: number }[] = [];
+  for (const f of busy.map((f) => ({ start: Math.max(f.start, dayStart), end: Math.min(f.end, dayEnd) })).sort((a, b) => a.start - b.start)) {
+    const last = takenSpans[takenSpans.length - 1];
+    if (f.end <= f.start) continue;
+    if (last && f.start <= last.end) last.end = Math.max(last.end, f.end);
+    else takenSpans.push({ ...f });
   }
-  const free = dayEnd - dayStart - taken - work;
+  const taken = takenSpans.reduce((n, t) => n + t.end - t.start, 0);
+  // An item with a fixed time is work only in the part of the work day that
+  // lunch and the meetings do not take: that time is in `taken` already. So
+  // an item at 19:00 uses no work time. calendar::fixed_work in
+  // crates/aifred-core/src/calendar.rs counts the same way for the AI.
+  const inDayWork = order.reduce((n, i) => {
+    const pin = pins[i.key];
+    if (pin === undefined) return n + i.minutes;
+    const a = Math.max(pin, dayStart);
+    const b = Math.min(pin + i.minutes, dayEnd);
+    if (b <= a) return n;
+    const overlap = takenSpans.reduce((o, t) => o + Math.max(0, Math.min(t.end, b) - Math.max(t.start, a)), 0);
+    return n + b - a - overlap;
+  }, 0);
+  const free = dayEnd - dayStart - taken - inDayWork;
   return { all, at, work, end, free };
+}
+
+/** The side-by-side place of each block of a day, as in Google Calendar:
+ * blocks that overlap share the width. `col` is the column of the block,
+ * `cols` the number of columns in its group of overlapping blocks. */
+export function sideBySide(blocks: { start: number; end: number }[]): { col: number; cols: number }[] {
+  const order = blocks.map((b, n) => ({ ...b, n, end: Math.max(b.end, b.start + 1) })).sort((a, b) => a.start - b.start || b.end - a.end);
+  const out = blocks.map(() => ({ col: 0, cols: 1 }));
+  let group: typeof order = [];
+  let colEnds: number[] = [];
+  let groupEnd = -1;
+  const close = () => {
+    for (const b of group) out[b.n].cols = colEnds.length;
+    group = [];
+    colEnds = [];
+  };
+  for (const b of order) {
+    if (b.start >= groupEnd) close();
+    let col = colEnds.findIndex((e) => e <= b.start);
+    if (col < 0) {
+      col = colEnds.length;
+      colEnds.push(b.end);
+    } else colEnds[col] = b.end;
+    out[b.n].col = col;
+    group.push(b);
+    groupEnd = Math.max(groupEnd, b.end);
+  }
+  close();
+  return out;
 }
 
 /** Bytes as "12 KB". */

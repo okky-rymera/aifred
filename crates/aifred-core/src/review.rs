@@ -315,6 +315,7 @@ fn add_to_plan(tx: &Transaction, day: &str, key: &str) -> anyhow::Result<bool> {
         key: key.into(),
         why: None,
         goal: None,
+        at: None,
     });
     crate::plan::set_in(tx, day, &mode, items, false)?;
     Ok(false)
@@ -878,6 +879,7 @@ mod tests {
                     key: k.to_string(),
                     why: None,
                     goal: None,
+                    at: None,
                 })
                 .collect(),
             false,

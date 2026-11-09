@@ -67,7 +67,7 @@ The source code:
     - a short to-do line, for example "pay rent friday high #home", becomes a task with its due day, priority, and tags,
     - a question gets an answer,
     - "remind me…" or "check … later" becomes one of AIfred's jobs,
-    - only "plan my day" works with no AI decision: it opens the Day plan.
+    - only "plan my day" works with no AI decision: it opens the Calendar.
     Each message is one AI call, also a new task. It takes some seconds.
   - "Add task": the box has a green border and no model picker. The line becomes a task at once, with no AI call. AIfred reads the due day ("friday", "tomorrow", "2027-02-01"), the priority at the end ("high", "urgent", "low"), and the tags ("#home") from the words. The line under the box shows what it read. An "Added" message has an Undo. This works while AIfred answers, and with no network.
 - A file that you send with a new task stays on the task, in both modes.
@@ -318,6 +318,23 @@ AIfred keeps short notes about an item: what it is, how it links to other work, 
   - For a GitHub, ClickUp, or email item, the steps go on your linked task of the same work. When there is none, AIfred makes a new task with the item's title and links it under the item.
   - The message after the add has an Undo. It takes out the added steps that are not done, or deletes the new task.
 
+## Calendar
+
+The Calendar page shows your Google Calendar events and your plan as blocks, as in Google Calendar (`apps/desktop/src/Calendar.tsx`).
+
+- "Day" shows one day. "Week" shows today and the next 6 days, because AIfred reads 7 days of events. Click a day in the week to open it.
+- Each day has its own plan and its own plan chat. "Plan it for me" and "I plan it myself" work for each day.
+- A plan item with no fixed time goes in the next free time, around lunch, the meetings, and the items with a fixed time.
+- Drag a block to a new time. It then has a fixed time. Drag it to another day in the week view. Drag an item from the list under the calendar onto the calendar to add it. Drag a block onto that list to take it out.
+- Without a mouse, select a block and use these keys:
+  - Alt+Up and Alt+Down move it by 15 minutes.
+  - Alt+Left and Alt+Right move it to the day before or after.
+- The time button on a block with a fixed time removes the fixed time.
+- Each change shows Undo.
+- The plan chat can also move blocks. It sets a fixed time only when you ask for a time. When it changes the plan, the blocks that you placed keep their times. It removes a fixed time only when you ask.
+- A day with more work than free time shows "Too full". The week view says which days are too full. "What can wait?" asks AIfred which items can move.
+- Google Calendar does not change. The blocks are only in AIfred.
+
 ## Google (calendar and Gmail)
 
 - AIfred connects to Google itself. Each user makes their own Google registration once:
@@ -327,7 +344,7 @@ AIfred keeps short notes about an item: what it is, how it links to other work, 
   4. Create a client of the type "Desktop app".
 - Paste the client ID and the client secret on the Settings page, then click "Connect Google". Google's login page opens in the browser.
 - AIfred keeps the registration and the login key in `google.json` in the data folder. Only you can read that file.
-- AIfred reads the next 7 days of the primary calendar. It cannot change the calendar. The day plan goes around busy events, and the brief and the chats see the meetings.
+- AIfred reads the next 7 days of the primary calendar. It cannot change the calendar. The Calendar page shows the events, the day plan goes around busy events, and the brief and the chats see the meetings.
 - One connection serves all Google features. When a new feature needs more access, Settings asks you to connect again (`crates/aifred-core/src/google.rs`). A login from before Gmail was added does not allow Gmail: connect again once.
 
 ### Gmail

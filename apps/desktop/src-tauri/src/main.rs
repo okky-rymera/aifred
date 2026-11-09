@@ -1426,6 +1426,28 @@ async fn set_day_plan(
     .await
 }
 
+/// The plans of the days from `from` to `to`, both included. A day with no plan is not in the list.
+#[tauri::command]
+async fn day_plans(app: State<'_, App>, from: String, to: String) -> CmdResult<Vec<DayPlan>> {
+    blocking(&app, move |a| aifred_core::plan::range(&a.dir, &from, &to)).await
+}
+
+/// Moves one item from the plan of one day to the plan of another day, in one change.
+#[tauri::command]
+async fn move_plan_item(
+    app: State<'_, App>,
+    from: String,
+    to: String,
+    key: String,
+    at: Option<u32>,
+    index: Option<usize>,
+) -> CmdResult<(Option<DayPlan>, DayPlan)> {
+    blocking(&app, move |a| {
+        aifred_core::plan::move_item(&a.dir, &from, &to, &key, at, index)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn clear_day_plan(app: State<'_, App>, day: String) -> CmdResult<()> {
     blocking(&app, move |a| aifred_core::plan::clear(&a.dir, &day)).await
@@ -1816,6 +1838,8 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         open_file,
         day_plan,
         set_day_plan,
+        day_plans,
+        move_plan_item,
         clear_day_plan,
         estimates,
         set_estimate,

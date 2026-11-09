@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api";
 import { useApp } from "./ctx";
 import { GoalEditor } from "./Goals";
-import { addDays, dur, minutesOf, shortDay } from "./items";
+import { addDays, dur, shortDay, workDay } from "./items";
 
 /** The end-of-day check shows this many minutes before the work day ends. */
 export const DAY_CHECK_BEFORE_END = 30;
@@ -36,7 +36,7 @@ function Place({ place }: { place: string }) {
 export function DayCheckCard({ force, onClose }: { force: boolean; onClose: () => void }) {
   const { today, settings, items, plan, work, toast, reload, open } = useApp();
   const minute = useMinuteOfDay();
-  const time = minute >= minutesOf(settings.work_end) - DAY_CHECK_BEFORE_END;
+  const time = minute >= workDay(settings)[1] - DAY_CHECK_BEFORE_END;
   const [check, setCheck] = useState<api.DayCheck | null>(null);
   const [error, setError] = useState("");
   // The items that you do not want to move. All others move.

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "./api";
 import type * as api from "./api";
-import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, meetingsOn, parseTask, schedule, shortDay, type Item } from "./items";
+import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, eventsOn, joinLinked, parseTask, schedule, shortDay, sideBySide, workDay, type Item } from "./items";
 import { clickupItem, githubItem, task } from "./test/fakeBackend";
 
 // Wednesday 4 November 2026.
@@ -129,12 +129,23 @@ describe("schedule", () => {
     expect(s.all.map((b) => b.key)).toEqual(["a", "event:m1", "event:m2", "b", "lunch", "c"]);
     expect(s.all[1].meeting?.title).toBe("m1");
     expect(s.free).toBe(465 - 90 - 120);
-    expect(meetingsOn([], "2026-11-05")).toEqual([]);
+    expect(eventsOn([], "2026-11-05").busy).toEqual([]);
     // Clock times, and cut at midnight.
     const at = (h: number, m: number) => new Date(2026, 10, 5, h, m).getTime() / 1000;
     const late = { ...ev("late"), busy: true, start: at(23, 0), end: at(23, 0) + 7200 };
-    const on = meetingsOn([{ ...ev("m1"), busy: true, start: at(9, 30), end: at(10, 15) }, late], "2026-11-05");
+    const on = eventsOn([{ ...ev("m1"), busy: true, start: at(9, 30), end: at(10, 15) }, late], "2026-11-05").busy;
     expect(on.map((m) => [m.start, m.end])).toEqual([[570, 615], [1380, 1440]]);
+  });
+
+  it("does not count an all-day event as busy time", () => {
+    // An all-day "Out of office" with busy set would fill 0-1440 and push all items past midnight.
+    const day = (d: number) => new Date(2026, 10, d).getTime() / 1000;
+    const off = { id: "ooo", title: "Out of office", busy: true, all_day: true, start: day(5), end: day(6) } as api.CalEvent;
+    const on = eventsOn([off], "2026-11-05");
+    expect(on.busy).toEqual([]);
+    expect(on.timed).toEqual([]);
+    expect(on.allDay.map((e) => e.id)).toEqual(["ooo"]);
+    expect(schedule([item("a", 30)], DEFAULT_SETTINGS, on.busy).at).toEqual({ a: 540 });
   });
 
   it("ends with the last item, not with a meeting after it", () => {
@@ -146,7 +157,7 @@ describe("schedule", () => {
 
   it("shows a meeting from an earlier day from the work-day start, not from midnight", () => {
     const ev = (id: string) => ({ id, title: id }) as api.CalEvent;
-    // An overnight event to 09:30: meetingsOn gives it the start 0.
+    // An overnight event to 09:30: eventsOn gives it the start 0.
     const s = schedule([item("a", 30)], DEFAULT_SETTINGS, [{ start: 0, end: 570, event: ev("flight") }]);
     expect(s.all[0]).toMatchObject({ key: "event:flight", start: 540, end: 570 });
     expect(s.at).toEqual({ a: 570 });
@@ -161,6 +172,51 @@ describe("schedule", () => {
     expect(schedule([], DEFAULT_SETTINGS).free).toBe(465);
     expect(schedule([], DEFAULT_SETTINGS, [m(600, 660), m(630, 690), m(720, 780), m(1080, 1140)]).free).toBe(510 - 90 - 75);
     expect(schedule([], DEFAULT_SETTINGS, [m(0, 1440)]).free).toBe(0);
+  });
+
+  it("counts only the work-day part of an item with a fixed time", () => {
+    // Work day 9:00–17:30 with 45 minutes of lunch: 465 free minutes.
+    expect(schedule([item("a", 120)], DEFAULT_SETTINGS, [], { a: 19 * 60 }).free).toBe(465);
+    expect(schedule([item("a", 60)], DEFAULT_SETTINGS, [], { a: 17 * 60 }).free).toBe(435);
+    expect(schedule([item("a", 60)], DEFAULT_SETTINGS).free).toBe(405);
+  });
+
+  it("uses 09:00 to 17:30 and no lunch for settings that it cannot read, like the backend", () => {
+    // calendar::work_day and taken_spans in crates/aifred-core/src/calendar.rs.
+    const bad = { ...DEFAULT_SETTINGS, work_start: "x", work_end: "25:00", lunch_start: "noon" };
+    expect(workDay(bad)).toEqual([540, 1050]);
+    expect(schedule([], bad).free).toBe(510);
+    expect(schedule([item("a", 30)], bad).at).toEqual({ a: 540 });
+  });
+
+  it("ends a block at midnight at the latest", () => {
+    const s = schedule([item("a", 60)], DEFAULT_SETTINGS, [], { a: 23 * 60 + 30 });
+    expect(s.all.find((b) => b.key === "a")).toMatchObject({ start: 1410, end: 1440 });
+  });
+
+  it("keeps an item with a fixed time at its time, and places the others around it", () => {
+    // b is fixed at 9:30. a (60 m) does not fit before it, so a starts after b.
+    const s = schedule([item("a", 60), item("b", 30), item("c", 30)], DEFAULT_SETTINGS, [], { b: 570 });
+    expect(s.at).toEqual({ a: 600, b: 570, c: 660 });
+    expect(s.all.find((x) => x.key === "b")).toMatchObject({ pinned: true });
+    // A fixed item is work: it does not count as taken time twice.
+    expect(s.free).toBe(465 - 120);
+    // A fixed time on lunch stays there.
+    expect(schedule([item("a", 30)], DEFAULT_SETTINGS, [], { a: 750 }).at).toEqual({ a: 750 });
+    // Lunch (12:30, 45 m) takes those minutes already: an item on it uses no more.
+    expect(schedule([item("a", 45)], DEFAULT_SETTINGS, [], { a: 750 }).free).toBe(465);
+    // Half on a meeting (10:00-11:00): only the other 30 minutes are work.
+    const meet = { start: 600, end: 660, event: { id: "m", title: "m" } as api.CalEvent };
+    expect(schedule([item("a", 60)], DEFAULT_SETTINGS, [meet], { a: 630 }).free).toBe(465 - 60 - 30);
+  });
+
+  it("puts overlapping blocks side by side", () => {
+    expect(sideBySide([{ start: 0, end: 60 }, { start: 30, end: 90 }, { start: 90, end: 120 }, { start: 40, end: 50 }])).toEqual([
+      { col: 0, cols: 3 },
+      { col: 1, cols: 3 },
+      { col: 0, cols: 1 },
+      { col: 2, cols: 3 },
+    ]);
   });
 
   it("says how much is too much, and has no lunch for an empty plan", () => {

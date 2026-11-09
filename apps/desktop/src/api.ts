@@ -186,7 +186,7 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 /** One item of a day plan. `key` names the item (items.rs). */
-export type PlanItem = { key: string; why?: string; goal?: number };
+export type PlanItem = { key: string; why?: string; goal?: number; /** A fixed start time, in minutes after midnight. */ at?: number };
 /** `mode` "review": a review put items in a day with no plan. You did not pick yet how to plan the day. */
 export type DayPlan = { day: string; mode: "ai" | "self" | "review"; items: PlanItem[]; updated: number };
 export type Estimate = { minutes: number; by: "you" | "aifred" };
@@ -294,6 +294,11 @@ export const openFile = (id: string) => invoke<void>("open_file", { id });
 
 export const dayPlan = (day: string) => invoke<DayPlan | null>("day_plan", { day });
 export const setDayPlan = (day: string, mode: DayPlan["mode"], items: PlanItem[]) => invoke<DayPlan>("set_day_plan", { day, mode, items });
+/** The plans of the days from `from` to `to`, both included. A day with no plan is not in the list. */
+export const dayPlans = (from: string, to: string) => invoke<DayPlan[]>("day_plans", { from, to });
+/** Moves one item to the plan of another day. Returns the plan of `from`, then the plan of `to`. */
+export const movePlanItem = (from: string, to: string, key: string, at: number | null, index: number | null) =>
+  invoke<[DayPlan | null, DayPlan]>("move_plan_item", { from, to, key, at, index });
 export const clearDayPlan = (day: string) => invoke<void>("clear_day_plan", { day });
 export const estimates = () => invoke<Record<string, Estimate>>("estimates");
 /** Your own time guess. null removes it. */
@@ -695,6 +700,8 @@ export function describe(e: ProgressEvent): string {
       return "Reading your day plan";
     case "set_day_plan":
       return "Saving your day plan";
+    case "move_to_day":
+      return "Moving an item to another day";
     case "my_tasks":
       return "Checking your ClickUp tasks";
     case "task_details":

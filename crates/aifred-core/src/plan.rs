@@ -3,10 +3,10 @@
 //! work day, around lunch (settings.rs). The user makes the plan by hand, or
 //! AIfred makes it in the plan chat with the day_plan tools (aifred-tools).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,11 @@ pub struct PlanItem {
     /// The id of the goal that the item serves (goals.rs), when AIfred knows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<i64>,
+    /// A fixed start time, in clock minutes after midnight (0..1440). The
+    /// user sets it when they drag a block to a time, or the AI sets it.
+    /// Without it, the window places the item in the next free time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,6 +64,27 @@ pub fn today() -> String {
     chrono::Local::now().format("%F").to_string()
 }
 
+/// The days that the app shows: today and the next PLAN_DAYS - 1 days.
+pub const PLAN_DAYS: i64 = 7;
+
+/// An error when `day` is not today or one of the next PLAN_DAYS - 1 days.
+/// The app shows only these days, so an item on another day goes off the calendar.
+pub fn check_shown_day(day: &str, today: &str) -> anyhow::Result<()> {
+    check_day(day)?;
+    let d = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .with_context(|| format!("bad day {day}"))?;
+    let t = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
+        .with_context(|| format!("bad day {today}"))?;
+    let n = (d - t).num_days();
+    if !(0..PLAN_DAYS).contains(&n) {
+        bail!(
+            "{day} is not in the plans that the user sees: use a day from {today} to {}",
+            t + chrono::Days::new(PLAN_DAYS as u64 - 1)
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn check_day(day: &str) -> anyhow::Result<()> {
     let ok = day.len() == 10
         && day.bytes().enumerate().all(|(i, b)| {
@@ -72,6 +98,28 @@ pub(crate) fn check_day(day: &str) -> anyhow::Result<()> {
         bail!("the day \"{day}\" is not in the form YYYY-MM-DD");
     }
     Ok(())
+}
+
+/// The minutes after midnight of a clock time "H:MM" or "HH:MM".
+pub fn parse_time(t: &str) -> anyhow::Result<u32> {
+    let bad = || anyhow::anyhow!("the time \"{t}\" is not in the form HH:MM");
+    let (h, m) = t.trim().split_once(':').ok_or_else(bad)?;
+    // Only digits: "+9:30" and "9:5" are errors, so the AI can fix its call.
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if !(1..=2).contains(&h.len()) || m.len() != 2 || !digits(h) || !digits(m) {
+        return Err(bad());
+    }
+    let h: u32 = h.parse().map_err(|_| bad())?;
+    let m: u32 = m.parse().map_err(|_| bad())?;
+    if h > 23 || m > 59 {
+        return Err(bad());
+    }
+    Ok(h * 60 + m)
+}
+
+/// "HH:MM" of minutes after midnight.
+pub fn time_text(m: u32) -> String {
+    format!("{:02}:{:02}", m / 60, m % 60)
 }
 
 /// The plan of `day`, or None when the day has no plan.
@@ -123,6 +171,20 @@ pub fn set(
     db::write(dir, |tx| set_in(tx, day, mode, items, strict))
 }
 
+/// set() for the AI (strict). An item with no `at` keeps its old fixed
+/// time, except the items in `clear_at`: they lose their fixed time.
+pub fn set_ai(
+    dir: &Path,
+    day: &str,
+    items: Vec<PlanItem>,
+    clear_at: &HashSet<String>,
+) -> anyhow::Result<DayPlan> {
+    check_day(day)?;
+    db::write(dir, |tx| {
+        set_with(tx, day, "ai", items, true, Some(clear_at))
+    })
+}
+
 /// set(), in a change that is open. Also for the reviews (review.rs).
 pub(crate) fn set_in(
     tx: &rusqlite::Transaction,
@@ -131,18 +193,37 @@ pub(crate) fn set_in(
     items: Vec<PlanItem>,
     strict: bool,
 ) -> anyhow::Result<DayPlan> {
+    set_with(tx, day, mode, items, strict, None)
+}
+
+/// set_in(). `keep_at`: Some for the AI (set_ai). Then an item with no `at`
+/// keeps its old fixed time, except the items in the set: they lose it.
+/// None: each item has the time that it has in `items`.
+fn set_with(
+    tx: &rusqlite::Transaction,
+    day: &str,
+    mode: &str,
+    items: Vec<PlanItem>,
+    strict: bool,
+    keep_at: Option<&HashSet<String>>,
+) -> anyhow::Result<DayPlan> {
     {
-        let old: HashSet<String> = tx
+        let old_items: Vec<PlanItem> = tx
             .query_row("SELECT items FROM day_plan WHERE day = ?1", [day], |r| {
                 r.get::<_, String>(0)
             })
             .optional()?
             .map(|j| serde_json::from_str::<Vec<PlanItem>>(&j))
             .transpose()?
-            .unwrap_or_default()
-            .into_iter()
-            .map(|i| i.key)
+            .unwrap_or_default();
+        // The fixed times of the saved plan. The AI sends the full plan
+        // again for each change. When it leaves out a time, the item keeps
+        // it, so a block that the user dragged to a time does not move.
+        let old_at: HashMap<String, u32> = old_items
+            .iter()
+            .filter_map(|i| i.at.map(|a| (i.key.clone(), a)))
             .collect();
+        let old: HashSet<String> = old_items.into_iter().map(|i| i.key).collect();
         let mut seen = HashSet::new();
         let mut keep = Vec::new();
         let mut bad = Vec::new();
@@ -155,6 +236,20 @@ pub(crate) fn set_in(
                 .filter(|w| !w.is_empty());
             if !seen.insert(i.key.clone()) {
                 continue;
+            }
+            if let Some(a) = i.at
+                && a >= 1440
+            {
+                if strict {
+                    bail!("the time of {} is not a time of the day", i.key);
+                }
+                i.at = None;
+            }
+            if let Some(clear_at) = keep_at
+                && i.at.is_none()
+                && !clear_at.contains(&i.key)
+            {
+                i.at = old_at.get(&i.key).copied();
             }
             if let Some(g) = i.goal
                 && !crate::goals::exists(tx, g)?
@@ -213,6 +308,103 @@ pub(crate) fn items_in(
     .optional()?
     .map(|(mode, items)| Ok((mode, serde_json::from_str(&items)?)))
     .transpose()
+}
+
+/// The plans of the days from `from` to `to`, both included, first day first.
+/// A day with no plan is not in the list.
+pub fn range(dir: &Path, from: &str, to: &str) -> anyhow::Result<Vec<DayPlan>> {
+    check_day(from)?;
+    check_day(to)?;
+    db::read(dir, |c| {
+        let mut q = c.prepare(
+            "SELECT day, mode, items, updated FROM day_plan WHERE day >= ?1 AND day <= ?2 ORDER BY day",
+        )?;
+        let rows = q.query_map([from, to], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, u64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (day, mode, items, updated) = r?;
+            out.push(DayPlan {
+                day,
+                mode,
+                items: serde_json::from_str(&items)?,
+                updated,
+            });
+        }
+        Ok(out)
+    })
+}
+
+/// Moves the item `key` from the plan of `from` to the plan of `to`, in
+/// one change, so the item cannot get lost between two saves. `at` is its
+/// new fixed time, or None to place it in the next free time. `index` is its
+/// place in the new day (None: at the end). It keeps its reason and goal.
+/// A day with no plan, or a plan from the reviews, becomes the user's own plan.
+/// Returns the two plans after the move. The first is None when the old day
+/// has no plan now.
+pub fn move_item(
+    dir: &Path,
+    from: &str,
+    to: &str,
+    key: &str,
+    at: Option<u32>,
+    index: Option<usize>,
+) -> anyhow::Result<(Option<DayPlan>, DayPlan)> {
+    check_day(from)?;
+    check_day(to)?;
+    if from == to {
+        bail!("the item is already on {to}");
+    }
+    if at.is_some_and(|a| a >= 1440) {
+        bail!("the time is not a time of the day");
+    }
+    db::write(dir, |tx| {
+        let (from_mode, mut from_items) = items_in(tx, from)?.unwrap_or_default();
+        let Some(n) = from_items.iter().position(|i| i.key == key) else {
+            bail!("{key} is not in the plan of {from}");
+        };
+        // A local task waits until its start day, so it cannot go on a day before it.
+        if let Some(id) = key.strip_prefix("task:") {
+            let start: Option<String> = tx
+                .query_row("SELECT start FROM user_task WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .flatten();
+            if let Some(start) = start.filter(|s| !s.is_empty() && s.as_str() > to) {
+                bail!("{key} starts on {start}, so it cannot move to {to}");
+            }
+        }
+        // An item that closed can stay on its own day, but it does not move.
+        // Check it here: the save below keeps a key that is already in the
+        // plan of `to`, also when its item is closed.
+        if !items::is_open(tx, key).unwrap_or(false) {
+            bail!("{key} is not open, so it cannot move to {to}");
+        }
+        let mut item = from_items.remove(n);
+        item.at = at;
+        let (to_mode, mut to_items) = items_in(tx, to)?.unwrap_or_default();
+        to_items.retain(|i| i.key != key);
+        let k = index.unwrap_or(to_items.len()).min(to_items.len());
+        to_items.insert(k, item);
+        let to_mode = if to_mode == "ai" { "ai" } else { "self" };
+        let moved = set_in(tx, to, to_mode, to_items, false)?;
+        // An empty plan from the reviews goes away, as in review.rs
+        // remove_from_plan, so the day has no plan again.
+        let left = if from_mode == REVIEW && from_items.is_empty() {
+            tx.execute("DELETE FROM day_plan WHERE day = ?1", [from])?;
+            None
+        } else {
+            Some(set_in(tx, from, &from_mode, from_items, false)?)
+        };
+        Ok((left, moved))
+    })
 }
 
 /// Removes the plan of `day`. The plan chat of the day stays.
@@ -300,7 +492,134 @@ mod tests {
             key: key.into(),
             why: None,
             goal: None,
+            at: None,
         }
+    }
+
+    #[test]
+    fn the_ai_keeps_a_fixed_time_that_it_leaves_out() {
+        let d = temp("at");
+        let s = TaskStore::new(&d);
+        let a = format!("task:{}", s.add("A", "", "you").unwrap().id);
+        let b = format!("task:{}", s.add("B", "", "you").unwrap().id);
+        let at = |key: &str, m| PlanItem {
+            at: Some(m),
+            ..item(key)
+        };
+        set(&d, "2026-11-04", "self", vec![at(&a, 900), item(&b)], false).unwrap();
+        // The AI sends the plan again with no times: A keeps 15:00.
+        let none = HashSet::new();
+        let p = set_ai(&d, "2026-11-04", vec![item(&b), item(&a)], &none).unwrap();
+        assert_eq!(p.items[1].at, Some(900));
+        // Another strict save that is not the AI does not keep the time.
+        set(&d, "2026-11-04", "self", vec![at(&a, 900)], false).unwrap();
+        let p = set(&d, "2026-11-04", "ai", vec![item(&a)], true).unwrap();
+        assert_eq!(p.items[0].at, None);
+        // The AI can move it.
+        let p = set_ai(&d, "2026-11-04", vec![at(&a, 600)], &none).unwrap();
+        assert_eq!(p.items[0].at, Some(600));
+        // The window sends the full plan: no time takes the time away.
+        let p = set(&d, "2026-11-04", "self", vec![item(&a)], false).unwrap();
+        assert_eq!(p.items[0].at, None);
+        // The AI can take the fixed time away.
+        set(&d, "2026-11-04", "self", vec![at(&a, 900)], false).unwrap();
+        let clear: HashSet<String> = [a.clone()].into();
+        let p = set_ai(&d, "2026-11-04", vec![item(&a)], &clear).unwrap();
+        assert_eq!(p.items[0].at, None);
+        // A time past the day.
+        assert!(set(&d, "2026-11-04", "ai", vec![at(&a, 1440)], true).is_err());
+        let p = set(&d, "2026-11-04", "self", vec![at(&a, 1440)], false).unwrap();
+        assert_eq!(p.items[0].at, None);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_item_moves_to_another_day_in_one_change() {
+        let d = temp("move");
+        let s = TaskStore::new(&d);
+        let a = format!("task:{}", s.add("A", "", "you").unwrap().id);
+        let b = format!("task:{}", s.add("B", "", "you").unwrap().id);
+        let mut why = item(&a);
+        why.why = Some("Due soon".into());
+        set(&d, "2026-11-04", "ai", vec![why, item(&b)], false).unwrap();
+        let (left, to) = move_item(&d, "2026-11-04", "2026-11-05", &a, Some(600), None).unwrap();
+        let left = left.unwrap();
+        assert_eq!(left.items.len(), 1);
+        assert_eq!(left.mode, "ai");
+        assert_eq!(to.mode, "self", "a new day is the user's own plan");
+        assert_eq!(to.items[0].at, Some(600));
+        assert_eq!(to.items[0].why.as_deref(), Some("Due soon"));
+        // Back again, at its old place.
+        let (_, back) = move_item(&d, "2026-11-05", "2026-11-04", &a, None, Some(0)).unwrap();
+        assert_eq!(back.items[0].key, a);
+        assert_eq!(back.items[0].at, None);
+        assert!(move_item(&d, "2026-11-04", "2026-11-05", "task:nope", None, None).is_err());
+        // A task cannot move to a day before its start day.
+        let id = b.strip_prefix("task:").unwrap();
+        s.update(
+            id,
+            crate::tasks::TaskFields {
+                start: Some("2026-11-05".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (_, _) = move_item(&d, "2026-11-04", "2026-11-05", &b, None, None).unwrap();
+        let e = move_item(&d, "2026-11-05", "2026-11-03", &b, None, None).unwrap_err();
+        assert!(e.to_string().contains("starts on 2026-11-05"), "{e}");
+        let days: Vec<String> = range(&d, "2026-11-01", "2026-11-07")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.day)
+            .collect();
+        assert_eq!(days, ["2026-11-04", "2026-11-05"]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_closed_item_does_not_move_also_when_the_new_day_has_it() {
+        let d = temp("move-closed");
+        let s = TaskStore::new(&d);
+        let t = s.add("A", "", "you").unwrap();
+        let a = format!("task:{}", t.id);
+        set(&d, "2026-11-04", "self", vec![item(&a)], false).unwrap();
+        set(&d, "2026-11-05", "self", vec![item(&a)], false).unwrap();
+        s.set_done(&t.id, true).unwrap();
+        let e = move_item(&d, "2026-11-04", "2026-11-05", &a, None, None).unwrap_err();
+        assert!(e.to_string().contains("is not open"), "{e}");
+        // Nothing changed: the item stays on both days.
+        assert_eq!(get(&d, "2026-11-04").unwrap().unwrap().items.len(), 1);
+        assert_eq!(get(&d, "2026-11-05").unwrap().unwrap().items.len(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_empty_plan_from_a_review_goes_away_after_a_move() {
+        let d = temp("move-review");
+        let s = TaskStore::new(&d);
+        let a = format!("task:{}", s.add("A", "", "you").unwrap().id);
+        set(&d, "2026-11-04", REVIEW, vec![item(&a)], false).unwrap();
+        let (left, _) = move_item(&d, "2026-11-04", "2026-11-05", &a, None, None).unwrap();
+        assert_eq!(left, None);
+        assert_eq!(
+            get(&d, "2026-11-04").unwrap(),
+            None,
+            "the day has no plan again"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_clock_time_is_read() {
+        assert_eq!(parse_time("9:30").unwrap(), 570);
+        assert_eq!(parse_time("15:00").unwrap(), 900);
+        assert!(parse_time("24:00").is_err());
+        assert!(parse_time("9.30").is_err());
+        assert!(parse_time("9:5").is_err(), "the minutes need two digits");
+        assert!(parse_time("+9:30").is_err());
+        assert!(parse_time("009:30").is_err());
+        assert_eq!(parse_time(" 09:05 ").unwrap(), 545);
+        assert_eq!(time_text(570), "09:30");
     }
 
     #[test]
@@ -427,5 +746,15 @@ mod tests {
     #[test]
     fn today_is_a_date() {
         check_day(&today()).unwrap();
+    }
+
+    #[test]
+    fn shown_days_are_today_and_the_next_six() {
+        let t = "2026-11-09";
+        check_shown_day("2026-11-09", t).unwrap();
+        check_shown_day("2026-11-15", t).unwrap();
+        assert!(check_shown_day("2026-11-08", t).is_err());
+        assert!(check_shown_day("2026-11-16", t).is_err());
+        assert!(check_shown_day("9 Nov", t).is_err());
     }
 }

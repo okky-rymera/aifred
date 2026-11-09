@@ -2,7 +2,7 @@
 import { createContext, useContext } from "react";
 import type * as api from "./api";
 import type { ChatMsg } from "./Chat";
-import type { Item, Schedule } from "./items";
+import type { DayEvents, Item, Schedule } from "./items";
 
 export type CardMode = "auto" | "open" | "hidden";
 
@@ -20,6 +20,17 @@ export type AppCtx = {
   /** The plan items that are still open, in order. */
   planItems: Item[];
   sched: Schedule;
+  /** The plans of today and the next days, by day. null: the day has no plan. */
+  plans: Record<string, api.DayPlan | null>;
+  /** The open plan items, the schedule, and the calendar events of today and each next day, by day. */
+  week: Record<string, { items: Item[]; sched: Schedule; events: DayEvents }>;
+  /** The events of the user's Google Calendar, today and the next days. Empty when it is not connected. */
+  events: api.CalEvent[];
+  /** The day on the Calendar page. pickDay() also shows the plan chat of that day. */
+  calDay: string;
+  pickDay: (day: string) => void;
+  calView: "day" | "week";
+  setCalView: (v: "day" | "week") => void;
   brief: api.Brief | null;
   /** Reads the brief of `day` again, when it is still on the screen. */
   reloadBrief: (day: string | undefined) => void;
@@ -68,7 +79,7 @@ export type AppCtx = {
   openMain: () => void;
   sendMain: (text: string, files: api.FileRef[]) => Promise<boolean>;
   planChat: ChatState;
-  sendPlan: (text: string, files?: api.FileRef[]) => Promise<boolean>;
+  sendPlan: (text: string, files?: api.FileRef[], day?: string) => Promise<boolean>;
   itemChat: (key: string) => ChatState;
   askItem: (key: string, text: string, files: api.FileRef[]) => Promise<boolean>;
 
@@ -109,12 +120,18 @@ export type AppCtx = {
   tomorrow: (i: Item) => void;
   setMinutes: (key: string, minutes: number) => void;
 
-  /** Saves a new order of the plan. `toast` says what changed, with an undo. */
-  savePlan: (keys: string[], toast?: string) => void;
-  addToPlan: (key: string, at?: number) => void;
-  removeFromPlan: (key: string) => void;
-  startPlan: (mode: "ai" | "self") => void;
-  startOver: () => void;
+  /** Saves a new order of the plan of `day` (default today). `toast` says what changed, with an undo. */
+  savePlan: (keys: string[], toast?: string, day?: string) => void;
+  /** Adds an item to the plan of `day` (default today), at the place `index`, with the fixed time `at`. */
+  addToPlan: (key: string, opts?: { index?: number; day?: string; at?: number }) => void;
+  removeFromPlan: (key: string, day?: string) => void;
+  /** Fixes the start time of a plan item, in minutes after midnight. null: no fixed time. */
+  setPlanTime: (key: string, at: number | null, day: string) => void;
+  /** Moves a plan item to the plan of another day. */
+  moveToDay: (key: string, from: string, to: string, at: number | null) => void;
+  startPlan: (mode: "ai" | "self", day?: string) => void;
+  /** Removes the plan and the plan chat of `day` (default: the day on the Calendar page). */
+  startOver: (day?: string) => void;
   writeBrief: () => void;
   toast: (text: string, undo?: () => void, error?: boolean) => void;
   /** The Google connection. null: not read yet. */

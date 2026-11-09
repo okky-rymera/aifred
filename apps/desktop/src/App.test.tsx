@@ -1,5 +1,5 @@
 // The full window with a fake backend: Home (brief and list), the task
-// panel, the chats, Day plan, Settings, and Memory.
+// panel, the chats, Calendar, Settings, and Memory.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import App from "./App";
 import { DEFAULT_SETTINGS, type Answer, type Mission } from "./api";
-import { addDays, dayOf } from "./items";
+import { addDays, dayOf, shortDay } from "./items";
 import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, mail, meeting, task } from "./test/fakeBackend";
 
 // The panel stays in the page, hidden, behind the task tab. A role query skips a hidden element.
@@ -114,6 +114,21 @@ describe("home", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Tomorrow" }));
     await waitFor(() => expect(fake.tasks[0].due).toBe(addDays(today(), 1)));
     await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.tasks[0].due).toBe(today()));
+  });
+
+  it("Tomorrow moves a planned task to the plan of tomorrow, and the undo puts it back", async () => {
+    const t = task("Pay rent", { due: today() });
+    const key = `task:${t.id}`;
+    const next = addDays(today(), 1);
+    const fake = await startApp({ tasks: [t], plans: { [today()]: { day: today(), mode: "self", items: [{ key, at: 600 }], updated: 1 } } });
+    await userEvent.click((await screen.findAllByRole("button", { name: "Tomorrow" }))[0]);
+    await waitFor(() => expect(fake.plans[next]?.items.map((i) => i.key)).toEqual([key]));
+    expect(fake.plans[today()].items).toEqual([]);
+    expect(fake.tasks[0].due).toBe(next);
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key, at: 600 }]));
+    expect(fake.plans[next].items).toEqual([]);
     await waitFor(() => expect(fake.tasks[0].due).toBe(today()));
   });
 });
@@ -1324,10 +1339,10 @@ describe("the home box", () => {
     await waitFor(() => expect(fake.tasks[0]?.files.map((f) => f.name)).toEqual(["receipt.pdf"]));
   });
 
-  it("plan my day opens the Day plan", async () => {
+  it("plan my day opens the Calendar", async () => {
     const fake = await startApp();
     await userEvent.type(homeBox(), "Plan my day");
-    expect(screen.getByText("Opens Day plan")).toBeInTheDocument();
+    expect(screen.getByText("Opens Calendar")).toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
     await waitFor(() => expect(fake.calls.some((c) => c.cmd === "ask_side")).toBe(true));
     // Back on Home, the box is empty.
@@ -1565,9 +1580,10 @@ describe("tabs on the right side", () => {
 });
 
 describe("day plan", () => {
+  beforeEach(() => localStorage.removeItem("aifred-cal-view"));
   it("I plan it myself: add items, change the time, and take them out", async () => {
     const fake = await startApp({ tasks: [task("Pay rent"), task("Call Sam")], github: [githubItem(7, "review_requested", "Fix cart")] });
-    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
     await userEvent.click(screen.getByRole("button", { name: /I plan it myself/ }));
     expect(await screen.findByText("Your plan is empty")).toBeInTheDocument();
     const off = screen.getByRole("list", { name: "Not in today's plan" });
@@ -1589,7 +1605,7 @@ describe("day plan", () => {
       calendar: { fetched_at: Math.floor(Date.now() / 1000), events: [meeting("m1", "Weekly sync", "09:00", "10:00")] },
     });
     expect(await screen.findByText(/Calendar/, { selector: ".sync span" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
     expect(await screen.findByText("Weekly sync")).toBeInTheDocument();
     expect(screen.getByText("Josh, Ana")).toBeInTheDocument();
     // The task does not go over the meeting: it starts when the meeting ends.
@@ -1631,7 +1647,7 @@ describe("day plan", () => {
       plans: { [today()]: { day: today(), mode: "self", items: [{ key: `task:${rent.id}` }], updated: 1 } },
       side: { [`plan:${today()}`]: [{ id: 1, ts: 1, role: "user", text: "Plan my day", files: [] }] },
     });
-    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
     expect(await screen.findByText("Made by you")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Start over" }));
     expect(await screen.findByText("How do you want to plan today?")).toBeInTheDocument();
@@ -1648,7 +1664,7 @@ describe("day plan", () => {
       fail: { github_items: "Cannot reach GitHub" },
       plans: { [today()]: { day: today(), mode: "self", items: [{ key: gh, why: "A review." }, { key: `task:${rent.id}` }], updated: 1 } },
     });
-    await userEvent.click(screen.getByRole("button", { name: "Day plan" }));
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
     expect(await screen.findByText("Made by you")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Take out of the plan: Pay rent" }));
     await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key: gh, why: "A review." }]));
@@ -1663,6 +1679,140 @@ describe("day plan", () => {
     load.resolve();
     await userEvent.click(screen.getByRole("button", { name: "+ Plan" }));
     await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key: `task:${fake.tasks[0].id}` }]));
+  });
+
+  it("Alt+Down gives a block a fixed time, and its time button takes the time away", async () => {
+    const rent = task("Pay rent");
+    const key = `task:${rent.id}`;
+    const fake = await startApp({ tasks: [rent], plans: { [today()]: { day: today(), mode: "self", items: [{ key, why: "Due." }], updated: 1 } } });
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    const block = await screen.findByRole("button", { name: "Open details: Pay rent" });
+    fireEvent.keyDown(block, { key: "ArrowDown", altKey: true });
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key, why: "Due.", at: 555 }]));
+    expect(await screen.findByText("9:15–9:45")).toBeInTheDocument();
+    expect(await screen.findByText("Moved to 9:15: Pay rent")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "No fixed time: Pay rent" }));
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key, why: "Due." }]));
+  });
+
+  it("two quick Alt+Down moves save in order, so the last time stays", async () => {
+    const rent = task("Pay rent");
+    const key = `task:${rent.id}`;
+    const first = deferred<void>();
+    let n = 0;
+    const fake = await startApp({
+      tasks: [rent],
+      plans: { [today()]: { day: today(), mode: "self", items: [{ key }], updated: 1 } },
+      // The first save is slow. Before the fix, the second save answered first and the first one won.
+      onSetDayPlan: () => (n++ === 0 ? first.promise : undefined),
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    fireEvent.keyDown(await screen.findByRole("button", { name: "Open details: Pay rent" }), { key: "ArrowDown", altKey: true });
+    expect(await screen.findByText("9:15–9:45")).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Open details: Pay rent" }), { key: "ArrowDown", altKey: true });
+    expect(await screen.findByText("9:30–10:00")).toBeInTheDocument();
+    first.resolve();
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key, at: 570 }]));
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "set_day_plan")).toHaveLength(2));
+    expect(screen.getByText("9:30–10:00")).toBeInTheDocument();
+  });
+
+  it("a plan load that fails once loads again, so the plan changes work", async () => {
+    let n = 0;
+    const fake = await startApp({ tasks: [task("Pay rent")], onDayPlan: () => (n++ === 0 ? Promise.reject("the database is busy") : undefined) });
+    // Before the fix, the plan changes stayed off until the app started again.
+    await userEvent.click(await screen.findByRole("button", { name: "+ Plan" }));
+    expect(await screen.findByText(/still loading/)).toBeInTheDocument();
+    await waitFor(() => expect(n).toBe(2));
+    await userEvent.click(screen.getByRole("button", { name: "+ Plan" }));
+    await waitFor(() => expect(fake.plans[today()]?.items).toEqual([{ key: `task:${fake.tasks[0].id}` }]));
+  });
+
+  it("Alt+Right moves a block to the next day in one change, and Undo moves it back", async () => {
+    const rent = task("Pay rent");
+    const bill = task("Pay bill");
+    const [r, b] = [`task:${rent.id}`, `task:${bill.id}`];
+    const fake = await startApp({ tasks: [rent, bill], plans: { [today()]: { day: today(), mode: "ai", items: [{ key: r }, { key: b }], updated: 1 } } });
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    fireEvent.keyDown(await screen.findByRole("button", { name: "Open details: Pay rent" }), { key: "ArrowRight", altKey: true });
+    const next = addDays(today(), 1);
+    await waitFor(() => expect(fake.plans[next]?.items).toEqual([{ key: r }]));
+    expect(fake.plans[today()].items).toEqual([{ key: b }]);
+    expect(fake.calls.filter((c) => c.cmd === "move_plan_item")).toHaveLength(1);
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.plans[today()].items).toEqual([{ key: r }, { key: b }]));
+    expect(fake.plans[next].items).toEqual([]);
+  });
+
+  it("the week view shows 7 days, says which day is too full, and opens a day", async () => {
+    const big = task("Write the report");
+    const next = addDays(today(), 1);
+    await startApp({
+      tasks: [big],
+      plans: { [next]: { day: next, mode: "self", items: [{ key: `task:${big.id}` }], updated: 1 } },
+      estimates: { [`task:${big.id}`]: { minutes: 600, by: "you" } },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    await userEvent.click(screen.getByRole("button", { name: "Week" }));
+    for (let n = 1; n < 7; n++) expect(screen.getByRole("group", { name: `Calendar of ${shortDay(addDays(today(), n), today())}` })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Open ${shortDay(today(), today())}` })).toHaveTextContent("No plan");
+    expect(within(screen.getByRole("button", { name: `Open ${shortDay(next, today())}` })).getByText(/Too full by/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: `Open ${shortDay(next, today())}` }));
+    expect(screen.getByRole("button", { name: "Day" })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText(/This day is too full by/)).toBeInTheDocument();
+  });
+
+  it("the plan chat of another day plans that day", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    await userEvent.click(screen.getByRole("button", { name: "The next day" }));
+    const next = addDays(today(), 1);
+    expect(await screen.findByText(`How do you want to plan ${shortDay(next, today())}?`)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "The next day" })).toBeEnabled();
+    fake.onAskSide = () => answer("Done.");
+    await userEvent.click(screen.getByRole("button", { name: /Plan it for me/ }));
+    await waitFor(() => expect(fake.calls.find((c) => c.cmd === "ask_side")?.args.thread).toBe(`plan:${next}`));
+    expect(screen.getByText(`Plan chat for ${shortDay(next, today())}`)).toBeInTheDocument();
+  });
+
+  it("two fast clicks on Plan it for me start only one answer", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    const slow = deferred<Answer>();
+    fake.onAskSide = () => slow.promise;
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    const btn = await screen.findByRole("button", { name: /Plan it for me/ });
+    // Two clicks before the next render: the button is not disabled yet.
+    act(() => {
+      fireEvent.click(btn);
+      fireEvent.click(btn);
+    });
+    const chat = screen.getByRole("complementary", { name: "Plan chat" });
+    expect(await within(chat).findByText("Plan my day.")).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "ask_side")).toHaveLength(1);
+    slow.resolve(answer("Done planning."));
+    expect(await within(chat).findByText("Done planning.")).toBeInTheDocument();
+    expect(within(chat).getAllByText("Plan my day.")).toHaveLength(1);
+  });
+
+  it("a running plan answer stays with its day, and a second plan waits for it", async () => {
+    const fake = await startApp({ tasks: [task("Pay rent")] });
+    const slow = deferred<Answer>();
+    fake.onAskSide = () => slow.promise;
+    await userEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    await userEvent.click(await screen.findByRole("button", { name: /Plan it for me/ }));
+    const chat = screen.getByRole("complementary", { name: "Plan chat" });
+    expect(await within(chat).findByText("Plan my day.")).toBeInTheDocument();
+    // Another day: its plan does not start while the first answer runs.
+    await userEvent.click(screen.getByRole("button", { name: "The next day" }));
+    expect(within(chat).queryByText("Plan my day.")).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: /Plan it for me/ }));
+    expect(await screen.findByText(/AIfred is still working on today's plan/)).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "ask_side")).toHaveLength(1);
+    // Back to today: the question and the answer are there.
+    await userEvent.click(screen.getByRole("button", { name: "The day before" }));
+    expect(await within(chat).findByText("Plan my day.")).toBeInTheDocument();
+    slow.resolve(answer("Done planning."));
+    expect(await within(chat).findByText("Done planning.")).toBeInTheDocument();
   });
 
   it("+ Plan on the home list adds the item to today's plan", async () => {

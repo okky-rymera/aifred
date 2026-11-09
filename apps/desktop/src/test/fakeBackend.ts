@@ -75,6 +75,9 @@ export type Fake = {
   onMissionStep?: () => Promise<void> | void;
   /** Runs before day_plan answers. A test can hold the plan load with it. */
   onDayPlan?: (day: string) => Promise<void> | void;
+  /** Runs before set_day_plan saves. A test can hold one save, so a later save
+   * would answer first. It gets the items to save. */
+  onSetDayPlan?: (items: DayPlan["items"]) => Promise<void> | void;
   /** Runs before item_context answers. A test can hold the notes load with it. */
   onItemContext?: (key: string) => Promise<void> | void;
   /** Runs before connect_google answers, like a user in the browser. A
@@ -1190,12 +1193,46 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         return structuredClone(fake.plans[args.day] ?? null);
       case "set_day_plan": {
         if (!["ai", "self", "review"].includes(args.mode)) throw `the plan mode must be "ai" or "self"`;
+        await fake.onSetDayPlan?.(args.items);
         // Like plan.rs: a key that was in the plan before stays, also when its item is not open.
         const old = new Set((fake.plans[args.day]?.items ?? []).map((i) => i.key));
         const seen = new Set<string>();
         const items = (args.items as DayPlan["items"]).filter((i) => !seen.has(i.key) && (seen.add(i.key), old.has(i.key) || isOpen(i.key)));
         fake.plans[args.day] = { day: args.day, mode: args.mode, items, updated: nowSecs() };
         return structuredClone(fake.plans[args.day]);
+      }
+      case "day_plans":
+        await fake.onDayPlan?.(args.from);
+        return structuredClone(
+          Object.values(fake.plans)
+            .filter((p) => p.day >= args.from && p.day <= args.to)
+            .sort((a, b) => a.day.localeCompare(b.day)),
+        );
+      case "move_plan_item": {
+        // Like plan::move_item: one change, the item keeps its reason and goal.
+        if (args.from === args.to) throw `the item is already on ${args.to}`;
+        const from = fake.plans[args.from];
+        const n = from?.items.findIndex((i) => i.key === args.key) ?? -1;
+        if (!from || n < 0) throw `${args.key} is not in the plan of ${args.from}`;
+        // Like plan::move_item: a task cannot go on a day before its start day.
+        const start = fake.tasks.find((t) => `task:${t.id}` === args.key)?.start;
+        if (start && start > args.to) throw `${args.key} starts on ${start}, so it cannot move to ${args.to}`;
+        if (!isOpen(args.key)) throw `${args.key} is not open, so it cannot move to ${args.to}`;
+        const [item] = from.items.splice(n, 1);
+        const moved: DayPlan["items"][number] = { ...item };
+        if (args.at == null) delete moved.at;
+        else moved.at = args.at;
+        const to = fake.plans[args.to] ?? { day: args.to, mode: "self" as const, items: [], updated: nowSecs() };
+        const rest = to.items.filter((i) => i.key !== args.key);
+        rest.splice(Math.min(args.index ?? rest.length, rest.length), 0, moved);
+        fake.plans[args.to] = { ...to, mode: to.mode === "ai" ? "ai" : "self", items: rest, updated: nowSecs() };
+        from.updated = nowSecs();
+        // Like plan::move_item: an empty plan from the reviews goes away.
+        if (from.mode === "review" && from.items.length === 0) {
+          delete fake.plans[args.from];
+          return structuredClone([null, fake.plans[args.to]]);
+        }
+        return structuredClone([from, fake.plans[args.to]]);
       }
       case "clear_day_plan":
         delete fake.plans[args.day];

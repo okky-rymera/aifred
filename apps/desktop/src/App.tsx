@@ -5,10 +5,10 @@ import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
 import { Ctx, useApp, type AppCtx, type CardMode, type ChatState, type ListState } from "./ctx";
 import { Detail } from "./Detail";
 import { Home } from "./Home";
-import { addDays, buildItems, dayOf, dur, meetingsOn, schedule, type Item } from "./items";
+import { WEEK, addDays, buildItems, dayName, dayOf, dur, eventsOn, fmtTime, schedule, shortDay, type DayEvents, type Item, type Schedule } from "./items";
 import { TasksPage } from "./Tasks";
 import { MemoryList } from "./Memory";
-import { PlanChat, PlanView } from "./Plan";
+import { CalendarView, PlanChat } from "./Calendar";
 import { RestartButton, SettingsPage } from "./Settings";
 import { useItemsSorted, useTasksChanged } from "./useTasksChanged";
 
@@ -125,10 +125,26 @@ export default function App() {
   const [reviewCards, setReviewCards] = useState<{ day: CardMode; week: CardMode }>({ day: "auto", week: "auto" });
   // A card that you closed comes back on a new day.
   useEffect(() => setReviewCards({ day: "auto", week: "auto" }), [today]);
-  const [plan, setPlan] = useState<api.DayPlan | null>(null);
-  // The day whose plan is loaded. Until today's plan loads, a change must
-  // not save: it would use the plan of the day before.
+  /** The plans of today and the next days, by day. null: the day has no plan. */
+  const [plans, setPlans] = useState<Record<string, api.DayPlan | null>>({});
+  /** The plans as they are now, also before the next render. putPlan() sets
+   * it at once, so two quick changes both start from the newest plan. */
+  const plansNow = useRef(plans);
+  plansNow.current = plans;
+  /** The last save of each day. A new save of a day waits for it, so the
+   * saves of one day run in the order the user made them. */
+  const saveQueue = useRef<Record<string, Promise<unknown>>>({});
+  /** A count of the saves of each day. Only the reply of the newest save may change the screen. */
+  const saveSeq = useRef<Record<string, number>>({});
+  /** A count of the changes to the plan of each day on the screen. loadPlans() uses it. */
+  const planEdits = useRef<Record<string, number>>({});
+  const plan = plans[today] ?? null;
+  // The first day of the loaded plans. Until the plans of this day load, a
+  // change must not save: it would use the plans of the day before.
   const [planLoaded, setPlanLoaded] = useState("");
+  /** The day that the Calendar page shows, and how it shows it. */
+  const [calDay, setCalDay] = useState(today);
+  const [calView, setCalViewState] = useState<"day" | "week">(() => (stored("aifred-cal-view") === "week" ? "week" : "day"));
   const [models, setModels] = useState<AppCtx["models"]>(() => ({
     main: null,
     plan: stored("aifred-model-plan") || null,
@@ -141,13 +157,25 @@ export default function App() {
   const mainModelKnown = useRef(false);
   const [main, setMain] = useState<ChatState>(EMPTY_CHAT);
   const [mainOpen, setMainOpen] = useState(false);
-  const [planChat, setPlanChat] = useState<ChatState>(EMPTY_CHAT);
+  /** The plan chat of each day, by day. Each day keeps its own messages and
+   * its own running answer, so a change of day does not lose them. */
+  const [planChats, setPlanChats] = useState<Record<string, ChatState>>({});
   const [planChatOpen, setPlanChatOpen] = useState(false);
-  /** The day of the plan chat on the screen. */
+  /** The first day of the plans on the screen. */
   const planDay = useRef("");
+  /** The day of the plan chat on the screen. */
+  const [chatDay, setChatDay] = useState("");
+  /** The history load of each plan chat, by day. It never fails: a failed load is taken out, so the next open tries again. */
+  const chatLoaded = useRef(new Map<string, Promise<void>>());
+  /** The day of the plan answer that runs now. A ref, so two clicks before the next render cannot both start one. */
+  const planRunning = useRef<string | null>(null);
+  const planChat = planChats[chatDay] ?? EMPTY_CHAT;
+  /** The day of the plan chat that is answering now, or undefined. Only one
+   * plan chat runs at a time: two answers could change the same plans. */
+  const planBusyDay = Object.keys(planChats).find((d) => planChats[d].busy);
   const [itemChats, setItemChats] = useState<Record<string, ChatState>>({});
   // A restart to update must wait for every running answer and the brief.
-  const anyBusy = main.busy || planChat.busy || Object.values(itemChats).some((c) => c.busy) || briefState === "writing";
+  const anyBusy = main.busy || planBusyDay !== undefined || Object.values(itemChats).some((c) => c.busy) || briefState === "writing";
   const [sel, setSel] = useState<string | null>(null);
   const [side, setSide] = useState<"chat" | "task">("chat");
   const [unread, setUnread] = useState(false);
@@ -343,20 +371,63 @@ export default function App() {
     checkClickup(false);
   }, [loadTasks, loadMeta, loadGithub, loadCalendar, loadMail, loadWaiting, checkClickup]);
 
-  // The plan, the brief, and the plan chat belong to one day. A new day loads them again.
+  /** Loads the plans of today and the next days. A day that changed on the
+   * screen after the load started keeps the newer plan of the screen. */
+  const loadPlans = useCallback((tries = 3) => {
+    const from = today;
+    const seen = { ...planEdits.current };
+    api
+      .dayPlans(from, addDays(from, WEEK - 1))
+      .then((list) => {
+        if (planDay.current !== from) return;
+        const got: Record<string, api.DayPlan | null> = {};
+        for (let n = 0; n < WEEK; n++) got[addDays(from, n)] = null;
+        for (const p of list) got[p.day] = p;
+        setPlans((old) => {
+          const m = { ...got };
+          for (const day of Object.keys(m)) if (planEdits.current[day] !== seen[day] && day in old) m[day] = old[day];
+          return m;
+        });
+        setPlanLoaded(from);
+      })
+      .catch(() => {
+        // Try again soon. Until the plans load, the plan changes stay off.
+        if (tries > 1) setTimeout(() => planDay.current === from && loadPlans(tries - 1), 3000);
+      });
+  }, [today]);
+
+  /** Shows the plan chat of `day`, with its old messages. The promise ends when the old messages are in. */
+  const openPlanChat = useCallback((day: string): Promise<void> => {
+    setChatDay(day);
+    const loading = chatLoaded.current.get(day);
+    if (loading) return loading;
+    const load = api
+      .sideHistory(`plan:${day}`)
+      .then((t) => setPlanChats((all) => ({ ...all, [day]: { ...(all[day] ?? EMPTY_CHAT), msgs: [...turnMsgs(t), ...(all[day]?.msgs ?? [])] } })))
+      .catch(() => {
+        chatLoaded.current.delete(day);
+      });
+    chatLoaded.current.set(day, load);
+    return load;
+  }, []);
+
+  /** Shows `day` on the Calendar page, with its plan chat. */
+  const pickDay = useCallback(
+    (day: string) => {
+      setCalDay(day);
+      openPlanChat(day);
+    },
+    [openPlanChat],
+  );
+
+  // The plans, the brief, and the plan chat belong to one day. A new day loads them again.
   useEffect(() => {
     let live = true;
     planDay.current = today;
-    setPlanChat(EMPTY_CHAT);
-    setPlan(null);
-    api
-      .dayPlan(today)
-      .then((p) => {
-        if (!live) return;
-        setPlan(p);
-        setPlanLoaded(today);
-      })
-      .catch(() => {});
+    setPlans({});
+    loadPlans();
+    setCalDay(today);
+    openPlanChat(today);
     api
       .brief(today)
       .then((b) => {
@@ -365,14 +436,10 @@ export default function App() {
         setBriefLoaded(today);
       })
       .catch(() => live && setBriefLoaded(today));
-    api
-      .sideHistory(`plan:${today}`)
-      .then((t) => live && setPlanChat((c) => ({ ...c, msgs: [...turnMsgs(t), ...c.msgs] })))
-      .catch(() => {});
     return () => {
       live = false;
     };
-  }, [today]);
+  }, [today, loadPlans, openPlanChat]);
 
   // A repeating task: AIfred adds the new task by itself. Show it at once.
   useTasksChanged(loadTasks);
@@ -485,10 +552,30 @@ export default function App() {
   }, [tasks, github.items, clickup.items, meta, est, brief, goalText, mail.reply]);
 
   const byKey = useMemo(() => new Map(items.map((i) => [i.key, i])), [items]);
-  const planItems = useMemo(() => (plan?.items ?? []).map((p) => byKey.get(p.key)).filter((i): i is Item => !!i), [plan, byKey]);
   const cfg = settings ?? api.DEFAULT_SETTINGS;
-  const meetings = useMemo(() => meetingsOn(calendar.events, today), [calendar.events, today]);
-  const sched = useMemo(() => schedule(planItems, cfg, meetings), [planItems, cfg, meetings]);
+  /** The open plan items and the schedule of today and each next day. */
+  // The events of each day do not change when an item changes: keep them apart.
+  const weekEvents = useMemo(() => {
+    const out: Record<string, DayEvents> = {};
+    for (let n = 0; n < WEEK; n++) {
+      const day = addDays(today, n);
+      out[day] = eventsOn(calendar.events, day);
+    }
+    return out;
+  }, [today, calendar.events]);
+  const week = useMemo(() => {
+    const out: Record<string, { items: Item[]; sched: Schedule; events: DayEvents }> = {};
+    for (const [day, events] of Object.entries(weekEvents)) {
+      const p = plans[day]?.items ?? [];
+      const dayItems = p.map((x) => byKey.get(x.key)).filter((i): i is Item => !!i);
+      const pins: Record<string, number> = {};
+      for (const x of p) if (x.at !== undefined) pins[x.key] = x.at;
+      out[day] = { items: dayItems, sched: schedule(dayItems, cfg, events.busy, pins), events };
+    }
+    return out;
+  }, [weekEvents, plans, byKey, cfg]);
+  const planItems = week[today].items;
+  const sched = week[today].sched;
 
   // An item that left the list (closed in ClickUp, deleted) closes its panel.
   useEffect(() => {
@@ -841,8 +928,40 @@ export default function App() {
   // Only a plan of the day on screen may change the screen. An answer
   // that comes back after midnight belongs to the old day.
   const putPlan = useCallback((day: string, p: api.DayPlan | null) => {
-    if (planDay.current === day) setPlan(p);
+    const from = planDay.current;
+    if (day < from || day > addDays(from, WEEK - 1)) return;
+    planEdits.current[day] = (planEdits.current[day] ?? 0) + 1;
+    plansNow.current = { ...plansNow.current, [day]: p };
+    setPlans((m) => ({ ...m, [day]: p }));
   }, []);
+
+  /** True when the plans are loaded, so a change can start from them. Else
+   * it shows a message and starts a new load. */
+  const plansReady = useCallback(
+    (day: string = today) => {
+      if (planLoaded === today && day in plansNow.current) return true;
+      loadPlans(1);
+      toast(`The plan for ${dayName(day, today)} is still loading. Try again in a moment.`, undefined, true);
+      return false;
+    },
+    [planLoaded, today, loadPlans, toast],
+  );
+
+  /** Sends one save of the plan of `day` after the saves before it. `put`:
+   * shows the saved plan, but only when no newer save of the day started. */
+  const queueSave = useCallback(
+    <T,>(day: string, send: () => Promise<T>, put?: (v: T) => void): Promise<T> => {
+      const seq = (saveSeq.current[day] ?? 0) + 1;
+      saveSeq.current[day] = seq;
+      const done = (saveQueue.current[day] ?? Promise.resolve()).then(send);
+      saveQueue.current[day] = done.catch(() => {});
+      return done.then((v) => {
+        if (put && saveSeq.current[day] === seq) put(v);
+        return v;
+      });
+    },
+    [],
+  );
 
   /** True when the list of the item is loaded, so an item that is not in it is gone. */
   const listLoaded = useCallback(
@@ -855,20 +974,50 @@ export default function App() {
     [tasksLoaded, sourceStates],
   );
 
+  /** "today's plan", or "the plan for Tue 10 Nov". */
+  const planName = useCallback((day: string) => (day === today ? "today's plan" : `the plan for ${shortDay(day, today)}`), [today]);
+
   /**
-   * Saves the plan with `keys` (the items on screen) in this order. A plan
-   * item that is not on screen because its list did not load yet keeps its
-   * place, so the save does not delete it.
+   * Saves the plan of `day` that `change` makes from its old items. `text`
+   * says what changed, with an undo.
    */
-  const savePlan = useCallback(
-    (keys: string[], text?: string) => {
-      const day = today;
-      if (planLoaded !== day) {
-        toast("The plan for today is still loading. Try again in a moment.", undefined, true);
-        return;
-      }
-      const before = plan;
-      const old = (plan?.items ?? []).map((p) => p.key);
+  const writePlan = useCallback(
+    (day: string, change: (old: api.PlanItem[]) => api.PlanItem[], text?: string) => {
+      if (!plansReady(day)) return;
+      const before = plansNow.current[day] ?? null;
+      const next = change(before?.items ?? []);
+      // A change by hand makes a plan from a review your own plan.
+      const mode = before?.mode === "ai" ? "ai" : "self";
+      putPlan(day, { day, mode, items: next, updated: Date.now() / 1000 });
+      const seq = (saveSeq.current[day] ?? 0) + 1;
+      queueSave(day, () => api.setDayPlan(day, mode, next), (p) => putPlan(day, p))
+        .then(() => {
+          if (text) {
+            toast(text, () => {
+              putPlan(day, before);
+              if (before) queueSave(day, () => api.setDayPlan(day, before.mode, before.items), (p) => putPlan(day, p)).catch(() => {});
+              else queueSave(day, () => api.clearDayPlan(day)).catch(() => {});
+            });
+          }
+        })
+        .catch((e) => {
+          // A newer change of the day is on the screen: it stays.
+          if (saveSeq.current[day] === seq) putPlan(day, before);
+          toast(`The plan is not saved: ${e}`, undefined, true);
+        });
+    },
+    [plansReady, queueSave, toast, putPlan],
+  );
+
+  /**
+   * The plan items for `keys` (the items on screen) in this order. A plan
+   * item that is not on screen because its list did not load yet keeps its
+   * place, so the save does not delete it. An item keeps the reason, the
+   * goal, and the fixed time that it had.
+   */
+  const withKeys = useCallback(
+    (items: api.PlanItem[], keys: string[]): api.PlanItem[] => {
+      const old = items.map((p) => p.key);
       const shown = new Set(keys);
       const hidden = new Set(old.filter((k) => !shown.has(k) && !byKey.has(k) && !listLoaded(k)));
       const merged: string[] = [];
@@ -878,68 +1027,130 @@ export default function App() {
         else if (n < keys.length) merged.push(keys[n++]);
       }
       merged.push(...keys.slice(n));
-      // A moved item keeps the reason and the goal that AIfred gave it.
-      const old_ = new Map((plan?.items ?? []).map((p) => [p.key, p]));
-      const next: api.PlanItem[] = merged.map((key) => {
-        const p = old_.get(key);
-        return { key, ...(p?.why ? { why: p.why } : {}), ...(p?.goal !== undefined ? { goal: p.goal } : {}) };
-      });
-      // A change by hand makes a plan from a review your own plan.
-      const mode = plan?.mode === "ai" ? "ai" : "self";
-      setPlan({ day, mode, items: next, updated: Date.now() / 1000 });
-      api
-        .setDayPlan(day, mode, next)
-        .then((p) => {
-          putPlan(day, p);
-          if (text) {
-            toast(text, () => {
-              const old = before?.items ?? [];
-              putPlan(day, before);
-              if (before) api.setDayPlan(day, before.mode, old).then((p) => putPlan(day, p)).catch(() => {});
-              else api.clearDayPlan(day).catch(() => {});
-            });
-          }
-        })
-        .catch((e) => {
-          putPlan(day, before);
-          toast(`The plan is not saved: ${e}`, undefined, true);
-        });
+      const byOld = new Map(items.map((p) => [p.key, p]));
+      return merged.map((key) => byOld.get(key) ?? { key });
     },
-    [plan, planLoaded, today, toast, byKey, listLoaded, putPlan],
+    [byKey, listLoaded],
   );
 
-  const planKeys = useMemo(() => planItems.map((i) => i.key), [planItems]);
-  const addToPlan = useCallback(
-    (key: string, at?: number) => {
-      const keys = planKeys.filter((k) => k !== key);
-      keys.splice(at ?? keys.length, 0, key);
-      savePlan(keys, `Added to today's plan: ${byKey.get(key)?.title ?? ""}`);
+  /** Saves a new order of the plan of `day` (today when not given). */
+  const savePlan = useCallback(
+    (keys: string[], text?: string, day: string = today) => writePlan(day, (old) => withKeys(old, keys), text),
+    [writePlan, withKeys, today],
+  );
+
+  /** True, with a message, when the task `key` starts after `day`: it cannot go on that day. */
+  const startsAfter = useCallback(
+    (key: string, day: string) => {
+      const i = byKey.get(key);
+      if (!i?.start || i.start <= day) return false;
+      toast(`${i.title} starts on ${shortDay(i.start, today)}, so it cannot go on ${shortDay(day, today)}.`, undefined, true);
+      return true;
     },
-    [planKeys, savePlan, byKey],
+    [byKey, toast, today],
+  );
+  const keysOf = useCallback((day: string) => (week[day]?.items ?? []).map((i) => i.key), [week]);
+  const addToPlan = useCallback(
+    (key: string, opts: { index?: number; day?: string; at?: number } = {}) => {
+      const day = opts.day ?? today;
+      if (startsAfter(key, day)) return;
+      const keys = keysOf(day).filter((k) => k !== key);
+      keys.splice(opts.index ?? keys.length, 0, key);
+      const name = planName(day);
+      writePlan(
+        day,
+        (old) => withKeys(old, keys).map((p) => (p.key === key && opts.at !== undefined ? { ...p, at: opts.at } : p)),
+        `Added to ${name}${opts.at !== undefined ? ` at ${fmtTime(opts.at)}` : ""}: ${byKey.get(key)?.title ?? ""}`,
+      );
+    },
+    [today, keysOf, planName, writePlan, withKeys, byKey, startsAfter],
   );
   const removeFromPlan = useCallback(
-    (key: string) => savePlan(planKeys.filter((k) => k !== key), `Taken out of the plan: ${byKey.get(key)?.title ?? ""}`),
-    [planKeys, savePlan, byKey],
+    (key: string, day: string = today) => savePlan(keysOf(day).filter((k) => k !== key), `Taken out of the plan: ${byKey.get(key)?.title ?? ""}`, day),
+    [today, keysOf, savePlan, byKey],
+  );
+  /** Fixes the start time of a plan item. null: AIfred places it in the next free time. */
+  const setPlanTime = useCallback(
+    (key: string, at: number | null, day: string) => {
+      const title = byKey.get(key)?.title ?? "";
+      writePlan(
+        day,
+        (old) =>
+          old.map((p) => {
+            if (p.key !== key) return p;
+            const { at: _old, ...rest } = p;
+            return at === null ? rest : { ...rest, at };
+          }),
+        at === null ? `No fixed time: ${title}` : `Moved to ${fmtTime(at)}: ${title}`,
+      );
+    },
+    [byKey, writePlan],
+  );
+  /**
+   * Moves a plan item from the plan of `from` to the plan of `to`, in one
+   * change. The message `text` has an undo that puts the item back at its
+   * old place and time, and that also runs `undoMore`. Resolves true when
+   * the move is saved.
+   */
+  const movePlan = useCallback(
+    (key: string, from: string, to: string, at: number | null, text: string, undoMore?: () => void) => {
+      const old = plansNow.current[from]?.items ?? [];
+      const n = old.findIndex((p) => p.key === key);
+      // The plan on the screen can be older than the saved plan. Then the
+      // undo puts the item at the end, with no fixed time.
+      const index = n < 0 ? null : n;
+      const oldAt = n < 0 ? null : (old[n].at ?? null);
+      return run(api.movePlanItem(from, to, key, at, null), ([a, b]) => {
+        putPlan(from, a);
+        putPlan(to, b);
+        toast(text, () => {
+          undoMore?.();
+          run(api.movePlanItem(to, from, key, oldAt, index), ([b2, a2]) => {
+            putPlan(to, b2);
+            putPlan(from, a2);
+          });
+        });
+      });
+    },
+    [run, putPlan, toast],
+  );
+
+  /** Moves a plan item to the plan of another day, in one change. */
+  const moveToDay = useCallback(
+    (key: string, from: string, to: string, at: number | null) => {
+      if (!plansReady(from)) return;
+      if (startsAfter(key, to)) return;
+      movePlan(key, from, to, at, `Moved to ${planName(to)}: ${byKey.get(key)?.title ?? ""}`);
+    },
+    [plansReady, byKey, movePlan, planName, startsAfter],
   );
 
   const tomorrow = useCallback(
     (i: Item) => {
       const t = i.task;
       if (!t) return;
+      // Without today's plan, a planned task can stay in it with a new due day.
+      if (!plansReady()) return;
       const next = addDays(today, 1);
       const before = { due: t.due ?? "", start: t.start ?? "" };
       const changes: api.TaskChanges = { due: next, ...(t.start && t.start > next ? { start: "" } : {}) };
-      const wasIn = planKeys.includes(i.key);
+      // A planned task moves to the plan of tomorrow too, in one change.
+      const planned = (plansNow.current[today]?.items ?? []).some((p) => p.key === i.key);
       run(api.editTask(t.id, changes), (nt) => {
         putTask(nt);
-        if (wasIn) savePlan(planKeys.filter((k) => k !== i.key));
-        toast(`Moved to tomorrow: ${t.title}`, () => {
-          run(api.editTask(t.id, before), putTask);
-          if (wasIn) savePlan(planKeys);
+        const undoTask = () => run(api.editTask(t.id, before), putTask);
+        if (!planned) {
+          toast(`Moved to tomorrow: ${t.title}`, undoTask);
+          return;
+        }
+        movePlan(i.key, today, next, null, `Moved to tomorrow: ${t.title}`, undoTask).then((moved) => {
+          // The task stays in today's plan: it must stay due on its old day too.
+          // The error message of the move stays on the screen.
+          if (!moved) api.editTask(t.id, before).then(putTask).catch(() => {});
         });
       });
     },
-    [today, planKeys, run, savePlan, toast],
+    [plansReady, today, run, toast, movePlan],
   );
 
   const setMinutes = useCallback((key: string, minutes: number) => {
@@ -959,10 +1170,10 @@ export default function App() {
     const goals = goalQueue.current.catch(() => undefined).then(() => api.goals());
     goalQueue.current = goals;
     goals.then(setGoals).catch(() => {});
-    api.dayPlan(today).then((p) => putPlan(today, p)).catch(() => {});
+    loadPlans();
     // AIfred can add items to a mission or take them out (missions.rs).
     loadTodayBrief();
-  }, [loadTasks, loadMeta, today, putPlan, loadTodayBrief]);
+  }, [loadTasks, loadMeta, loadPlans, loadTodayBrief]);
 
   /** Runs one question in a chat and puts the messages in `set`. */
   async function chat(
@@ -1000,14 +1211,28 @@ export default function App() {
     return chat(setMain, main.busy, text, files, (p) => api.ask(text.trim(), p, { model, files: files.map((f) => f.id) }));
   };
 
-  const sendPlan = (text: string, files: api.FileRef[] = []) => {
-    setSide("chat");
+  const sendPlan = (text: string, files: api.FileRef[] = [], day: string = calDay) => {
+    // Check first: a send that cannot run must not change the chat on the screen.
+    const busyDay = planRunning.current ?? planBusyDay;
+    if (busyDay !== undefined) {
+      toast(`AIfred is still working on ${planName(busyDay)}. Try again when it is done.`, undefined, true);
+      return Promise.resolve(false);
+    }
+    // Files with no text send "Look at these files.".
     text = withFiles(text, files);
-    // An answer that comes back after midnight belongs to the old day's
-    // chat (the backend saved it there), so it does not go into the new one.
-    const day = today;
-    const set = (f: (c: ChatState) => ChatState) => setPlanChat((c) => (planDay.current === day ? f(c) : c));
-    return chat(set, planChat.busy, text, files, (p) => api.askSide(`plan:${today}`, text.trim(), p, { model: pickArg(models.plan), files: files.map((f) => f.id) }));
+    if (!text.trim()) return Promise.resolve(false);
+    setSide("chat");
+    const history = openPlanChat(day);
+    planRunning.current = day;
+    // The answer goes into the chat of its own day, also when another day is on the screen.
+    const set = (f: (c: ChatState) => ChatState) => setPlanChats((all) => ({ ...all, [day]: f(all[day] ?? EMPTY_CHAT) }));
+    // Wait for the old messages first. Else the new turn can be in the
+    // history and on the screen too, and it shows 2 times.
+    return history
+      .then(() => chat(set, false, text, files, (p) => api.askSide(`plan:${day}`, text.trim(), p, { model: pickArg(models.plan), files: files.map((f) => f.id) })))
+      .finally(() => {
+        planRunning.current = null;
+      });
   };
 
   const askItem = (key: string, text: string, files: api.FileRef[]) => {
@@ -1065,37 +1290,43 @@ export default function App() {
     setSel(null);
   };
 
-  const goPlan = () => {
+  /** Opens the Calendar page on `day` (today when not given). */
+  const goPlan = (day: string = today) => {
     setPage("plan");
     setSel(null);
     setSide("chat");
+    pickDay(day);
   };
 
-  const startPlan = (mode: "ai" | "self") => {
-    goPlan();
+  const setCalView = (v: "day" | "week") => {
+    setCalViewState(v);
+    store("aifred-cal-view", v);
+  };
+
+  const startPlan = (mode: "ai" | "self", day: string = today) => {
+    goPlan(day);
+    const p = plans[day] ?? null;
     if (mode === "self") {
-      if (planLoaded !== today) {
-        toast("The plan for today is still loading. Try again in a moment.", undefined, true);
-        return;
-      }
-      const day = today;
-      run(api.setDayPlan(day, "self", plan?.items ?? []), (p) => putPlan(day, p));
+      if (!plansReady(day)) return;
+      run(api.setDayPlan(day, "self", p?.items ?? []), (np) => putPlan(day, np));
       return;
     }
     setPlanChatOpen(true);
     sendPlan(
-      plan?.mode === "review" && plan.items.length
+      p?.mode === "review" && p.items.length
         ? "Plan my day. Keep the items that are in the plan now: I moved them here in a review."
-        : plan?.items.length
+        : p?.items.length
           ? "Plan my day again from the start."
           : "Plan my day.",
+      [],
+      day,
     );
   };
 
-  const startOver = () => {
-    run(Promise.all([api.clearDayPlan(today), api.clearSide(`plan:${today}`)]), () => {
-      setPlan(null);
-      setPlanChat(EMPTY_CHAT);
+  const startOver = (day: string = calDay) => {
+    run(Promise.all([api.clearDayPlan(day), api.clearSide(`plan:${day}`)]), () => {
+      putPlan(day, null);
+      setPlanChats((all) => ({ ...all, [day]: { ...EMPTY_CHAT, busy: all[day]?.busy ?? false } }));
     });
   };
 
@@ -1489,6 +1720,13 @@ export default function App() {
     plan,
     planItems,
     sched,
+    plans,
+    week,
+    events: calendar.events,
+    calDay,
+    pickDay,
+    calView,
+    setCalView,
     brief,
     reloadBrief,
     goals,
@@ -1554,6 +1792,8 @@ export default function App() {
     savePlan,
     addToPlan,
     removeFromPlan,
+    setPlanTime,
+    moveToDay,
     startPlan,
     startOver,
     writeBrief,
@@ -1564,7 +1804,7 @@ export default function App() {
       reloadAfterAnswer();
       loadWaiting();
     },
-    goPlan,
+    goPlan: () => goPlan(),
     goTasks,
   };
 
@@ -1642,7 +1882,7 @@ export default function App() {
         <div className="body">
           <nav className="rail" aria-label="App">
             {rail("home", ICON.home, "Home", () => (setPage("home"), setSel(null)), page === "home")}
-            {rail("plan", ICON.cal, "Day plan", goPlan, onPlan)}
+            {rail("plan", ICON.cal, "Calendar", () => goPlan(), onPlan)}
             {rail("tasks", ICON.task, "Tasks", goTasks, page === "tasks")}
             {rail("chat", ICON.chat, "Conversation", ctx.openMain, page === "home" && mainOpen)}
             {rail("memory", ICON.mem, "What AIfred knows about you", () => (setPage("memory"), setSel(null)), page === "memory")}
@@ -1666,7 +1906,7 @@ export default function App() {
               <Home />
             </div>
           )}
-          {onPlan && <PlanView onChat={() => (setPlanChatOpen(true), showSide("chat"))} />}
+          {onPlan && <CalendarView onChat={() => (setPlanChatOpen(true), showSide("chat"))} />}
           {page === "settings" && settings && (
             <div className="scroll page-main page">
               <div className="page-inner">
