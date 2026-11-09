@@ -617,7 +617,7 @@ CREATE TABLE action (
 CREATE INDEX action_by_item ON action(item);
 ";
 
-/// One task type (plan-tasks-missions-calendar.md, decision A): AIfred's
+/// One task type for the user and for AIfred: AIfred's
 /// jobs move into the task table with doer 'aifred'. The user's tasks get
 /// doer 'you'. The job fields stay NULL on them. The reads of the user's
 /// tasks must filter on doer = 'you'.
@@ -739,20 +739,20 @@ CREATE TABLE mission_item (
 CREATE INDEX mission_item_by_mission ON mission_item(mission, pos);
 ";
 
-/// The "Same work?" card is gone (plan part 3b). So are the pairs that the
+/// The "Same work?" card is gone. So are the pairs that the
 /// user rejected in it: nothing blocks the brief for good.
 const SCHEMA_21: &str = "
 DROP TABLE link_no;
 ";
 
-/// Subtasks (links.rs, plan part 3b): a row of `item_link` puts an item
+/// Subtasks (links.rs): a row of `item_link` puts an item
 /// under its parent, with many levels. The old links were made by the user.
 const SCHEMA_22: &str = "
 ALTER TABLE item_link ADD COLUMN placed_by TEXT NOT NULL DEFAULT 'you';  -- 'you' or 'aifred'
 ALTER TABLE item_link ADD COLUMN why TEXT NOT NULL DEFAULT '';    -- AIfred's reason
 ";
 
-/// The AI sort (sort.rs, plan part 3b step 2). `item_sort` has the items
+/// The AI sort (sort.rs). `item_sort` has the items
 /// that the sort has seen. `fixed` = 1: the user placed the item (a move,
 /// "Move out", or an undo of an AI move), so the AI never moves it. `link_move` logs each
 /// move of the AI, for the brief and its Undo. The links from before were
@@ -777,7 +777,7 @@ CREATE TABLE link_move (
 CREATE INDEX link_move_by_ts ON link_move(ts);
 ";
 
-/// Smaller missions (missions.rs, plan part 3b step 3). `placed_by` of
+/// Smaller missions (missions.rs). `placed_by` of
 /// `mission_item` says who put the item in the mission: an item that the
 /// user added stays, and the brief cannot take it away. `mission_out` has
 /// the items that the user took out of a mission: the brief never puts them
@@ -808,7 +808,7 @@ const SCHEMA_26: &str = "
 CREATE INDEX link_move_by_key ON link_move(key, id);
 ";
 
-/// Task context (context.rs, plan part 4): AIfred's short notes about one
+/// Task context (context.rs): AIfred's short notes about one
 /// item, from the user's answers. `context_skip` has the items that the
 /// user did not want to explain: AIfred does not ask about them again.
 /// `brief.ask` has the items that the brief of the day asks about.

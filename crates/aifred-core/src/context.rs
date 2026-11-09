@@ -1,4 +1,4 @@
-//! Task context (plan part 4): AIfred's short notes about one item, from the
+//! Task context: AIfred's short notes about one item, from the
 //! user's answers. For example: "Fix sync is the ClickUp sync bug that Ana
 //! reported. It blocks the release on Friday."
 //!

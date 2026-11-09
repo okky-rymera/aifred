@@ -1,7 +1,7 @@
-//! Missions (plan-tasks-missions-calendar.md, part 3). A mission is the next
+//! Missions. A mission is the next
 //! small piece of work: usually one item, sometimes two small items that the
 //! user does together. For a tree of subtasks, it is the next open subtask,
-//! not the full tree (plan part 3b, step 3). The home page shows only the
+//! not the full tree. The home page shows only the
 //! missions of today, not each item.
 //!
 //! - The brief call (brief.rs) gives the missions of today, most important
@@ -11,7 +11,7 @@
 //! - A mission has only the items that the brief named. The other items
 //!   of their tree (links.rs) do not come with them: a mission is the next
 //!   small piece of work.
-//! - AIfred groups items at once. It does not ask the user (plan part 3b).
+//! - AIfred groups items at once. It does not ask the user.
 //! - A mission keeps its id, so its checklist stays, when the brief gives
 //!   that id and some items stay, or when half of its open items or more stay.
 //! - The checklist is the mission's own. A tick does not change the items.
@@ -225,7 +225,7 @@ pub fn save_in(
         let mut keys: Vec<String> = Vec::new();
         for k in &p.keys {
             // Only the items that the brief named: a mission is the next
-            // small piece of work, not a full tree of subtasks (plan part 3b).
+            // small piece of work, not a full tree of subtasks.
             if claimed.contains(k) || keys.contains(k) || !crate::items::is_open(tx, k)? {
                 continue;
             }

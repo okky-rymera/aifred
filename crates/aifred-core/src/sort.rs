@@ -1,4 +1,4 @@
-//! The AI sort (plan part 3b, step 2). When new items come in (a GitHub,
+//! The AI sort. When new items come in (a GitHub,
 //! ClickUp, or Gmail download, or a new task), one small AI call puts them
 //! into the subtask trees (links.rs). It does not ask the user:
 //!

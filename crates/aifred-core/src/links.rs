@@ -1,4 +1,4 @@
-//! Subtasks: items under other items, in AIfred only (plan part 3b). A
+//! Subtasks: items under other items, in AIfred only. A
 //! ClickUp task, its GitHub issue, and the pull request of the issue are one
 //! tree: the issue under the ClickUp task, the pull request under the issue.
 //! ClickUp and GitHub do not change.

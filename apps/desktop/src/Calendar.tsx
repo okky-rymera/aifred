@@ -9,7 +9,7 @@
 // it out. Without a mouse: Alt+Up and Alt+Down move a block by 15 minutes,
 // and Alt+Left and Alt+Right move it to the day before or after.
 //
-// Google Calendar does not change (plan decision B): the blocks are only in AIfred.
+// Google Calendar does not change: the blocks are only in AIfred.
 import { useEffect, useRef, useState } from "react";
 import { Composer, ICON, Messages } from "./Chat";
 import { useApp } from "./ctx";

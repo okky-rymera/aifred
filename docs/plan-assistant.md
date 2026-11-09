@@ -167,6 +167,15 @@ Done: Google Sheets comments (`crates/aifred-core/src/sheets.rs`, `apps/desktop/
 - The values of `commentUpdateState` other than `ALL_SAVED` and `ALL_FAILED_UNKNOWN_REASON` are not checked with a real Sheet. Also not checked: if a batch with only `deleteComment` gives a state.
 - It is not checked if a comment that AIfred adds keeps the value of the cell (`plainTextQuote`), like a comment that a person adds in Google Sheets.
 
+## Later (from finished plans)
+
+These ideas come from the memory search plan and the tasks, missions, and calendar plan. Both plans are done, and their docs are deleted.
+
+- **Items that AIfred never downloaded.** The search finds only items that were in your list at some time. To find other items, for example closed issues from before AIfred, the tool must ask GitHub or ClickUp directly.
+- **Descriptions for all items.** Today only the items that the AI reads get a description. To save all descriptions, AIfred must ask GitHub or ClickUp once for each item. Measure the time and the API limits first.
+- **Other AI gaps.** Delete a task, undo "done", and mark a ClickUp task done from the AI.
+- **Write the plan into Google Calendar.** The Calendar page is view-only now: Google Calendar does not change. To write blocks into Google, AIfred needs a new Google access and an Undo log.
+
 ## Not checked
 
 The research could not check these items. This plan does not use them:

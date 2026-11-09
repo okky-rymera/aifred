@@ -1,4 +1,4 @@
-// Task context (plan part 4): AIfred's short notes about one item, from
+// Task context: AIfred's short notes about one item, from
 // your answers (context.rs).
 // - "Help AIfred understand" on the home page asks about at most 3 items
 //   that AIfred cannot rank. You answer in the chat of the item, and
