@@ -5,7 +5,7 @@
 //   user can add a subtask, or move an item out from under its parent.
 import { useState } from "react";
 import { useApp } from "./ctx";
-import { SRC_NAME, depthOf, groupOf, parentOf, rowKey, type Item } from "./items";
+import { SRC_NAME, groupOf, parentOf, rowKey, treeDepths, type Item } from "./items";
 
 /** How many matches the search in the item panel shows. */
 const SEARCH_RESULTS = 5;
@@ -63,6 +63,7 @@ export function SameWork({ item }: { item: Item }) {
   const others = group.filter((k) => k !== item.key);
   // The same item as the row in the home list (joinLinked).
   const row = rowKey(group, byKey);
+  const depth = treeDepths(links.links, group);
   if (item.done && !others.length) return null;
   const nameOf = (k: string) => byKey.get(k)?.title ?? k;
   return (
@@ -79,7 +80,7 @@ export function SameWork({ item }: { item: Item }) {
               const parent = parentOf(links.links, k);
               const link = links.links.find((l) => l.key === k);
               return (
-                <li key={k} className="w-row" style={{ paddingLeft: depthOf(links.links, k) * 16 }}>
+                <li key={k} className="w-row" style={{ paddingLeft: (depth.get(k) ?? 0) * 16 }}>
                   <span className="w-main">
                     {k === item.key ? (
                       <span className="w-line">This item</span>

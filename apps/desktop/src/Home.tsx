@@ -2,7 +2,7 @@
 // missions. The other open items are behind one line. Before the brief
 // has missions, the home page shows the list in groups. The box at the
 // bottom adds a task or asks AIfred.
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import * as api from "./api";
 import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
@@ -12,7 +12,7 @@ import { srcText } from "./Links";
 import { WaitingCard } from "./Waiting";
 import { HelpCard } from "./Context";
 import { NextStep, stepTaskKey } from "./Steps";
-import { SRC_NAME, addDays, parentOf, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, type Item } from "./items";
+import { SRC_NAME, addDays, parentOf, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, treeDepths, type Item } from "./items";
 
 export function Check(props: { item: Item }) {
   const { toggleDone } = useApp();
@@ -137,7 +137,37 @@ function useTick(on: boolean) {
   }, [on]);
 }
 
+/** True when the rows show their open subtasks as a tree (the Tasks page),
+ * false for the one "Subtasks" line (home). TaskGroups sets it for all its lists. */
+const TreeRows = createContext(false);
+
+/** The open subtasks of a tree row, each under its parent, with a tick,
+ * the source, and the due day. The Tasks page shows this in place of the
+ * one "Subtasks" line of the home page. */
+function SubTree({ item: i }: { item: Item }) {
+  const { links, open, sel } = useApp();
+  const linked = i.linked ?? [];
+  // Levels count only the lines that show. A finished item does not show,
+  // so its open subtasks move up one level, under the nearest open parent.
+  const depth = treeDepths(links.links, [i.key, ...linked.map((l) => l.key)]);
+  return (
+    <ul className="sub-tree" aria-label={`Subtasks of ${i.title}`}>
+      {linked.map((l) => (
+        <li key={l.key} id={`row-${l.key}`} className={`sub-row${sel === l.key ? " sel" : ""}`} style={{ paddingLeft: (depth.get(l.key) ?? 0) * 16 }}>
+          <Check item={l} />
+          <button className="linkbtn ttl" title={l.title} aria-label={`Open details: ${l.title}`} onClick={() => open(l.key)}>
+            {l.title}
+          </button>
+          <span className="sub-src">{srcText(l)}</span>
+          <DueChip day={l.due} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: boolean }) {
+  const tree = useContext(TreeRows);
   const { sel, open, sched, addToPlan, tomorrow, today, work, startWork, links, byKey } = useApp();
   const i = props.item;
   // A row of linked items is in the plan when one of its items is.
@@ -175,16 +205,20 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
           <span className="t-title">{i.title}</span>
           <SrcLine item={i} extra={sub && <span>{sub}</span>} />
         </div>
-        {i.linked && i.linked.length > 0 && (
-          <div className="linked-src">
-            <span>Subtasks</span>
-            {i.linked.map((l) => (
-              <button key={l.key} className="linkbtn" title={l.title} aria-label={`Open details: ${l.title}`} onClick={() => open(l.key)}>
-                {srcText(l)}
-              </button>
-            ))}
-          </div>
-        )}
+        {i.linked?.length ? (
+          tree ? (
+            <SubTree item={i} />
+          ) : (
+            <div className="linked-src">
+              <span>Subtasks</span>
+              {i.linked.map((l) => (
+                <button key={l.key} className="linkbtn" title={l.title} aria-label={`Open details: ${l.title}`} onClick={() => open(l.key)}>
+                  {srcText(l)}
+                </button>
+              ))}
+            </div>
+          )
+        ) : null}
         {props.why && i.why && !i.done && (
           <>
             <Why item={i} />
@@ -588,15 +622,16 @@ function ListNotes() {
  * with "Later" and "Finished" behind buttons. Home and the Tasks page show it.
  * `before` goes before the buttons under the groups. `empty` is the text for
  * an empty list. `groups`: the groups when the caller has them already.
- * `noNotes`: the caller shows the state of the lists itself. */
-export function TaskGroups(props: { before?: React.ReactNode; empty?: string; groups?: Groups; noNotes?: boolean }) {
+ * `noNotes`: the caller shows the state of the lists itself. `tree`: show
+ * the open subtasks of each row under it, each level indented. */
+export function TaskGroups(props: { before?: React.ReactNode; empty?: string; groups?: Groups; noNotes?: boolean; tree?: boolean }) {
   const { githubState, tasksError } = useApp();
   const [showLater, setShowLater] = useState(false);
   const [showDone, setShowDone] = useState(false);
   const g = useGroups(props.groups);
   const nothing = !g.now.length && !g.today.length && !g.isNew.length && !g.soon.length;
   return (
-    <>
+    <TreeRows.Provider value={!!props.tree}>
       {!props.noNotes && <ListNotes />}
       <Group title="Needs you now" list={g.now} alert why />
       <Group title="Today" list={g.today} hideToday why />
@@ -632,7 +667,7 @@ export function TaskGroups(props: { before?: React.ReactNode; empty?: string; gr
           ))}
         </ul>
       )}
-    </>
+    </TreeRows.Provider>
   );
 }
 

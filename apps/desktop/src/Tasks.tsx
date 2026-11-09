@@ -59,7 +59,7 @@ export function TasksPage() {
       {filter !== "aifred" && (
         <section aria-label="Your tasks">
           {filter === "both" && <h3 className="group-h">Your tasks</h3>}
-          <TaskGroups empty="Nothing to do. Add a task in the box on the home page." />
+          <TaskGroups tree empty="Nothing to do. Add a task in the box on the home page." />
         </section>
       )}
       {filter !== "mine" && (

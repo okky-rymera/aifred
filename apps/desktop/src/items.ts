@@ -252,12 +252,22 @@ export function rootOf(links: api.ItemLink[], key: string): string {
   return at;
 }
 
-/** How many levels `key` is under its top item: 0 for a top item. */
-export const depthOf = (links: api.ItemLink[], key: string) => {
-  let n = 0;
-  for (let at = parentOf(links, key); at && n < MAX_GROUP; at = parentOf(links, at)) n++;
-  return n;
-};
+/** The level of each of `keys` in a tree that shows only `keys`: how many of
+ * its parents are also in `keys`. An item whose parents do not show is at
+ * level 0. With the whole tree as `keys`, this is the level under the top
+ * item. The item panel and the Tasks page both indent by it. */
+export function treeDepths(links: api.ItemLink[], keys: string[]): Map<string, number> {
+  const parent = new Map(links.map((l) => [l.key, l.main]));
+  const shown = new Set(keys);
+  const out = new Map<string, number>();
+  for (const k of keys) {
+    let n = 0;
+    let at = parent.get(k);
+    for (let steps = 0; at && steps < MAX_GROUP; steps++, at = parent.get(at)) if (shown.has(at)) n++;
+    out.set(k, n);
+  }
+  return out;
+}
 
 /** The trees, by top item. Each tree has the top item first, then each item
  * before its subtasks, the subtasks of one item in key order, like

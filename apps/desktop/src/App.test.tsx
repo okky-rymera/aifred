@@ -276,7 +276,7 @@ describe("subtasks", () => {
     // The source under the row opens that item.
     await userEvent.click(within(open).getByRole("button", { name: "Open details: DEV-42: round the tax" }));
     expect(within(details()).getByText("main row", { exact: false })).toBeInTheDocument();
-    // The "Same work?" card is gone (plan part 3b).
+    // The "Same work?" card is gone.
     expect(screen.queryByRole("region", { name: "Same work?" })).not.toBeInTheDocument();
   });
 
@@ -2199,6 +2199,72 @@ describe("Tasks page", () => {
     await openTasks("Both");
     expect(within(screen.getByRole("region", { name: "Your tasks" })).getByText("Pay rent")).toBeInTheDocument();
     expect(await within(screen.getByRole("region", { name: "AIfred's tasks" })).findByText("Timesheet reminder")).toBeInTheDocument();
+  });
+
+  it("shows the open subtasks of a row as a tree, each level indented", async () => {
+    const fake = await startApp({
+      clickupToken: "pk_test",
+      github: [githubItem(12, "your_pr", "DEV-42: round the tax")],
+      clickup: [clickupItem("86a", "Checkout totals", { custom_id: "DEV-42" })],
+      tasks: [task("Tax work", { id: "t1" }), task("Write the test", { id: "t2" })],
+      links: [
+        { key: "task:t1", main: "clickup:86a" },
+        { key: "github:acme/shop#12", main: "task:t1" },
+        { key: "task:t2", main: "task:t1" },
+      ],
+    });
+    await openTasks();
+    const tree = await screen.findByRole("list", { name: "Subtasks of Checkout totals" });
+    const rows = within(tree).getAllByRole("listitem");
+    expect(rows.map((r) => r.style.paddingLeft)).toEqual(["16px", "32px", "32px"]);
+    expect(within(rows[0]).getByRole("button", { name: "Open details: Tax work" })).toBeInTheDocument();
+    // The row shows the tree, not the short "Subtasks" line of the home page.
+    expect(within(tree.closest("li.row") as HTMLElement).queryByText("Subtasks")).not.toBeInTheDocument();
+    // A tick on a subtask finishes only that subtask.
+    await userEvent.click(within(tree).getByRole("button", { name: "Finish: Write the test" }));
+    await waitFor(() => expect(fake.tasks.find((t) => t.id === "t2")?.done).toBe(true));
+    expect(fake.tasks.find((t) => t.id === "t1")?.done).toBe(false);
+    await waitFor(() => expect(within(tree).queryByText("Write the test")).not.toBeInTheDocument());
+  });
+
+  it("indents a subtask under its nearest open parent when a parent in the middle is finished", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await startApp({
+      tasks: [
+        task("Top", { id: "t1" }),
+        task("Middle", { id: "t2", done: true, done_at: now }),
+        task("Under middle", { id: "t3" }),
+        task("Second", { id: "t4" }),
+      ],
+      links: [
+        { key: "task:t2", main: "task:t1" },
+        { key: "task:t3", main: "task:t2" },
+        { key: "task:t4", main: "task:t1" },
+      ],
+    });
+    await openTasks();
+    // "Middle" is finished and does not show, so "Under middle" shows one
+    // level under "Top", the same as "Second". It must not be two levels in.
+    const tree = await screen.findByRole("list", { name: "Subtasks of Top" });
+    const rows = within(tree).getAllByRole("listitem");
+    expect(rows.map((r) => [within(r).getByRole("button", { name: /^Open details/ }).textContent, r.style.paddingLeft])).toEqual([
+      ["Under middle", "16px"],
+      ["Second", "16px"],
+    ]);
+  });
+
+  it("marks an opened subtask line, so the page can scroll to it", async () => {
+    await startApp({
+      tasks: [task("Tax work", { id: "t1" }), task("Write the test", { id: "t2" })],
+      links: [{ key: "task:t2", main: "task:t1" }],
+    });
+    await openTasks();
+    const tree = await screen.findByRole("list", { name: "Subtasks of Tax work" });
+    const line = within(tree).getByRole("listitem");
+    expect(line.id).toBe("row-task:t2");
+    expect(line).not.toHaveClass("sel");
+    await userEvent.click(within(line).getByRole("button", { name: "Open details: Write the test" }));
+    await waitFor(() => expect(line).toHaveClass("sel"));
   });
 
   it("shows a task that AIfred adds by itself, with no reload", async () => {

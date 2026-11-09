@@ -492,6 +492,13 @@ input.d-title:focus { border-color: var(--amber); outline: 0; background: var(--
 /* Subtasks (Links.tsx). */
 .linked-src { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; color: var(--muted); margin-top: 2px; padding-left: 2px; }
 .linked-src .linkbtn { font-size: 12px; padding: 0; }
+.sub-tree { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.sub-row { display: flex; align-items: center; gap: 8px; font-size: 13px; min-width: 0; }
+.sub-row.sel { background: var(--amber-soft); border-radius: 4px; }
+.sub-row .chk, .sub-row .chk-none { width: 15px; height: 15px; margin-top: 0; }
+.sub-row .linkbtn { font-size: 13px; padding: 0; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.sub-src { font-size: 12px; color: var(--muted); white-space: nowrap; }
+@media (max-width: 560px) { .sub-src { display: none; } }
 .same { display: flex; flex-direction: column; gap: 8px; margin-top: -8px; }
 .same .ttl, .waiting .ttl { padding: 0; text-align: left; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .waiting .ttl .src { margin-left: 4px; }

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "./api";
 import type * as api from "./api";
-import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, eventsOn, joinLinked, parseTask, schedule, shortDay, sideBySide, workDay, type Item } from "./items";
+import { addDays, buildItems, dueInfo, dur, fmtTime, groupItems, isPlanRequest, eventsOn, joinLinked, parseTask, schedule, shortDay, sideBySide, treeDepths, workDay, type Item } from "./items";
 import { clickupItem, githubItem, task } from "./test/fakeBackend";
 
 // Wednesday 4 November 2026.
@@ -275,5 +275,20 @@ describe("joinLinked", () => {
   it("keeps a group with one open item as a plain row", () => {
     const rows = joinLinked(items, [{ key: "github:none#1", main: "task:t1" }]);
     expect(rows).toEqual(items);
+  });
+});
+
+describe("treeDepths", () => {
+  const links = [
+    { key: "b", main: "a" },
+    { key: "c", main: "a" },
+    { key: "d", main: "b" },
+  ] as api.ItemLink[];
+  it("gives the level under the top item for the whole tree", () => {
+    expect([...treeDepths(links, ["a", "b", "d", "c"])]).toEqual([["a", 0], ["b", 1], ["d", 2], ["c", 1]]);
+  });
+  it("counts only the parents that show", () => {
+    // "a" is finished and does not show.
+    expect([...treeDepths(links, ["b", "d", "c"])]).toEqual([["b", 0], ["d", 1], ["c", 0]]);
   });
 });

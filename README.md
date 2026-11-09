@@ -235,6 +235,7 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 An item can be a subtask of another item, with many levels. For example, the GitHub issue goes under the ClickUp task DEV-123, and the pull request goes under the issue. The subtasks exist only in AIfred. ClickUp and GitHub do not change (`crates/aifred-core/src/links.rs`).
 
 - The home list shows one row for each tree. The row is the top item. Its open subtasks show under it after "Subtasks". Click one to open it.
+- The Tasks page shows the same rows, but the open subtasks of each row show as a tree under it, each level indented. Each subtask has its own tick, its source, and its due day.
 - When the top item is finished or closed, the next open item of the tree becomes the row.
 - The row shows the earliest due day and the highest priority of its open items. So a GitHub row with a late ClickUp task in it shows under "Needs you now".
 - The tick, "Start", and "+ Plan" of the row act on the top item.
