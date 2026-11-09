@@ -1166,7 +1166,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         return withInfo({ ...a, model });
       }
       case "ask_side": {
-        if (!/^(plan:\d{4}-\d{2}-\d{2}|item:(task|github|clickup):.+)$/.test(args.thread)) throw `"${args.thread}" is not a chat name`;
+        if (!/^(plan:\d{4}-\d{2}-\d{2}|item:(task|github|clickup):.+|mission:[1-9]\d*)$/.test(args.thread)) throw `"${args.thread}" is not a chat name`;
         const a = await fake.onAskSide(args.prompt, progressOf(args), args);
         const files = (args.files ?? []).map((id: string) => findUpload(id));
         const list = (fake.side[args.thread] ??= []);
@@ -1260,7 +1260,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         // Like brief::get: no question about an item with notes, a skipped item, or a corrected item.
         if (b?.ask) b.ask = b.ask.filter((k) => !fake.contexts[k] && !fake.contextSkip.includes(k) && !corrected.has(k));
         // Like brief::get: the question comes from the Rust app (context::QUESTION).
-        if (b) b.question = "What is this? Is it part of other work? Is it urgent, and by when must it be done?";
+        if (b) b.question = "What is this item?";
+        if (b?.questions) b.questions = Object.fromEntries(Object.entries(b.questions).filter(([k]) => b.ask?.includes(k)));
         return b;
       }
       case "correct_brief":

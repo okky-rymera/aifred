@@ -328,11 +328,12 @@ button.chip:hover { filter: brightness(.95); }
 .waiting .eyebrow .linkbtn { text-transform: none; letter-spacing: 0; font-family: var(--f-body); }
 .waiting .eyebrow .sp { flex: 1; }
 .w-empty { margin: -4px 0 8px; }
-.help .h-row { display: flex; flex-direction: column; gap: 4px; }
+.help .h-talk { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.help .h-talk .d-asks { margin-top: 0; }
 .help .h-q { display: flex; align-items: baseline; gap: 4px; font-size: 13.5px; min-width: 0; }
 .help .h-q .ttl { padding: 0; text-align: left; }
-.help .h-ans { display: flex; align-items: center; gap: 8px; }
-.help .h-ans input { flex: 1; min-width: 0; }
+.help .ctl { display: flex; gap: 12px; justify-content: flex-end; margin-top: 6px; }
+.help .h-done { margin-top: 8px; font-size: 13px; color: var(--muted, inherit); }
 .d-ctx summary { cursor: pointer; }
 .d-ctx .d-ctx-body { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .w-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -655,3 +656,8 @@ input.d-title:focus { border-color: var(--amber); outline: 0; background: var(--
   .cal-hint { display: none; }
   .cal-wrap, .cal-note, .cal-warn { margin-left: 0; margin-right: 0; padding-left: 16px; padding-right: 16px; }
 }
+
+/* The card while AIfred prepares the day (Home.tsx). */
+.prep .prep-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 13.5px; color: var(--muted); }
+.prep .prep-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--amber, currentColor); flex: none; animation: pulse 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .prep .prep-dot { animation: none; } }

@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
 import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
-import { Ctx, useApp, type AppCtx, type CardMode, type ChatState, type ListState } from "./ctx";
+import { Ctx, openQuestions, useApp, type AppCtx, type CardMode, type ChatState, type ListState, type Talk } from "./ctx";
 import { Detail } from "./Detail";
+import { MissionDetail, missionChatKey, sideThread } from "./Mission";
 import { Home } from "./Home";
 import { WEEK, addDays, buildItems, dayName, dayOf, dur, eventsOn, fmtTime, schedule, shortDay, type DayEvents, type Item, type Schedule } from "./items";
 import { TasksPage } from "./Tasks";
@@ -101,6 +102,16 @@ export default function App() {
   const [githubState, setGithubState] = useState<ListState>("loading");
   const [clickup, setClickup] = useState<api.ClickupList>({ items: [], fetched_at: 0 });
   const [clickupState, setClickupState] = useState<ListState>("loading");
+  // True after the first load of each list came back (also with an error).
+  // A later reload must not make the home page wait again (homeLoading).
+  const [githubBack, setGithubBack] = useState(false);
+  const [clickupBack, setClickupBack] = useState(false);
+  useEffect(() => {
+    if (githubState !== "loading") setGithubBack(true);
+  }, [githubState]);
+  useEffect(() => {
+    if (clickupState !== "loading") setClickupBack(true);
+  }, [clickupState]);
   const [calendar, setCalendar] = useState<api.CalendarList>({ events: [], fetched_at: 0 });
   const [calendarState, setCalendarState] = useState<ListState>("loading");
   const [mail, setMail] = useState<api.MailList>({ reply: [], sent: [], fetched_at: 0 });
@@ -115,6 +126,10 @@ export default function App() {
   const [est, setEst] = useState<Record<string, api.Estimate>>({});
   const [links, setLinks] = useState<api.Links>({ links: [] });
   const [brief, setBrief] = useState<api.Brief | null>(null);
+  const [talk, setTalk] = useState<Talk | null>(null);
+  const [skipped, setSkipped] = useState<string[]>([]);
+  // A new day: the talk of yesterday goes.
+  useEffect(() => setTalk(null), [today]);
   const [goals, setGoals] = useState<api.Goals | null>(null);
   const [briefLoaded, setBriefLoaded] = useState("");
   const [briefState, setBriefState] = useState("idle");
@@ -177,6 +192,14 @@ export default function App() {
   // A restart to update must wait for every running answer and the brief.
   const anyBusy = main.busy || planBusyDay !== undefined || Object.values(itemChats).some((c) => c.busy) || briefState === "writing";
   const [sel, setSel] = useState<string | null>(null);
+  /** The id of the mission that is open on the right side. Only one of
+   * `sel` and `selMission` is set: the side shows one item or one mission. */
+  const [selMission, setSelMission] = useState<number | null>(null);
+  /** Closes the item or the mission on the right side. */
+  const clearSel = () => {
+    setSel(null);
+    setSelMission(null);
+  };
   const [side, setSide] = useState<"chat" | "task">("chat");
   const [unread, setUnread] = useState(false);
   const [toastState, setToast] = useState<Toast | null>(null);
@@ -195,8 +218,8 @@ export default function App() {
   const githubLoad = useRef(0);
   const clickupLoad = useRef(0);
   const briefTried = useRef(new Set<string>());
-  const now = useRef({ sel, side });
-  now.current = { sel, side };
+  const now = useRef({ sel, side, mission: selMission });
+  now.current = { sel, side, mission: selMission };
 
   // ---------- Loading ----------
 
@@ -509,12 +532,15 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  const writeBrief = useCallback(() => {
+  /** Writes today's brief. `release` true: the brief stops holding its
+   * missions for the questions (brief.rs), also when the server still sees
+   * a question that this window does not show. */
+  const writeBriefWith = useCallback((release: boolean) => {
     const day = today;
     briefTried.current.add(day);
     setBriefState("writing");
     api
-      .writeBrief(day)
+      .writeBrief(day, release)
       .then((b) => {
         if (b.day === dayOf(new Date())) setBrief(b);
         setBriefState("idle");
@@ -522,6 +548,7 @@ export default function App() {
       })
       .catch((e) => setBriefState(String(e)));
   }, [today]);
+  const writeBrief = useCallback(() => writeBriefWith(false), [writeBriefWith]);
 
   // The load state of each source of items, by the start of the item key ("github:...").
   const sourceStates = useMemo<Record<string, ListState>>(
@@ -529,6 +556,27 @@ export default function App() {
     [githubState, clickupState, mailState],
   );
   const sourcesLoading = Object.values(sourceStates).includes("loading");
+
+  // No question is left, and you answered one of them on the home page
+  // after the brief read the items: write the brief again, so that its text
+  // and missions use the new notes. The time of the answer counts, not the
+  // brief on the screen: a newer brief can load between two answers.
+  // A brief that held its missions for the questions also writes again
+  // after skips only, but one time for each day: the server can still see
+  // a question that the card does not show (for example when a list did
+  // not load). So that write also asks the server to stop the hold
+  // (brief::release), and the missions come. One time for each
+  // brief, so a failed write does not repeat. It waits while the last talk
+  // stays on the screen: you can still be reading it.
+  const heldTried = useRef(new Set<number>());
+  // The days whose held brief was written again with no new answer.
+  const heldDays = useRef(new Set<string>());
+  // When you last sent an answer on the question card, in Unix seconds (as
+  // brief.written). 0: no answer since the last rewrite.
+  const lastAnswer = useRef(0);
+  const noteAnswer = useCallback(() => {
+    lastAnswer.current = Math.floor(Date.now() / 1000);
+  }, []);
 
   // The brief writes itself once a day, after the lists are loaded, when the setting is on.
   // It does not wait for Gmail: the brief gets the emails itself, and Gmail can be slow.
@@ -552,6 +600,29 @@ export default function App() {
   }, [tasks, github.items, clickup.items, meta, est, brief, goalText, mail.reply]);
 
   const byKey = useMemo(() => new Map(items.map((i) => [i.key, i])), [items]);
+
+  // The rewrite after the questions (see heldTried above). It uses the same
+  // rule as the question card (openQuestions), so a question that the card
+  // does not show cannot hold the missions for the whole day. It waits for
+  // the GitHub and ClickUp lists: while they load, the card shows no question.
+  useEffect(() => {
+    if (!brief || brief.day !== today || briefState === "writing" || talk) return;
+    if (githubState === "loading" || clickupState === "loading") return;
+    if (openQuestions(brief, byKey, today, skipped, githubState, clickupState).length > 0) return;
+    // The same second counts: the brief can have read the items before the answer.
+    const answered = lastAnswer.current > 0 && lastAnswer.current >= brief.written;
+    if (!answered && (!brief.held || heldDays.current.has(brief.day))) return;
+    if (heldTried.current.has(brief.written)) return;
+    heldTried.current.add(brief.written);
+    if (!answered) heldDays.current.add(brief.day);
+    // The rewrite uses the answers up to now.
+    lastAnswer.current = 0;
+    // The card shows no question now. So the brief must stop holding: the
+    // server can still see a question that the card does not show, for
+    // example a ClickUp task that is not in the loaded list. Else the
+    // missions wait for the whole day.
+    writeBriefWith(true);
+  }, [brief, today, briefState, writeBriefWith, talk, byKey, skipped, githubState, clickupState]);
   const cfg = settings ?? api.DEFAULT_SETTINGS;
   /** The open plan items and the schedule of today and each next day. */
   // The events of each day do not change when an item changes: keep them apart.
@@ -581,6 +652,10 @@ export default function App() {
   useEffect(() => {
     if (sel && !byKey.has(sel) && !sourcesLoading) setSel(null);
   }, [sel, byKey, sourcesLoading]);
+  // A mission that left today's list (done, "Not today", a new brief) closes its panel.
+  useEffect(() => {
+    if (selMission !== null && brief && !brief.missions?.some((m) => m.id === selMission)) setSelMission(null);
+  }, [selMission, brief]);
 
   // ---------- Toast ----------
 
@@ -1173,6 +1248,8 @@ export default function App() {
     loadPlans();
     // AIfred can add items to a mission or take them out (missions.rs).
     loadTodayBrief();
+    // AIfred can put an item under another item (move_item).
+    api.itemLinks().then(setLinks).catch(() => {});
   }, [loadTasks, loadMeta, loadPlans, loadTodayBrief]);
 
   /** Runs one question in a chat and puts the messages in `set`. */
@@ -1198,7 +1275,7 @@ export default function App() {
       set((c) => ({ ...c, busy: false, progress: [] }));
       reloadAfterAnswer();
     }
-    if (now.current.sel && now.current.side === "task") setUnread(true);
+    if ((now.current.sel || now.current.mission !== null) && now.current.side === "task") setUnread(true);
     return ok;
   }
 
@@ -1235,21 +1312,22 @@ export default function App() {
       });
   };
 
+  /** `key` is an item key, or "mission:<id>" for the chat of a mission. */
   const askItem = (key: string, text: string, files: api.FileRef[]) => {
     const set = (f: (c: ChatState) => ChatState) => setItemChats((all) => ({ ...all, [key]: f(all[key] ?? EMPTY_CHAT) }));
     text = withFiles(text, files);
-    return chat(set, itemChats[key]?.busy ?? false, text, files, (p) => api.askSide(`item:${key}`, text.trim(), p, { model: pickArg(models.item), files: files.map((f) => f.id) }));
+    return chat(set, itemChats[key]?.busy ?? false, text, files, (p) => api.askSide(sideThread(key), text.trim(), p, { model: pickArg(models.item), files: files.map((f) => f.id) }));
   };
 
-  // The chat of an item loads when its panel opens, one time. A message
+  // The chat of an item or a mission loads when its panel opens, one time. A message
   // that the user sent before the load came back stays after the old ones.
+  // The questions on the home page load it too.
   const itemLoaded = useRef(new Set<string>());
-  useEffect(() => {
-    if (!sel || itemLoaded.current.has(sel)) return;
-    const key = sel;
+  const loadItemChat = useCallback((key: string) => {
+    if (itemLoaded.current.has(key)) return;
     itemLoaded.current.add(key);
     api
-      .sideHistory(`item:${key}`)
+      .sideHistory(sideThread(key))
       .then((t) =>
         setItemChats((all) => {
           const c = all[key] ?? EMPTY_CHAT;
@@ -1257,7 +1335,11 @@ export default function App() {
         }),
       )
       .catch(() => itemLoaded.current.delete(key));
-  }, [sel]);
+  }, []);
+  const chatKey = selMission !== null ? missionChatKey(selMission) : sel;
+  useEffect(() => {
+    if (chatKey) loadItemChat(chatKey);
+  }, [chatKey, loadItemChat]);
 
   async function pickModel(box: "main" | "plan" | "item", m: string | null) {
     const before = models[box];
@@ -1287,13 +1369,13 @@ export default function App() {
 
   const goTasks = () => {
     setPage("tasks");
-    setSel(null);
+    clearSel();
   };
 
   /** Opens the Calendar page on `day` (today when not given). */
   const goPlan = (day: string = today) => {
     setPage("plan");
-    setSel(null);
+    clearSel();
     setSide("chat");
     pickDay(day);
   };
@@ -1333,12 +1415,21 @@ export default function App() {
   const open = (key: string) => {
     if (!byKey.has(key)) return;
     setSel(key);
+    setSelMission(null);
     setSide("task");
     if (page !== "home" && page !== "plan" && page !== "tasks") setPage("home");
     requestAnimationFrame(() => document.getElementById(`row-${key}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
   };
-  const close = () => {
+  /** Opens a mission of today on the right side, like an item. */
+  const openMission = (id: number) => {
+    setSelMission(id);
     setSel(null);
+    setSide("task");
+    setPage("home");
+    requestAnimationFrame(() => document.getElementById(`mission-${id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  };
+  const close = () => {
+    clearSel();
     setSide("chat");
   };
 
@@ -1346,7 +1437,7 @@ export default function App() {
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
-      if (sel) close();
+      if (sel || selMission !== null) close();
       else if (planChatOpen) setPlanChatOpen(false);
     };
     document.addEventListener("keydown", key);
@@ -1421,6 +1512,9 @@ export default function App() {
   const onPlan = page === "plan";
   const chatOn = onPlan ? true : page === "home" && mainOpen;
   const selItem = sel && (page === "home" || page === "tasks" || onPlan) ? byKey.get(sel) : undefined;
+  // The missions show only on the home page.
+  const selM = selMission !== null && page === "home" ? brief?.missions?.find((m) => m.id === selMission) : undefined;
+  const selTitle = selItem?.title ?? selM?.title;
   const showSide = (v: "chat" | "task") => {
     setSide(v);
     if (v === "chat") {
@@ -1430,7 +1524,7 @@ export default function App() {
   };
 
   const tabs =
-    selItem && chatOn ? (
+    selTitle !== undefined && chatOn ? (
       <div className="stabs" role="tablist" aria-label="Open on the right">
         <div
           className={`stab${side === "chat" ? " on" : ""}`}
@@ -1467,10 +1561,10 @@ export default function App() {
           onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), showSide("task"))}
         >
           {ICON.task}
-          <span className="lb">{selItem.title}</span>
+          <span className="lb">{selTitle}</span>
           <button
             className="x"
-            aria-label="Close the task"
+            aria-label={selM ? "Close the mission" : "Close the task"}
             onClick={(e) => {
               e.stopPropagation();
               close();
@@ -1733,6 +1827,14 @@ export default function App() {
     goalText,
     changeGoals,
     briefState,
+    // The first loads of the day are not back yet: the home page waits, so
+    // that it does not show the task list for a moment before the questions.
+    // A later reload of a list (the timer, or after an answer) keeps the
+    // page: else the question card and the text in its box go away.
+    homeLoading:
+      briefLoaded !== today ||
+      (!tasksLoaded && !tasksError) ||
+      ((brief?.ask?.length ?? 0) > 0 && ((githubState === "loading" && !githubBack) || (clickupState === "loading" && !clickupBack))),
     githubState,
     clickupState,
     githubWarning: github.warning,
@@ -1766,7 +1868,10 @@ export default function App() {
     planChat,
     sendPlan,
     itemChat: (key) => itemChats[key] ?? EMPTY_CHAT,
+    selMission,
+    openMission,
     askItem,
+    loadItemChat,
     models,
     setModel: pickModel,
     toggleDone,
@@ -1804,6 +1909,12 @@ export default function App() {
       reloadAfterAnswer();
       loadWaiting();
     },
+    reloadClickup: () => loadClickup(false, clickupOn),
+    talk,
+    setTalk,
+    skipped,
+    setSkipped,
+    noteAnswer,
     goPlan: () => goPlan(),
     goTasks,
   };
@@ -1881,13 +1992,13 @@ export default function App() {
         </div>
         <div className="body">
           <nav className="rail" aria-label="App">
-            {rail("home", ICON.home, "Home", () => (setPage("home"), setSel(null)), page === "home")}
+            {rail("home", ICON.home, "Home", () => (setPage("home"), clearSel()), page === "home")}
             {rail("plan", ICON.cal, "Calendar", () => goPlan(), onPlan)}
             {rail("tasks", ICON.task, "Tasks", goTasks, page === "tasks")}
             {rail("chat", ICON.chat, "Conversation", ctx.openMain, page === "home" && mainOpen)}
-            {rail("memory", ICON.mem, "What AIfred knows about you", () => (setPage("memory"), setSel(null)), page === "memory")}
+            {rail("memory", ICON.mem, "What AIfred knows about you", () => (setPage("memory"), clearSel()), page === "memory")}
             <span className="sp" />
-            {rail("settings", ICON.gear, "Settings", () => (setPage("settings"), setSel(null)), page === "settings", update?.state === "ready")}
+            {rail("settings", ICON.gear, "Settings", () => (setPage("settings"), clearSel()), page === "settings", update?.state === "ready")}
           </nav>
 
           {page === "home" && (
@@ -1954,8 +2065,9 @@ export default function App() {
           {selItem && (
             <Detail key={selItem.key} item={selItem} hidden={chatOn && side === "chat"} tabs={tabs} handle={handle} />
           )}
+          {selM && <MissionDetail key={selM.id} m={selM} hidden={chatOn && side === "chat"} tabs={tabs} handle={handle} />}
           {page === "home" && mainOpen && (
-            <aside className="chat" aria-label="Conversation" hidden={!!selItem && side === "task"}>
+            <aside className="chat" aria-label="Conversation" hidden={selTitle !== undefined && side === "task"}>
               {handle}
               {tabs}
               <div className="chat-h">
@@ -1972,7 +2084,7 @@ export default function App() {
             </aside>
           )}
           {onPlan && (
-            <aside className={`chat${planChatOpen ? " open" : ""}`} aria-label="Plan chat" hidden={!!selItem && side === "task"}>
+            <aside className={`chat${planChatOpen ? " open" : ""}`} aria-label="Plan chat" hidden={selTitle !== undefined && side === "task"}>
               {handle}
               {tabs}
               <div className="chat-h">

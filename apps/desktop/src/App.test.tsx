@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import App from "./App";
-import { DEFAULT_SETTINGS, type Answer, type Mission } from "./api";
+import { DEFAULT_SETTINGS, type Answer, type Brief, type Mission } from "./api";
 import { addDays, dayOf, shortDay } from "./items";
 import { answer, clickupItem, deferred, fact, fakeBackend, githubItem, job, mail, meeting, task } from "./test/fakeBackend";
 
@@ -73,14 +73,69 @@ describe("home", () => {
       onWriteBrief: (day) => ({ day, written: 1, text: "One thing: [the rent](item:task:t-x).", why: {} }),
     });
     const key = `task:${fake.tasks[0].id}`;
-    fake.onWriteBrief = (day) => ({ day, written: 1, text: `One thing: [the rent](item:${key}).`, why: {} });
+    // The second answer names the task. Change it only after the first
+    // write: the app can start that write at any time.
     await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1));
+    fake.onWriteBrief = (day) => ({ day, written: 1, text: `One thing: [the rent](item:${key}).`, why: {} });
     // The first answer named an item that is not in the list: plain text, no button.
     expect(await screen.findByText("the rent")).not.toHaveClass("ref");
     await userEvent.click(screen.getByRole("button", { name: "Write again" }));
     await userEvent.click(await screen.findByRole("button", { name: "the rent" }));
     expect(within(details()).getByRole("textbox", { name: "Task title" })).toHaveValue("Pay rent");
     expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(2);
+  });
+
+  it("while AIfred prepares the day, the home page says so and does not show the task list", async () => {
+    let done: (b: Brief) => void = () => {};
+    const fake = await startApp({
+      settings: { ...DEFAULT_SETTINGS, auto_brief: true },
+      tasks: [task("Pay rent")],
+      onWriteBrief: () => new Promise<Brief>((r) => (done = r)),
+    });
+    const card = await screen.findByRole("region", { name: "Preparing your day" });
+    expect(within(card).getByRole("status")).toHaveTextContent(/looks up your tasks/);
+    expect(screen.queryByText("Pay rent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Brief" })).not.toBeInTheDocument();
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1));
+    done({ day: today(), written: 1, text: "Pay the rent.", why: {} });
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Preparing your day" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("region", { name: "Brief" })).toBeInTheDocument();
+  });
+
+  it("on start, the home page waits for the lists that the questions need, so the task list does not flash", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await startApp({
+      tasks: [task("Pay rent")],
+      github: [githubItem(7, "assigned", "Sync")],
+      onGithubItems: () => held,
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: ["github:acme/shop#7"], held: true } },
+    });
+    expect(await screen.findByRole("region", { name: "Loading your day" })).toBeInTheDocument();
+    expect(screen.queryByText("Pay rent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Help AIfred understand" })).not.toBeInTheDocument();
+    release();
+    expect(await screen.findByRole("region", { name: "Help AIfred understand" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Loading your day" })).not.toBeInTheDocument();
+  });
+
+  it("a later reload of a list keeps the question card and the text in its box", async () => {
+    const fake = await startApp({
+      tasks: [task("Pay rent")],
+      github: [githubItem(7, "assigned", "Sync")],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: ["github:acme/shop#7"] } },
+    });
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    const box = within(card).getByRole("textbox", { name: "Your answer about Sync" });
+    await userEvent.type(box, "half done");
+    // A reload starts, and its answer waits.
+    const hold = deferred<void>();
+    fake.onGithubItems = () => hold.promise;
+    await userEvent.click(screen.getByTitle("Reload the list"));
+    await waitFor(() => expect(fake.githubFetches).toBe(2));
+    expect(screen.queryByRole("region", { name: "Loading your day" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Help AIfred understand" })).getByRole("textbox", { name: "Your answer about Sync" })).toHaveValue("half done");
+    hold.resolve();
   });
 
   it("does not write the brief by itself when the setting is off, and shows a failed write", async () => {
@@ -1112,6 +1167,39 @@ describe("missions on the home page", () => {
     expect(await screen.findByText(/^The mission stays open: AIfred could not close Write the post\. .*the disk is full/)).toBeInTheDocument();
     expect(fake.calls.filter((c) => c.cmd === "finish_mission")).toEqual([]);
     expect(screen.getByRole("list", { name: "Today's missions" })).toBeInTheDocument();
+  });
+
+  it("a mission opens on the right side, with a chat about the mission", async () => {
+    const s = setup();
+    const fake = await startApp({ ...s, onAskSide: (p) => answer(`About the mission: ${p}`) });
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const side = screen.getByRole("dialog", { name: "Mission details" });
+    // The items and the checklist are in the side panel, not in the list.
+    expect(within(side).getByRole("group", { name: "Mission: Ship the launch post" })).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Today's missions" })).queryByRole("group")).not.toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "side_history" && c.args.thread === "mission:5")).toBe(true);
+    await userEvent.type(within(side).getByRole("textbox", { name: "Ask AIfred about this mission" }), "what is left?{Enter}");
+    expect(await within(side).findByText("About the mission: what is left?")).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.cmd === "ask_side")!.args).toMatchObject({ thread: "mission:5" });
+    expect(fake.history).toEqual([]);
+    // An item of the mission opens in its place. The mission card opens the mission again, with its chat.
+    await userEvent.click(within(side).getByRole("button", { name: "Open details: Write the post" }));
+    expect(screen.queryByRole("dialog", { name: "Mission details" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Task details" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open mission: Ship the launch post" }));
+    expect(within(screen.getByRole("dialog", { name: "Mission details" })).getByText("About the mission: what is left?")).toBeInTheDocument();
+    // A second click on the card closes the panel.
+    await userEvent.click(screen.getByRole("button", { name: "Close mission: Ship the launch post" }));
+    expect(screen.queryByRole("dialog", { name: "Mission details" })).not.toBeInTheDocument();
+  });
+
+  it("a finished mission closes its side panel", async () => {
+    await startApp(setup());
+    await userEvent.click(await screen.findByRole("button", { name: "Open mission: Ship the launch post" }));
+    const side = screen.getByRole("dialog", { name: "Mission details" });
+    await userEvent.click(within(side).getByRole("button", { name: "Done" }));
+    await userEvent.click(within(side).getByRole("button", { name: "Finish mission" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Mission details" })).not.toBeInTheDocument());
   });
 
   it("Not today hides the mission for today, with an undo", async () => {
@@ -2600,44 +2688,300 @@ describe("Sheet comments", () => {
 });
 
 describe("task context", () => {
-  it("asks about the items that AIfred cannot rank, and the answer goes to the item chat", async () => {
+  it("asks about one item at a time, and you talk with AIfred about it in the card", async () => {
     const sync = task("Fix sync");
     const call = task("Call Bo");
     const fake = await startApp({
       tasks: [sync, call],
       briefs: { [today()]: { day: today(), written: 3, text: "Two things.", why: {}, ask: [`task:${sync.id}`, `task:${call.id}`] } },
     });
-    // The answer waits until the panel shows the notes from before.
-    const hold = deferred<void>();
+    // The first answer is not enough: AIfred asks one more question. The
+    // second answer is: AIfred saves a short summary (set_item_context).
     fake.onAskSide = async (p) => {
-      await hold.promise;
-      // Like the set_item_context tool: AIfred saves a short summary.
+      if (p === "the sync bug") return answer("Is it part of the release on Friday?");
       fake.contexts[`task:${sync.id}`] = { key: `task:${sync.id}`, text: "The ClickUp sync bug. Due Friday.", by: "aifred", updated: 5 };
-      return answer(`Saved: ${p}`);
+      return answer("Saved: the sync bug blocks the release on Friday.");
     };
     const card = await screen.findByRole("region", { name: "Help AIfred understand" });
-    expect(within(card).getByText(/What is this\?/)).toBeInTheDocument();
-    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about Fix sync" }), "the sync bug, due Friday{Enter}");
-    expect(await within(details()).findByText("nothing yet")).toBeInTheDocument();
-    hold.resolve();
-    // The panel of the item opens with the answer in its chat.
-    expect(await within(details()).findByText("Saved: the sync bug, due Friday")).toBeInTheDocument();
-    expect(fake.side[`item:task:${sync.id}`]?.[0].text).toBe("the sync bug, due Friday");
-    // The item has notes now, so the card asks only about the other item.
-    await waitFor(() => expect(within(card).queryByRole("textbox", { name: "Your answer about Fix sync" })).not.toBeInTheDocument());
-    expect(within(card).getByRole("textbox", { name: "Your answer about Call Bo" })).toBeInTheDocument();
-    // The panel shows what AIfred knows.
-    expect(await within(details()).findByRole("textbox", { name: "What AIfred knows" })).toHaveValue("The ClickUp sync bug. Due Friday.");
-    // AIfred says that it saved the notes, with an undo.
-    expect(await screen.findByText("AIfred saved what it knows about this item.")).toBeInTheDocument();
+    expect(within(card).getByText(/1 of 2/)).toBeInTheDocument();
+    expect(within(card).getByText("What is this item?")).toBeInTheDocument();
+    expect(within(card).queryByRole("textbox", { name: "Your answer about Call Bo" })).not.toBeInTheDocument();
+    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about Fix sync" }), "the sync bug{Enter}");
+    // The talk stays in the card: no panel opens.
+    expect(await within(card).findByText("Is it part of the release on Friday?")).toBeInTheDocument();
+    expect(within(card).getByText("the sync bug")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Task details" })).not.toBeInTheDocument();
+    // The title opens the item: its chat has the same talk.
+    await userEvent.click(within(card).getByRole("button", { name: "Fix sync" }));
+    expect(await within(details()).findByText("Is it part of the release on Friday?")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Task details" })).not.toBeInTheDocument());
+    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about Fix sync" }), "yes, it blocks it{Enter}");
+    // AIfred saved the notes: its answer stays on the screen until you go on.
+    expect(await within(card).findByText("Saved: the sync bug blocks the release on Friday.")).toBeInTheDocument();
+    expect(await within(card).findByRole("status")).toHaveTextContent('AIfred saved what it knows about "Fix sync".');
+    expect(within(card).getByText(/1 more question/)).toBeInTheDocument();
+    expect(within(card).getByRole("textbox", { name: "Your answer about Fix sync" })).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: "Skip" })).not.toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Next question" }));
+    expect(await within(card).findByRole("textbox", { name: "Your answer about Call Bo" })).toBeInTheDocument();
+    // The count still counts the answered question.
+    expect(within(card).getByText(/2 of 2/)).toBeInTheDocument();
+    expect(within(card).queryByRole("textbox", { name: "Your answer about Fix sync" })).not.toBeInTheDocument();
+    expect(fake.side[`item:task:${sync.id}`]?.map((t) => t.text)).toEqual([
+      "the sync bug",
+      "Is it part of the release on Friday?",
+      "yes, it blocks it",
+      "Saved: the sync bug blocks the release on Friday.",
+    ]);
 
-    // Skip: AIfred does not ask again. Undo asks again.
+    // Skip: AIfred does not ask again. You answered a question, so AIfred
+    // writes the brief and missions again with the new notes.
     await userEvent.click(within(card).getByRole("button", { name: "Skip" }));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Help AIfred understand" })).not.toBeInTheDocument());
+    expect(fake.contextSkip).toEqual([`task:${call.id}`]);
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1));
+  });
+
+  it("after the answers, AIfred writes the brief and missions again", async () => {
+    const sync = task("Fix sync");
+    const fake = await startApp({
+      tasks: [sync],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: [`task:${sync.id}`] } },
+    });
+    fake.onAskSide = async () => {
+      fake.contexts[`task:${sync.id}`] = { key: `task:${sync.id}`, text: "The sync bug.", by: "aifred", updated: 5 };
+      return answer("Saved.");
+    };
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    expect(within(card).getByText(/It updates the brief and missions after your answers/)).toBeInTheDocument();
+    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about Fix sync" }), "the sync bug{Enter}");
+    await userEvent.click(await within(card).findByRole("button", { name: "Update the brief and missions" }));
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1));
+    expect(await screen.findByRole("region", { name: "Brief" })).toBeInTheDocument();
+  });
+
+  it("a skip alone gives no new details: the brief is not written again, and Undo asks again", async () => {
+    const call = task("Call Bo");
+    const fake = await startApp({
+      tasks: [call],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: [`task:${call.id}`] } },
+    });
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    await userEvent.click(within(card).getByRole("button", { name: "Skip" }));
+    expect(await screen.findByRole("region", { name: "Brief" })).toBeInTheDocument();
     expect(fake.contextSkip).toEqual([`task:${call.id}`]);
     await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(fake.contextSkip).toEqual([]));
     expect(await screen.findByRole("textbox", { name: "Your answer about Call Bo" })).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(0);
+  });
+
+  it("an answer that says a ClickUp task is finished takes the task away", async () => {
+    const sync = task("Fix sync");
+    const fake = await startApp({
+      clickupToken: "pk_test",
+      tasks: [sync],
+      clickup: [clickupItem("86a", "echowp")],
+      briefs: { [today()]: { day: today(), written: 3, text: "Two things.", why: {}, ask: ["clickup:86a", `task:${sync.id}`] } },
+    });
+    // Like mark_task_done: ClickUp closes the task, and the saved list loses it.
+    fake.onAskSide = async () => {
+      fake.clickup = [];
+      return answer("Marked echowp done in ClickUp.");
+    };
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about echowp" }), "it is already finished{Enter}");
+    // AIfred's answer stays, and the card says that the task is done.
+    expect(await within(card).findByRole("status")).toHaveTextContent('"echowp" is done.');
+    expect(within(card).getByText("Marked echowp done in ClickUp.")).toBeInTheDocument();
+    expect(fake.calls.some((c) => c.cmd === "clickup_items" && !c.args?.force)).toBe(true);
+    await userEvent.click(within(card).getByRole("button", { name: "Next question" }));
+    expect(await within(card).findByRole("textbox", { name: "Your answer about Fix sync" })).toBeInTheDocument();
+  });
+
+  it("a held brief still asks about an item whose list failed to load, with the title from the brief", async () => {
+    await startApp({
+      github: [githubItem(7, "assigned", "Sync")],
+      onGithubItems: () => Promise.reject("GitHub is down"),
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: ["github:acme/shop#7"], held: true, titles: { "github:acme/shop#7": "Sync the docs" } } },
+    });
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    expect(within(card).getByRole("textbox", { name: "Your answer about Sync the docs" })).toBeInTheDocument();
+  });
+
+  it("a held brief writes again when the card shows none of its questions", async () => {
+    // The server still counts the GitHub item as asked, but it is not in
+    // the loaded list (closed there). The card shows no question, so the
+    // missions must not wait for an answer that you cannot give.
+    const fake = await startApp({
+      github: [],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: ["github:acme/shop#7"], held: true } },
+    });
+    await waitFor(() => expect(fake.calls.some((c) => c.cmd === "write_brief")).toBe(true));
+    expect(screen.queryByRole("region", { name: "Help AIfred understand" })).not.toBeInTheDocument();
+  });
+
+  it("a held brief with no question on the screen is written again only one time on a day", async () => {
+    // The server still holds the missions for the question, but the card
+    // does not show it. Each new brief holds again: the app must not write
+    // the brief again and again, because each write costs AI calls.
+    let n = 3;
+    const fake = await startApp({
+      github: [],
+      briefs: { [today()]: { day: today(), written: n, text: "One thing.", why: {}, ask: ["github:acme/shop#7"], held: true } },
+      onWriteBrief: (day) => ({ day, written: ++n, text: "One thing.", why: {}, ask: ["github:acme/shop#7"], held: true }),
+    });
+    await waitFor(() => expect(fake.calls.some((c) => c.cmd === "write_brief")).toBe(true));
+    await new Promise((r) => setTimeout(r, 300));
+    const writes = fake.calls.filter((c) => c.cmd === "write_brief");
+    expect(writes).toHaveLength(1);
+    // The write asks the server to stop the hold: else the missions wait
+    // for the whole day.
+    expect(writes[0].args.release).toBe(true);
+  });
+
+  it("a brief that does not hold shows the questions above the brief", async () => {
+    const call = task("Call Bo");
+    await startApp({
+      tasks: [call],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: [`task:${call.id}`] } },
+    });
+    expect(await screen.findByRole("region", { name: "Help AIfred understand" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Brief" })).toBeInTheDocument();
+  });
+
+  it("a question that goes with no answer of yours gives no 'used your answer' message", async () => {
+    const a = task("Call Bo");
+    const b = task("Pay rent");
+    const fake = await startApp({
+      tasks: [a, b],
+      briefs: { [today()]: { day: today(), written: 3, text: "Two things.", why: {}, ask: [`task:${a.id}`, `task:${b.id}`] } },
+    });
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    // You write the notes of "Pay rent" elsewhere, then skip "Call Bo".
+    fake.contexts[`task:${b.id}`] = { key: `task:${b.id}`, text: "Rent of the flat.", by: "you", updated: 5 };
+    await userEvent.click(within(card).getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(fake.contextSkip).toEqual([`task:${a.id}`]));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Help AIfred understand" })).not.toBeInTheDocument());
+    expect(screen.queryByText(/AIfred used your answer/)).not.toBeInTheDocument();
+  });
+
+  it("one answer can answer the other questions too", async () => {
+    const sync = task("Add echowp in WWP");
+    const parent = task("echowp");
+    const fake = await startApp({
+      tasks: [sync, parent],
+      briefs: { [today()]: { day: today(), written: 3, text: "Two things.", why: {}, ask: [`task:${sync.id}`, `task:${parent.id}`], held: true } },
+    });
+    // AIfred saves the notes of both items, and asks one more question.
+    fake.onAskSide = async () => {
+      for (const t of [sync, parent]) fake.contexts[`task:${t.id}`] = { key: `task:${t.id}`, text: "The echowp work.", by: "aifred", updated: 5 };
+      return answer("Saved notes for both. Is there a deadline?");
+    };
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about Add echowp in WWP" }), "part of the echowp work{Enter}");
+    expect(await screen.findByText('AIfred used your answer for "echowp" too, so it does not ask about it.')).toBeInTheDocument();
+    // AIfred's question stays: you can answer it before you go on.
+    expect(within(card).getByText("Saved notes for both. Is there a deadline?")).toBeInTheDocument();
+    expect(within(card).getByText(/last question/)).toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(0);
+    await userEvent.click(within(card).getByRole("button", { name: "Make today's missions" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Help AIfred understand" })).not.toBeInTheDocument());
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1));
+  });
+
+  it("the card shows AIfred's own first question about each item, and keeps it during the talk", async () => {
+    const sync = task("Fix sync");
+    const call = task("Call Bo");
+    const fake = await startApp({
+      tasks: [sync, call],
+      briefs: {
+        [today()]: {
+          day: today(),
+          written: 3,
+          text: "Two things.",
+          why: {},
+          ask: [`task:${sync.id}`, `task:${call.id}`],
+          questions: { [`task:${sync.id}`]: ["Is the sync bug part of the Friday release?", "Who tests it?"] },
+        },
+      },
+    });
+    // AIfred takes the answered question out of the list, and asks the next one.
+    fake.onAskSide = async () => {
+      fake.briefs[today()]!.questions = { [`task:${sync.id}`]: ["Who tests it?"] };
+      return answer("Who tests it?");
+    };
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    expect(within(card).getByText("Is the sync bug part of the Friday release?")).toBeInTheDocument();
+    expect(within(card).queryByText("What is this item?")).not.toBeInTheDocument();
+    await userEvent.type(within(card).getByRole("textbox", { name: "Your answer about Fix sync" }), "yes{Enter}");
+    expect(await within(card).findByText("Who tests it?")).toBeInTheDocument();
+    // The first question stays at the top of the talk.
+    expect(within(card).getByText("Is the sync bug part of the Friday release?")).toBeInTheDocument();
+    // An item with no list gets the general question.
+    await userEvent.click(within(card).getByRole("button", { name: "Later" }));
+    expect(await within(card).findByText("What is this item?")).toBeInTheDocument();
+  });
+
+  it("Later shows the next question first", async () => {
+    const sync = task("Fix sync");
+    const call = task("Call Bo");
+    await startApp({
+      tasks: [sync, call],
+      briefs: { [today()]: { day: today(), written: 3, text: "Two things.", why: {}, ask: [`task:${sync.id}`, `task:${call.id}`] } },
+    });
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    await userEvent.click(within(card).getByRole("button", { name: "Later" }));
+    expect(within(card).getByRole("textbox", { name: "Your answer about Call Bo" })).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole("button", { name: "Later" }));
+    expect(within(card).getByRole("textbox", { name: "Your answer about Fix sync" })).toBeInTheDocument();
+  });
+
+  it("while AIfred asks, the home page shows only the questions; after the last one, the brief makes its missions", async () => {
+    const sync = task("Fix sync");
+    const post = task("Write the post");
+    const old: Mission = {
+      id: 5,
+      title: "Ship the launch post",
+      doer: "you",
+      day: "2020-01-01",
+      rank: 1,
+      status: "open",
+      items: [{ key: `task:${post.id}`, title: "Write the post", open: true, by: "aifred" }],
+      checklist: [],
+      progress: { steps_done: 0, steps: 0, items_closed: 0, items: 1, percent: 0 },
+    };
+    const call = task("Call Bo");
+    const mine: Mission = {
+      ...old,
+      id: 6,
+      title: "Call Bo back",
+      items: [{ key: `task:${call.id}`, title: "Call Bo", open: true, by: "you" }],
+    };
+    const fake = await startApp({
+      tasks: [sync, post, call],
+      briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: [`task:${sync.id}`], held: true, missions: [old, mine] } },
+      onWriteBrief: (day) => ({ day, written: 4, text: "Now with missions.", why: {} }),
+    });
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    expect(within(card).getByText(/It makes today's missions after your answers\./)).toBeInTheDocument();
+    // The brief, AIfred's missions, the other cards, and the chat box wait for the answers.
+    expect(screen.queryByText("Ship the launch post")).not.toBeInTheDocument();
+    // A mission with an item that you put there yourself stays.
+    expect(screen.getByText("Call Bo back")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Brief" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Add a task or ask AIfred" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Waiting for" })).not.toBeInTheDocument();
+    expect(screen.queryByText("One thing.")).not.toBeInTheDocument();
+    expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(0);
+    await userEvent.click(within(card).getByRole("button", { name: "Skip" }));
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1));
+    expect(await screen.findByText("Now with missions.")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Brief" })).toBeInTheDocument();
+    expect(homeBox()).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fake.calls.filter((c) => c.cmd === "write_brief")).toHaveLength(1);
   });
 
   it("a failed answer stays in its box on the home page, so you can send it again", async () => {
@@ -2652,7 +2996,7 @@ describe("task context", () => {
     const card = await screen.findByRole("region", { name: "Help AIfred understand" });
     const box = within(card).getByRole("textbox", { name: "Your answer about Fix sync" });
     await userEvent.type(box, "the sync bug{Enter}");
-    expect(await within(details()).findByText(/the AI is busy/)).toBeInTheDocument();
+    expect(await within(card).findByText(/the AI is busy/)).toBeInTheDocument();
     await waitFor(() => expect(box).toHaveValue("the sync bug"));
   });
 
@@ -2662,8 +3006,9 @@ describe("task context", () => {
       tasks: [sync],
       briefs: { [today()]: { day: today(), written: 3, text: "One thing.", why: {}, ask: [`task:${sync.id}`] } },
     });
-    await screen.findByRole("region", { name: "Help AIfred understand" });
-    await openItem("Fix sync");
+    const card = await screen.findByRole("region", { name: "Help AIfred understand" });
+    // The title in the card opens the item.
+    await userEvent.click(within(card).getByRole("button", { name: "Fix sync" }));
     const box = await within(details()).findByRole("textbox", { name: "What AIfred knows" });
     await userEvent.type(box, "The sync bug. Due Friday.");
     await userEvent.click(within(details()).getByRole("button", { name: "Save" }));

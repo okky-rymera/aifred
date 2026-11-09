@@ -329,6 +329,23 @@ impl App {
         });
     }
 
+    /// Looks at the new items in the background (Assistant::research_items),
+    /// so the brief does not wait for the look-up. Only when the brief writes
+    /// itself: else the look-up waits for a brief that the user asks for.
+    fn research_items(&self) {
+        if !self.background
+            || !aifred_core::settings::load_or_default(&self.assistant.dir).auto_brief
+        {
+            return;
+        }
+        let a = self.assistant.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = a.research_items().await {
+                eprintln!("aifred: cannot look at the new items: {e:#}");
+            }
+        });
+    }
+
     /// Makes the missing meaning search vectors on a background thread, so the
     /// window does not wait. Two fills at the same time are safe: the second
     /// waits for the first (embed.rs) and then finds little to do.
@@ -812,6 +829,7 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
             app.fill_vectors();
             app.summarize_items();
             app.sort_items();
+            app.research_items();
             Ok(list)
         }
         Err(e) => {
@@ -1119,6 +1137,7 @@ async fn clickup_items(app: State<'_, App>, force: bool) -> CmdResult<ClickupLis
             app.fill_vectors();
             app.summarize_items();
             app.sort_items();
+            app.research_items();
             Ok(list)
         }
         Err(e) => {
@@ -1703,13 +1722,20 @@ async fn brief(app: State<'_, App>, day: String) -> CmdResult<Option<Brief>> {
     blocking(&app, move |a| aifred_core::brief::get(&a.dir, &day)).await
 }
 
-/// Writes the brief of `day` now. It is one AI call (brief.rs).
+/// Writes the brief of `day` now. It is one AI call (brief.rs). `release`
+/// true: the brief stops holding its missions first (brief::release).
 #[tauri::command]
-async fn write_brief(app: State<'_, App>, day: String) -> CmdResult<Brief> {
+async fn write_brief(app: State<'_, App>, day: String, release: Option<bool>) -> CmdResult<Brief> {
     let asked = now();
     // A brief job of the scheduler can write the brief now. Wait for it, and
     // use its brief when it is newer than this request: no second AI call.
     let _guard = app.brief_busy.lock().await;
+    // The window shows no question: the brief must not hold its missions
+    // for a question that only the server sees (brief::release).
+    if release == Some(true) {
+        let d = day.clone();
+        blocking(&app, move |a| aifred_core::brief::release(&a.dir, &d)).await?;
+    }
     let d = day.clone();
     // Brief::written is when that brief read the tasks. Only a read after
     // this request knows the changes that the user made before the click.

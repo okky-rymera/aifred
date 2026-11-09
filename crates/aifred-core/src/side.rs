@@ -1,6 +1,7 @@
 //! Chats apart from the main conversation:
 //! - "plan:YYYY-MM-DD": the plan chat of one day,
-//! - "item:<item key>": the chat about one item (items.rs).
+//! - "item:<item key>": the chat about one item (items.rs),
+//! - "mission:<id>": the chat about one mission (missions.rs).
 //!
 //! Each message of a side chat sends the earlier messages of the same chat
 //! again, so the chats do not mix with each other or with the main conversation.
@@ -36,12 +37,23 @@ struct Meta {
     info: Option<String>,
 }
 
-/// A thread name is "plan:YYYY-MM-DD" or "item:<item key>".
+/// A thread name is "plan:YYYY-MM-DD", "item:<item key>" or "mission:<id>".
 pub fn check(thread: &str) -> anyhow::Result<()> {
     match thread.split_once(':') {
         Some(("plan", day)) => crate::plan::check_day(day),
         Some(("item", key)) => crate::items::split(key).map(|_| ()),
+        Some(("mission", id)) => mission_id(id).map(|_| ()),
         _ => bail!("\"{thread}\" is not a chat name"),
+    }
+}
+
+/// The id of a mission chat: a number above 0, with no other text and no
+/// zero at the start. So each mission has one chat name: "mission:07" is
+/// not a second thread of "mission:7".
+pub fn mission_id(id: &str) -> anyhow::Result<i64> {
+    match id.parse::<i64>() {
+        Ok(n) if n > 0 && id.bytes().all(|b| b.is_ascii_digit()) && !id.starts_with('0') => Ok(n),
+        _ => bail!("\"{id}\" is not a mission id"),
     }
 }
 
@@ -77,7 +89,8 @@ pub fn load(dir: &Path, thread: &str) -> anyhow::Result<Vec<SideTurn>> {
     })
 }
 
-/// Adds one question and its answer, in one change.
+/// Adds one question and its answer, in one change. `asked`: the message
+/// is in the question chat of the home page (context::question_chat).
 pub fn append_pair(
     dir: &Path,
     thread: &str,
@@ -85,6 +98,7 @@ pub fn append_pair(
     files: &[FileRef],
     answer: &str,
     info: &str,
+    asked: bool,
 ) -> anyhow::Result<()> {
     check(thread)?;
     db::write(dir, |tx| {
@@ -97,13 +111,29 @@ pub fn append_pair(
             files: vec![],
             info: Some(info.into()),
         })?;
+        // The mark of the question chat is a column: question_since reads it.
         tx.execute(
-            "INSERT INTO side_turn (thread, ts, role, text, meta) VALUES (?1, ?2, 'user', ?3, ?4)",
-            rusqlite::params![thread, ts, question, q],
+            "INSERT INTO side_turn (thread, ts, role, text, meta, question) VALUES (?1, ?2, 'user', ?3, ?4, ?5)",
+            rusqlite::params![thread, ts, question, q, asked],
         )?;
         tx.execute("INSERT INTO side_turn (thread, ts, role, text, meta) VALUES (?1, ?2, 'assistant', ?3, ?4)", rusqlite::params![thread, ts, answer, a])?;
         Ok(())
     })
+}
+
+/// True when the thread has a message of the question chat of the home
+/// page since `since` (Unix seconds).
+pub(crate) fn question_since(
+    c: &rusqlite::Connection,
+    thread: &str,
+    since: i64,
+) -> anyhow::Result<bool> {
+    let n: i64 = c.query_row(
+        "SELECT COUNT(*) FROM side_turn WHERE thread = ?1 AND ts >= ?2 AND role = 'user' AND question = 1",
+        rusqlite::params![thread, since],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// Removes all messages of the thread.
@@ -136,9 +166,30 @@ mod tests {
             std::slice::from_ref(&f),
             "Done.",
             "2.0s",
+            false,
         )
         .unwrap();
-        append_pair(&d, "item:task:t1", "What is this?", &[], "A task.", "1.0s").unwrap();
+        append_pair(
+            &d,
+            "item:task:t1",
+            "What is this?",
+            &[],
+            "A task.",
+            "1.0s",
+            false,
+        )
+        .unwrap();
+        append_pair(
+            &d,
+            "mission:5",
+            "Why this?",
+            &[],
+            "It is due.",
+            "1.0s",
+            false,
+        )
+        .unwrap();
+        assert_eq!(load(&d, "mission:5").unwrap().len(), 2);
         let plan = load(&d, "plan:2026-11-04").unwrap();
         assert_eq!(
             plan.iter().map(|t| t.role.as_str()).collect::<Vec<_>>(),
@@ -154,7 +205,19 @@ mod tests {
             2,
             "a clear changes only its own thread"
         );
-        for bad in ["plan:4 Nov", "plan:abcdefghij", "item:jira:1", "main", ""] {
+        for bad in [
+            "plan:4 Nov",
+            "plan:abcdefghij",
+            "item:jira:1",
+            "mission:",
+            "mission:abc",
+            "mission:0",
+            "mission:-3",
+            "mission:+3",
+            "mission:05",
+            "main",
+            "",
+        ] {
             assert!(load(&d, bad).is_err(), "{bad}");
         }
         std::fs::remove_dir_all(&d).unwrap();

@@ -11,6 +11,10 @@ export type ListState = "loading" | "ok" | "off" | string;
 /** A chat: its messages, and the work in progress. */
 export type ChatState = { msgs: ChatMsg[]; busy: boolean; progress: string[] };
 
+/** The question talk on the home page: the item, and AIfred's question
+ * that started it. */
+export type Talk = { key: string; title: string; question: string };
+
 export type AppCtx = {
   today: string;
   items: Item[];
@@ -42,6 +46,8 @@ export type AppCtx = {
   changeGoals: (change: () => Promise<api.Goals>) => Promise<boolean>;
   /** "idle", "writing", or the error of the last try. */
   briefState: string;
+  /** True until today's brief and the lists that its questions need are loaded. */
+  homeLoading: boolean;
   githubState: ListState;
   clickupState: ListState;
   githubWarning?: string;
@@ -72,6 +78,10 @@ export type AppCtx = {
   sel: string | null;
   open: (key: string) => void;
   close: () => void;
+  /** The id of the mission that is open on the right side, or null. */
+  selMission: number | null;
+  /** Opens a mission of today on the right side. */
+  openMission: (id: number) => void;
 
   /** The main conversation. */
   main: ChatState;
@@ -80,8 +90,11 @@ export type AppCtx = {
   sendMain: (text: string, files: api.FileRef[]) => Promise<boolean>;
   planChat: ChatState;
   sendPlan: (text: string, files?: api.FileRef[], day?: string) => Promise<boolean>;
+  /** The chat of an item, by its key, or of a mission, by missionChatKey(). */
   itemChat: (key: string) => ChatState;
   askItem: (key: string, text: string, files: api.FileRef[]) => Promise<boolean>;
+  /** Loads the old messages of an item or mission chat, one time. */
+  loadItemChat: (key: string) => void;
 
   /** The model of each chat box. null: the default model. */
   models: { main: string | null; plan: string | null; item: string | null };
@@ -143,10 +156,47 @@ export type AppCtx = {
   setReviewCard: (card: "day" | "week", mode: CardMode) => void;
   /** Loads the tasks, the plan, the goals, and the "waiting for" list again, after a change that touches them all. */
   reload: () => void;
+  /** Reads the saved ClickUp list again, for example after the question
+   * chat marked a ClickUp task done. */
+  reloadClickup: () => void;
+  /** The question talk on the home page that stays on the screen after
+   * AIfred's answer, until you go on: the key and the title of its item.
+   * null: the card shows the next question. */
+  talk: Talk | null;
+  setTalk: (t: Talk | null) => void;
+  /** The questions that you skipped on the home page. They go at once,
+   * before the brief loads again. */
+  skipped: string[];
+  setSkipped: (f: (s: string[]) => string[]) => void;
+  /** Notes that you answered a question of the brief on the screen. After
+   * the last question, AIfred writes the brief and missions again. */
+  noteAnswer: () => void;
   goPlan: () => void;
   /** Opens the Tasks page. */
   goTasks: () => void;
 };
+
+/** The items that today's brief asks about now, less the ones that you
+ * skipped on this screen. An item that is not in the lists is asked about
+ * only when its list failed to load: the brief gives its title, and the
+ * missions wait for the answer. Else it is closed, or its list still loads.
+ * Empty when the brief is not today's. The question card and the step that
+ * writes a held brief again use this one rule, so they agree. */
+export function openQuestions(
+  brief: api.Brief | null,
+  byKey: Map<string, Item>,
+  today: string,
+  skipped: string[],
+  githubState: ListState,
+  clickupState: ListState,
+): string[] {
+  const failed = (k: string) => {
+    const state = k.startsWith("github:") ? githubState : k.startsWith("clickup:") ? clickupState : "ok";
+    return !["loading", "ok", "off"].includes(state);
+  };
+  if (brief?.day !== today) return [];
+  return (brief.ask ?? []).filter((k) => !skipped.includes(k) && (byKey.has(k) ? !byKey.get(k)!.done : failed(k)));
+}
 
 export const Ctx = createContext<AppCtx>(null!);
 export const useApp = () => useContext(Ctx);

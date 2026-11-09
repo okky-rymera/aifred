@@ -16,6 +16,10 @@ const SOURCE: &str = "clickup";
 /// 1: tasks in a "done" status are left out. Older lists can have them.
 const VERSION: u32 = 1;
 
+/// How long the notes of note_closed stay, in seconds. The undo works only
+/// on the day of the close: 2 days is enough for a day that ends late.
+const KEEP_CLOSED: u64 = 2 * 24 * 3600;
+
 /// What the window shows.
 #[derive(Debug, Serialize)]
 pub struct ClickupList {
@@ -100,6 +104,63 @@ impl ClickupStore {
             db::save_list(tx, SOURCE, account, &rows, &fetched.cut, VERSION, now)
         })?;
         Ok(view(fetched.items, now, &fetched.cut))
+    }
+
+    /// Notes that the question chat of the item `chat` marked the task `id`
+    /// done, and its status from before. reopen_task uses it
+    /// (closed_status). The undo works only on the same day, so it also
+    /// removes the notes older than KEEP_CLOSED.
+    pub fn note_closed(&self, id: &str, before: &str, chat: &str, now: u64) -> anyhow::Result<()> {
+        db::write(&self.dir, |tx| {
+            tx.execute(
+                "DELETE FROM clickup_closed WHERE ts < ?1",
+                [now.saturating_sub(KEEP_CLOSED) as i64],
+            )?;
+            tx.execute(
+                "INSERT INTO clickup_closed (id, before, ts, chat) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (id) DO UPDATE SET before = ?2, ts = ?3, chat = ?4",
+                rusqlite::params![id.trim(), before, now as i64, chat.trim()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The status from before of a task that the question chat marked
+    /// done (note_closed). None: AIfred did not close it.
+    pub fn closed_status(&self, id: &str) -> anyhow::Result<Option<String>> {
+        db::read(&self.dir, |c| {
+            Ok(c.query_row(
+                "SELECT before FROM clickup_closed WHERE id = ?1",
+                [id.trim()],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
+    }
+
+    /// The tasks that the question chat of the item `chat` can put back (the
+    /// undo), oldest first: the tasks that this chat marked done at `since`
+    /// or later, and the task of the chat itself when a chat closed it then.
+    /// Another chat cannot put back a task that it did not close: the text
+    /// of its item comes from other people.
+    pub fn closed_since(&self, since: u64, chat: &str) -> anyhow::Result<Vec<String>> {
+        db::read(&self.dir, |c| {
+            let mut q = c.prepare(
+                "SELECT id FROM clickup_closed
+                 WHERE ts >= ?1 AND (chat = ?2 OR 'clickup:' || id = ?2)
+                 ORDER BY ts, id",
+            )?;
+            let rows = q.query_map(rusqlite::params![since as i64, chat.trim()], |r| r.get(0))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+    }
+
+    /// Forgets the close of `id`, after the undo put the task back.
+    pub fn forget_closed(&self, id: &str) -> anyhow::Result<()> {
+        db::write(&self.dir, |tx| {
+            tx.execute("DELETE FROM clickup_closed WHERE id = ?1", [id.trim()])?;
+            Ok(())
+        })
     }
 
     /// Takes one task out of the saved list, after the user marked it done.
@@ -217,6 +278,55 @@ pub(crate) mod tests {
 
     fn tasks(items: Vec<ClickupItem>) -> MyTasks {
         MyTasks { items, cut: vec![] }
+    }
+
+    #[test]
+    fn the_closes_of_the_question_chat_are_kept_for_the_undo() {
+        let d = temp("closed");
+        let s = ClickupStore::new(&d);
+        assert_eq!(s.closed_status("c1").unwrap(), None);
+        s.note_closed("c1", "in progress", "clickup:c1", 100)
+            .unwrap();
+        s.note_closed("c2", "to do", "clickup:c1", 50).unwrap();
+        s.note_closed("c3", "to do", "task:t9", 80).unwrap();
+        assert_eq!(
+            s.closed_status(" c1 ").unwrap().as_deref(),
+            Some("in progress")
+        );
+        assert_eq!(
+            s.closed_since(60, "clickup:c1").unwrap(),
+            vec!["c1".to_string()]
+        );
+        assert_eq!(
+            s.closed_since(0, "clickup:c1").unwrap(),
+            vec!["c2".to_string(), "c1".to_string()]
+        );
+        // Another chat cannot put back what it did not close. The chat of
+        // c3 can put back c3, also when another chat closed it.
+        assert_eq!(
+            s.closed_since(0, "github:a/b#1").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            s.closed_since(0, "task:t9").unwrap(),
+            vec!["c3".to_string()]
+        );
+        assert_eq!(
+            s.closed_since(0, "clickup:c3").unwrap(),
+            vec!["c3".to_string()]
+        );
+        // A new close removes the notes older than KEEP_CLOSED.
+        s.note_closed("c4", "to do", "clickup:c4", 100 + KEEP_CLOSED - 10)
+            .unwrap();
+        assert_eq!(s.closed_status("c2").unwrap(), None);
+        assert_eq!(s.closed_status("c3").unwrap(), None);
+        assert_eq!(
+            s.closed_status("c1").unwrap().as_deref(),
+            Some("in progress")
+        );
+        s.forget_closed("c1").unwrap();
+        assert_eq!(s.closed_status("c1").unwrap(), None);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

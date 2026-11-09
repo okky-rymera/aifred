@@ -211,10 +211,18 @@ export type Brief = {
   moves?: Moved[];
   /** The count of older moves that `moves` does not give: it gives only the newest. */
   moves_more?: number;
-  /** The items that AIfred cannot rank, at most 3. "Help AIfred understand" asks about them. */
+  /** The items that AIfred has questions about, at most 5 (context::MAX_ASK). "Help AIfred understand" asks about them. */
   ask?: string[];
   /** The question about the items in `ask` (context::QUESTION in Rust). */
   question?: string;
+  /** AIfred's open questions about each item in `ask`, the next one first.
+   * An item with no list gets `question`. */
+  questions?: Record<string, string[]>;
+  /** True: the brief has no missions until you answer the questions in
+   * `ask`. With no questions left, the app writes the brief again. */
+  held?: boolean;
+  /** The title of each item in `ask`, also when its list did not load. */
+  titles?: Record<string, string>;
 };
 
 /** One move of AIfred: `key` is now a subtask of `main`, for the reason `why`. */
@@ -305,7 +313,8 @@ export const estimates = () => invoke<Record<string, Estimate>>("estimates");
 export const setEstimate = (key: string, minutes: number | null) => invoke<void>("set_estimate", { key, minutes });
 export const brief = (day: string) => invoke<Brief | null>("brief", { day });
 /** One AI call. */
-export const writeBrief = (day: string) => invoke<Brief>("write_brief", { day });
+/** `release` true: the brief of `day` stops holding its missions for the questions. */
+export const writeBrief = (day: string, release = false) => invoke<Brief>("write_brief", { day, release });
 export const itemMeta = () => invoke<ItemMeta[]>("item_meta");
 
 /** "not_today": the item does not need you today. "wrong_priority": the brief ranked it too high. */
@@ -430,8 +439,9 @@ export const setJobStatus = (id: string, status: "active" | "paused") => invoke<
 export const deleteJob = (id: string) => invoke<void>("delete_job", { id });
 export const itemDetails = (key: string) => invoke<ItemDetails>("item_details", { key });
 
-/** AIfred's short notes about one item, from your answers (context.rs). */
-export type ItemContext = { key: string; text: string; by: "you" | "aifred"; updated: number };
+/** AIfred's short notes about one item, from your answers or from AIfred's own look-up (context.rs). */
+/** `by`: "lookup" when AIfred wrote the notes from the item text before the brief. */
+export type ItemContext = { key: string; text: string; by: "you" | "aifred" | "lookup"; updated: number };
 /** Loads AIfred's notes about one item. null: the item has no notes. */
 export const itemContext = (key: string) => invoke<ItemContext | null>("item_context", { key });
 /** Saves your notes. "" clears them. It gives the notes from before, for the Undo. */

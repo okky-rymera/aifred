@@ -463,6 +463,38 @@ fn get_in(c: &Connection, id: i64) -> anyhow::Result<Mission> {
         .ok_or_else(|| anyhow::anyhow!("AIfred does not know the mission {id}"))
 }
 
+/// One mission, open or done.
+pub fn get(dir: &Path, id: i64) -> anyhow::Result<Mission> {
+    db::read(dir, |c| get_in(c, id))
+}
+
+/// The text about one mission that goes into a message of its chat: the
+/// mission with its items, its checklist and its progress, and the user's
+/// notes about each item (context.rs). It has no item description: other
+/// people write those, so the AI reads them with its tools, as in the main chat.
+pub fn chat_context(dir: &Path, id: i64) -> anyhow::Result<String> {
+    let m = get(dir, id)?;
+    let mut notes = String::new();
+    for i in &m.items {
+        if let Some(n) = crate::context::get(dir, &i.key)? {
+            notes.push_str(&format!(
+                "- {} ({}): {}\n",
+                i.key,
+                crate::context::notes_label(&n.by),
+                one_line(&n.text, 600)
+            ));
+        }
+    }
+    let notes = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[Task context: your notes about the items. Each line says where the notes come from.]\n{notes}"
+        )
+    };
+    Ok(format!("{}\n{notes}", json!(m)))
+}
+
 /// The missions of the brief of `day`, in rank order. A mission with an
 /// item that the user corrected on that day (learn.rs) is not in the list.
 pub fn today(dir: &Path, day: &str) -> anyhow::Result<Vec<Mission>> {

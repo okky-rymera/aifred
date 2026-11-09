@@ -4,7 +4,10 @@
 //! ($AIFRED_HOME, or ~/.aifred), or from AIFRED_CLICKUP_TOKEN. The token never
 //! goes into the tool settings file that Claude reads.
 //!
-//! These tools only read. The user marks ClickUp tasks done in the window.
+//! These tools only read, with one exception: the question chat on the home
+//! page (QUESTION_CHAT_ENV) can mark a task that the home page asks about
+//! done when the user says it is finished, and put the status from before back. The user also marks
+//! ClickUp tasks done in the window.
 //!
 //! my_tasks uses the list that the window saved in the database while it is
 //! new enough, and saves each new list it gets from ClickUp. search_my_tasks
@@ -51,6 +54,31 @@ struct SearchArgs {
 struct DetailArgs {
     /// ClickUp task id from my_tasks (for example "86abc123"), or the team's custom id (for example "DEV-42").
     id: String,
+}
+
+/// An error unless the question chat of the home page started this server
+/// and `id` is in the list of the env value `var` (one task id on each
+/// line): QUESTION_CHAT_ENV for mark_task_done (the tasks that the home page
+/// asks about now), QUESTION_REOPEN_ENV for reopen_task (the tasks that the
+/// question chat closed today). Other chats get
+/// item text from other people, and that text must not close tasks.
+fn check_question_chat(var: &str, id: &str) -> Result<(), ErrorData> {
+    let allowed = std::env::var(var).unwrap_or_default();
+    if allowed.lines().any(|t| t.trim() == id.trim()) {
+        Ok(())
+    } else {
+        Err(ErrorData::invalid_request(
+            "Only the question chat on the home page can change ClickUp, and only the tasks that it asks about. Tell the user to mark the task done in AIfred or in ClickUp.",
+            None,
+        ))
+    }
+}
+
+/// The task id in `id`. The overview and the chat show tasks as
+/// "clickup:<id>": the AI can give the key in place of the id.
+fn task_id(id: &str) -> &str {
+    let id = id.trim();
+    id.strip_prefix("clickup:").unwrap_or(id).trim()
 }
 
 fn fail(e: anyhow::Error) -> ErrorData {
@@ -180,6 +208,60 @@ impl ClickupTools {
         }
         ok_json(&short)
     }
+
+    #[tool(
+        description = "Mark one ClickUp task done: it moves to the closed status of its list. Use it only when the user's own words say that the task is finished. The answer has `before`, the status from before. reopen_task with the same id is the undo."
+    )]
+    async fn mark_task_done(
+        &self,
+        Parameters(a): Parameters<DetailArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = task_id(&a.id);
+        check_question_chat(aifred_core::assistant::QUESTION_CHAT_ENV, id)?;
+        clickup::check_task_id(id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let before = self.client()?.mark_done(id).await.map_err(fail)?;
+        // The undo (reopen_task) needs this note, with the chat that closed
+        // the task. ClickUp has the change, so a failed note is not an
+        // error: the user can open the task again in ClickUp.
+        let chat = std::env::var(aifred_core::assistant::QUESTION_ITEM_ENV).unwrap_or_default();
+        if let Err(e) = ClickupStore::new(&self.dir).note_closed(id, &before, &chat, now()) {
+            eprintln!("aifred-clickup-mcp: cannot note the close for the undo: {e:#}");
+        }
+        // ClickUp has the change. The saved list shows the task until the
+        // next download when this fails, so it is not an error.
+        if let Err(e) = ClickupStore::new(&self.dir).remove(id) {
+            eprintln!("aifred-clickup-mcp: cannot update the saved ClickUp list: {e:#}");
+        }
+        ok_json(&json!({ "id": id, "done": true, "before": before }))
+    }
+
+    #[tool(
+        description = "Undo mark_task_done: put a ClickUp task that you marked done back to its status from before. Use it only when the user asks for the undo."
+    )]
+    async fn reopen_task(
+        &self,
+        Parameters(a): Parameters<DetailArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = task_id(&a.id);
+        check_question_chat(aifred_core::assistant::QUESTION_REOPEN_ENV, id)?;
+        clickup::check_task_id(id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        // Only the status that AIfred saved when it closed the task. So the
+        // AI cannot give another status, for example a closed one.
+        let store = ClickupStore::new(&self.dir);
+        let Some(status) = store.closed_status(id).map_err(fail)? else {
+            return Err(ErrorData::invalid_request(
+                "AIfred did not mark this task done, so it cannot undo it. Tell the user to change the task in ClickUp.",
+                None,
+            ));
+        };
+        self.client()?.set_status(id, &status).await.map_err(fail)?;
+        if let Err(e) = store.forget_closed(id) {
+            eprintln!("aifred-clickup-mcp: cannot forget the close: {e:#}");
+        }
+        ok_json(
+            &json!({ "id": id, "status": status, "note": "The task shows again after the next download of the ClickUp list." }),
+        )
+    }
 }
 
 #[tool_handler]
@@ -265,6 +347,13 @@ mod tests {
             "the newest comment stays"
         );
         assert!(s.get("custom_fields").is_none());
+    }
+
+    #[test]
+    fn task_id_takes_the_id_out_of_an_item_key() {
+        assert_eq!(task_id("clickup:86abc"), "86abc");
+        assert_eq!(task_id(" 86abc "), "86abc");
+        assert_eq!(task_id("DEV-42"), "DEV-42");
     }
 
     #[tokio::test]

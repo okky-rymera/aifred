@@ -256,6 +256,7 @@ mod tests {
             std::slice::from_ref(&side),
             "ok",
             "",
+            false,
         )
         .unwrap();
         assert_eq!(sweep(&d, KEEP_UNUSED).unwrap(), 0, "new files stay");

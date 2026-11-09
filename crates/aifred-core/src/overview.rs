@@ -28,7 +28,8 @@
 //! a mission when its work stays the same.
 //!
 //! Each item with a task context (context.rs) has `context`: AIfred's short
-//! notes about it, from the user's own answers.
+//! notes about it, from the user's answers or from AIfred's own look-up
+//! (then also `context_from: "lookup"`).
 
 use std::path::Path;
 
@@ -232,11 +233,12 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
 /// Puts `parent` and `context` into each item of a list of items (tasks,
 /// GitHub, ClickUp, email) that has one in `parents` or `notes`. Only these
 /// lists get them: a correction or a review pick also has a `key`, but it
-/// is not an item.
+/// is not an item. Notes from AIfred's own look-up also get
+/// `context_from: "lookup"`: they come from text that other people wrote.
 fn add_parent_and_notes(
     items: &mut [Value],
     parents: &std::collections::HashMap<String, String>,
-    notes: &std::collections::HashMap<String, String>,
+    notes: &std::collections::HashMap<String, (String, String)>,
 ) {
     for v in items {
         let Some(k) = v["key"].as_str() else {
@@ -246,8 +248,11 @@ fn add_parent_and_notes(
         if let Some(p) = p {
             v["parent"] = p.into();
         }
-        if let Some(n) = n {
-            v["context"] = n.into();
+        if let Some((text, by)) = n {
+            v["context"] = text.into();
+            if by == crate::context::LOOKUP {
+                v["context_from"] = crate::context::LOOKUP.into();
+            }
         }
     }
 }

@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 27;
+const VERSION: i64 = 31;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -809,7 +809,8 @@ CREATE INDEX link_move_by_key ON link_move(key, id);
 ";
 
 /// Task context (context.rs): AIfred's short notes about one
-/// item, from the user's answers. `context_skip` has the items that the
+/// item, from the user's answers (by "you" or "aifred") or from AIfred's own
+/// look-up (by "lookup"). `context_skip` has the items that the
 /// user did not want to explain: AIfred does not ask about them again.
 /// `brief.ask` has the items that the brief of the day asks about.
 const SCHEMA_27: &str = "
@@ -824,6 +825,52 @@ CREATE TABLE context_skip (
   ts  INTEGER NOT NULL
 );
 ALTER TABLE brief ADD COLUMN ask TEXT NOT NULL DEFAULT '[]';  -- [\"<item key>\"]
+";
+
+/// The first brief of a day with questions (`brief.ask`) holds its
+/// missions until the user answers (brief.rs).
+const SCHEMA_28: &str = "
+ALTER TABLE brief ADD COLUMN hold INTEGER NOT NULL DEFAULT 0; -- 0: never held, 1: holds now, 2: held before
+";
+
+/// AIfred's open questions about one item (context.rs), from its own look
+/// at the item before the brief, and from the question chat.
+const SCHEMA_29: &str = "
+CREATE TABLE item_question (
+  key       TEXT PRIMARY KEY,           -- the item key
+  questions TEXT NOT NULL DEFAULT '[]', -- [\"<question>\"], the next one first
+  known     TEXT NOT NULL DEFAULT '',   -- what AIfred found out itself
+  updated   INTEGER NOT NULL
+);
+";
+
+/// The ClickUp tasks that the question chat marked done (clickup_list.rs),
+/// with the status from before. reopen_task can put back only these tasks,
+/// and only to this status.
+const SCHEMA_30: &str = "
+CREATE TABLE clickup_closed (
+  id     TEXT PRIMARY KEY, -- the task id, as the AI gave it to mark_task_done
+  before TEXT NOT NULL,    -- the status from before
+  ts     INTEGER NOT NULL  -- when AIfred closed it, in Unix seconds
+);
+";
+
+/// - `clickup_closed.chat`: the item of the question chat that closed the
+///   task. Only that chat can put it back (reopen_task).
+/// - `side_turn.question`: 1 on a message of the question chat of the home
+///   page (side::question_since). Before, it was only in `meta`.
+/// - `item_lookup`: the failed look-ups of one item (context.rs). The next
+///   look-up of the item waits longer after each failure.
+const SCHEMA_31: &str = "
+ALTER TABLE clickup_closed ADD COLUMN chat TEXT NOT NULL DEFAULT ''; -- the item key of the chat
+ALTER TABLE side_turn ADD COLUMN question INTEGER NOT NULL DEFAULT 0;
+UPDATE side_turn SET question = 1 WHERE role = 'user' AND meta LIKE '%\"question\":true%';
+CREATE TABLE item_lookup (
+  key    TEXT PRIMARY KEY,           -- the item key
+  misses INTEGER NOT NULL DEFAULT 0, -- answers with no usable part about this item
+  fails  INTEGER NOT NULL DEFAULT 0, -- all failed look-ups, also failed calls
+  next   INTEGER NOT NULL            -- no look-up before this time, in Unix seconds
+);
 ";
 
 pub fn path(dir: &Path) -> PathBuf {
@@ -977,6 +1024,18 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 27 {
         tx.execute_batch(SCHEMA_27)?;
+    }
+    if version < 28 {
+        tx.execute_batch(SCHEMA_28)?;
+    }
+    if version < 29 {
+        tx.execute_batch(SCHEMA_29)?;
+    }
+    if version < 30 {
+        tx.execute_batch(SCHEMA_30)?;
+    }
+    if version < 31 {
+        tx.execute_batch(SCHEMA_31)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -1454,6 +1513,57 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(fixed, ["clickup:c1", "clickup:top", "github:a/b#1"]);
         drop(q);
+        drop(c);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_update_to_31_keeps_the_marks_of_the_question_chat() {
+        let d = temp("v31");
+        let vec_dir = temp("v31-vec");
+        drop(open(&vec_dir).unwrap());
+        std::fs::remove_dir_all(&vec_dir).unwrap();
+        let c = Connection::open(path(&d)).unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        c.execute_batch(
+            &[
+                SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4, SCHEMA_5, SCHEMA_6, SCHEMA_7, SCHEMA_8,
+                SCHEMA_9, SCHEMA_10, SCHEMA_11, SCHEMA_12, SCHEMA_13, SCHEMA_14, SCHEMA_15,
+                SCHEMA_16, SCHEMA_17, SCHEMA_18, SCHEMA_19, SCHEMA_20, SCHEMA_21, SCHEMA_22,
+                SCHEMA_23, SCHEMA_24, SCHEMA_25, SCHEMA_26, SCHEMA_27, SCHEMA_28, SCHEMA_29,
+                SCHEMA_30,
+            ]
+            .concat(),
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 30).unwrap();
+        c.execute_batch(
+            r#"INSERT INTO side_turn (thread, ts, role, text, meta) VALUES
+                 ('item:task:t1', 5, 'user', 'q', '{"question":true}'),
+                 ('item:task:t1', 5, 'assistant', 'a', '{"info":"x"}'),
+                 ('item:task:t2', 6, 'user', 'q', '{}');
+               INSERT INTO clickup_closed (id, before, ts) VALUES ('c1', 'to do', 7);"#,
+        )
+        .unwrap();
+        drop(c);
+
+        let c = open(&d).unwrap();
+        let mut q = c
+            .prepare("SELECT thread FROM side_turn WHERE question = 1")
+            .unwrap();
+        let marked: Vec<String> = q
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(marked, ["item:task:t1"]);
+        drop(q);
+        let chat: String = c
+            .query_row("SELECT chat FROM clickup_closed WHERE id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(chat, "");
         drop(c);
         std::fs::remove_dir_all(&d).unwrap();
     }
