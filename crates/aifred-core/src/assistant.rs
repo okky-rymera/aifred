@@ -102,6 +102,7 @@ You are aifred, the user's personal assistant.
 - ClickUp is read-only for you. The user marks ClickUp tasks done in the AIfred to-do list. Only the question chat of the home page can mark the ClickUp tasks that it asks about done, when the user says that they are finished.
 - Search memory before you say that you do not know something about the user.
 - Add a fact to memory only when the user tells you something lasting about themselves or their work. Do not add a fact that is already in memory.
+- Give each new fact 1 to 3 tags: short topic words, for example \"testing\", \"people\", or \"workflow\". Use the tags that exist (memory_tags) when one fits. Make a new tag only when no tag fits.
 - Search old chats when the user refers to an earlier conversation.
 - When the user asks what to do, what is open, or for a plan, call overview first. It has all open items with a short summary each. Open the details of an item only when its summary is not enough.
 - When the user asks about a topic, use search_tasks, search_my_items, or search_my_tasks.
@@ -241,8 +242,16 @@ fn system_prompt(dir: &Path, small: bool) -> anyhow::Result<String> {
     } else {
         memory.core_text()?
     };
+    // A large memory: the other facts have tags. Only this fixed line, not
+    // the tag names: a new tag would change the instructions in the middle
+    // of a chat. The memory_tags tool lists the names.
+    let tags = if small {
+        ""
+    } else {
+        "\nThe facts in memory have tags. Use memory_tags to list them and facts_with_tag to read all facts with one tag."
+    };
     Ok(format!(
-        "{BASE_RULES}\n\n# What you know about the user\nSearch memory for facts that are not here.\n{facts}"
+        "{BASE_RULES}\n\n# What you know about the user\nSearch memory for facts that are not here.{tags}\n{facts}"
     ))
 }
 
@@ -694,11 +703,19 @@ impl<B: Backend> Assistant<B> {
                 "memory",
                 home(),
                 if read_only {
-                    &["search_memory", "search_history"]
+                    &[
+                        "search_memory",
+                        "memory_tags",
+                        "facts_with_tag",
+                        "search_history",
+                    ]
                 } else {
                     &[
                         "search_memory",
+                        "memory_tags",
+                        "facts_with_tag",
                         "add_memory",
+                        "tag_memory",
                         "forget_memory",
                         "search_history",
                     ]
@@ -1890,7 +1907,21 @@ mod tests {
             a.memory().add(&format!("Fact number {i} about the garden and the old shed in the yard behind the house"), "aifred", false).unwrap();
         }
         assert!(!memory_is_small(&a.dir).unwrap());
+        let no_tags = system_prompt(&a.dir, false).unwrap();
+        assert!(no_tags.contains("Use memory_tags to list them"));
+        a.memory()
+            .add_tagged(
+                "The QA lead is Zara",
+                "aifred",
+                false,
+                &["people".into(), "testing".into()],
+            )
+            .unwrap();
         let before = system_prompt(&a.dir, false).unwrap();
+        assert_eq!(
+            before, no_tags,
+            "a new tag does not change the instructions"
+        );
         assert!(before.contains("- I like tea"), "core facts stay");
         assert!(
             !before.contains("invoice"),

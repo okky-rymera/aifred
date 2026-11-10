@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 31;
+const VERSION: i64 = 33;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -873,6 +873,61 @@ CREATE TABLE item_lookup (
 );
 ";
 
+/// Tags on memory facts (memory.rs): a fact can have several tags, and the
+/// AI can read all facts with one tag. The tags are a JSON list, like the tags
+/// of local tasks.
+const SCHEMA_32: &str = "
+ALTER TABLE memory ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'; -- [\"testing\", \"people\"]
+";
+
+/// The id of a fact that was deleted for good is never used again
+/// (AUTOINCREMENT). Old chat answers and the learned table can still have
+/// the id, and a new fact with that id would get their changes.
+/// SQLite cannot add AUTOINCREMENT to a table, so this makes the table
+/// again with the same ids. The drop also removes the triggers, so they are
+/// made again. The counter starts after the highest id that the memory
+/// table or the learned table has.
+const SCHEMA_33: &str = "
+CREATE TABLE memory_new (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  text      TEXT NOT NULL,
+  style     TEXT NOT NULL,
+  pos       INTEGER NOT NULL,
+  core      INTEGER NOT NULL DEFAULT 1,
+  added_by  TEXT NOT NULL,
+  created   INTEGER NOT NULL,
+  updated   INTEGER NOT NULL,
+  forgotten INTEGER,
+  tags      TEXT NOT NULL DEFAULT '[]'
+);
+INSERT INTO memory_new (id, text, style, pos, core, added_by, created, updated, forgotten, tags)
+  SELECT id, text, style, pos, core, added_by, created, updated, forgotten, tags FROM memory;
+DROP TABLE memory;
+ALTER TABLE memory_new RENAME TO memory;
+INSERT INTO sqlite_sequence (name, seq)
+  SELECT 'memory', 0 WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'memory');
+UPDATE sqlite_sequence SET seq = max(seq,
+    (SELECT COALESCE(MAX(id), 0) FROM memory),
+    (SELECT COALESCE(MAX(fact), 0) FROM learned))
+  WHERE name = 'memory';
+CREATE TRIGGER memory_fts_insert AFTER INSERT ON memory BEGIN
+  INSERT INTO memory_fts (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER memory_fts_delete AFTER DELETE ON memory BEGIN
+  INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER memory_fts_update AFTER UPDATE OF text ON memory BEGIN
+  INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', old.id, old.text);
+  INSERT INTO memory_fts (rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER memory_vec_delete AFTER DELETE ON memory BEGIN
+  DELETE FROM memory_vec WHERE rowid = old.id;
+END;
+CREATE TRIGGER memory_vec_update AFTER UPDATE OF text ON memory WHEN old.text IS NOT new.text BEGIN
+  DELETE FROM memory_vec WHERE rowid = old.id;
+END;
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -1036,6 +1091,12 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 31 {
         tx.execute_batch(SCHEMA_31)?;
+    }
+    if version < 32 {
+        tx.execute_batch(SCHEMA_32)?;
+    }
+    if version < 33 {
+        tx.execute_batch(SCHEMA_33)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -1618,6 +1679,80 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(fixed, ["clickup:c1", "github:a/b#1"]);
         drop(q);
+        drop(c);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn version_33_keeps_the_fact_ids_and_never_uses_an_id_again() {
+        let d = temp("v33");
+        // Load sqlite-vec into new connections, then make a version 32 file by hand.
+        let vec_dir = temp("v33-vec");
+        drop(open(&vec_dir).unwrap());
+        std::fs::remove_dir_all(&vec_dir).unwrap();
+        let c = Connection::open(path(&d)).unwrap();
+        c.pragma_update(None, "foreign_keys", true).unwrap();
+        c.execute_batch(
+            &[
+                SCHEMA_1, SCHEMA_2, SCHEMA_3, SCHEMA_4, SCHEMA_5, SCHEMA_6, SCHEMA_7, SCHEMA_8,
+                SCHEMA_9, SCHEMA_10, SCHEMA_11, SCHEMA_12, SCHEMA_13, SCHEMA_14, SCHEMA_15,
+                SCHEMA_16, SCHEMA_17, SCHEMA_18, SCHEMA_19, SCHEMA_20, SCHEMA_21, SCHEMA_22,
+                SCHEMA_23, SCHEMA_24, SCHEMA_25, SCHEMA_26, SCHEMA_27, SCHEMA_28, SCHEMA_29,
+                SCHEMA_30, SCHEMA_31, SCHEMA_32,
+            ]
+            .concat(),
+        )
+        .unwrap();
+        c.pragma_update(None, "user_version", 32).unwrap();
+        c.execute_batch(
+            r#"INSERT INTO memory (id, text, style, pos, core, added_by, created, updated, tags) VALUES
+                 (1, 'I like tea', 'item', 0, 1, 'you', 1, 1, '["drinks"]'),
+                 (4, 'Sam sends the invoice', 'item', 1, 0, 'you', 1, 1, '[]');
+               INSERT INTO learned (place, fact, correction, ts) VALUES ('GitHub acme/docs', 7, 1, 1);"#,
+        )
+        .unwrap();
+        drop(c);
+
+        let c = open(&d).unwrap();
+        let tags: String = c
+            .query_row("SELECT tags FROM memory WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tags, r#"["drinks"]"#, "the rows keep their ids and columns");
+        let found: i64 = c
+            .query_row(
+                "SELECT rowid FROM memory_fts WHERE memory_fts MATCH 'invoices'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 4, "the word search still finds the fact");
+        // The next id comes after the highest id in memory and learned.
+        c.execute(
+            "INSERT INTO memory (text, style, pos, added_by, created, updated) VALUES ('new', 'item', 2, 'you', 1, 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(c.last_insert_rowid(), 8);
+        // The triggers work on the new table: a deleted fact leaves no search row.
+        c.execute("DELETE FROM memory WHERE id = 8", []).unwrap();
+        let rows: i64 = c
+            .query_row(
+                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+        c.execute(
+            "INSERT INTO memory (text, style, pos, added_by, created, updated) VALUES ('next', 'item', 2, 'you', 1, 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            c.last_insert_rowid(),
+            9,
+            "the deleted id 8 is not used again"
+        );
         drop(c);
         std::fs::remove_dir_all(&d).unwrap();
     }

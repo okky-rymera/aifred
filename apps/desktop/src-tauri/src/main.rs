@@ -498,9 +498,22 @@ async fn set_fact_core(app: State<'_, App>, id: i64, core: bool) -> CmdResult<Fa
     blocking(&app, move |a| a.memory().set_core(id, core)).await
 }
 
+/// Replaces the tags of a fact. An empty list removes them.
+#[tauri::command]
+async fn set_fact_tags(app: State<'_, App>, id: i64, tags: Vec<String>) -> CmdResult<Fact> {
+    blocking(&app, move |a| a.memory().set_tags(id, &tags)).await
+}
+
 #[tauri::command]
 async fn forget_fact(app: State<'_, App>, id: i64) -> CmdResult<Fact> {
     blocking(&app, move |a| a.memory().forget(id)).await
+}
+
+/// Deletes a forgotten fact for good. False: the fact is deleted, but the
+/// database file could not be cleaned yet (memory::MemoryStore::delete).
+#[tauri::command]
+async fn delete_fact(app: State<'_, App>, id: i64) -> CmdResult<bool> {
+    blocking(&app, move |a| a.memory().delete(id)).await
 }
 
 #[tauri::command]
@@ -1835,7 +1848,9 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         confirm_goals,
         edit_fact,
         set_fact_core,
+        set_fact_tags,
         forget_fact,
+        delete_fact,
         restore_fact,
         new_conversation,
         tasks,
@@ -2742,12 +2757,27 @@ mod tests {
         )
         .unwrap();
         call(&win, "set_fact_core", json!({ "id": id, "core": false })).unwrap();
+        let tagged = call(
+            &win,
+            "set_fact_tags",
+            json!({ "id": id, "tags": ["Style", "#answers"] }),
+        )
+        .unwrap();
+        assert_eq!(tagged["tags"], json!(["style", "answers"]));
         call(&win, "forget_fact", json!({ "id": id })).unwrap();
         let all = call(&win, "memory_facts", json!({})).unwrap();
         assert_eq!(all[0]["text"], "I like very short answers.");
         assert_eq!(all[0]["core"], false);
         assert!(all[0]["forgotten"].is_number());
         assert!(call(&win, "restore_fact", json!({ "id": id })).unwrap()["forgotten"].is_null());
+        assert!(
+            call(&win, "delete_fact", json!({ "id": id })).is_err(),
+            "a fact in use is not deleted"
+        );
+        call(&win, "forget_fact", json!({ "id": id })).unwrap();
+        call(&win, "delete_fact", json!({ "id": id })).unwrap();
+        assert_eq!(call(&win, "memory_facts", json!({})).unwrap(), json!([]));
+        call(&win, "add_fact", json!({ "text": "I like tea." })).unwrap();
         assert!(call(&win, "edit_fact", json!({ "id": 999, "text": "x" })).is_err());
         assert_eq!(call(&win, "history", json!({})).unwrap(), json!([]));
         call(&win, "new_conversation", json!({})).unwrap();

@@ -66,6 +66,10 @@ export type Fake = {
   /** Runs after edit_goal changes the goal and before it answers. A test
    * can hold the answer with it, so the answer comes after a later change. */
   onEditGoal?: () => Promise<void> | void;
+  /** Runs before set_fact_tags saves. A test can hold the save with it. */
+  onSetFactTags?: () => Promise<void> | void;
+  /** Runs before edit_fact saves. A test can hold the save with it. */
+  onEditFact?: () => Promise<void> | void;
   /** Runs after gmail_threads makes its list and before it answers. A test
    * can hold the answer with it, so the answer comes after a later change. */
   onGmailThreads?: () => Promise<void> | void;
@@ -293,7 +297,7 @@ function applyChanges(t: Task, c: TaskChanges) {
 
 export function fact(text: string, extra: Partial<Fact> = {}): Fact {
   const n = nextId++;
-  return { id: n, text, core: true, added_by: "you", created: nowSecs(), updated: nowSecs(), forgotten: null, ...extra };
+  return { id: n, text, core: true, added_by: "you", created: nowSecs(), updated: nowSecs(), forgotten: null, tags: [], ...extra };
 }
 
 export function githubItem(n: number, reason: GithubItem["reason"], title = `Item ${n}`): GithubItem {
@@ -724,6 +728,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         return structuredClone(f);
       }
       case "edit_fact": {
+        await fake.onEditFact?.();
         const f = findFact(args.id);
         f.text = factText(args.text);
         return structuredClone(f);
@@ -733,10 +738,32 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         f.core = args.core;
         return structuredClone(f);
       }
+      case "set_fact_tags": {
+        // Like memory::clean_tags: a comma splits a tag, at most 40
+        // characters for each tag and 5 tags.
+        await fake.onSetFactTags?.();
+        const f = findFact(args.id);
+        const tags: string[] = [];
+        for (const t of (args.tags as string[]).flatMap((x) => x.split(","))) {
+          const c = t.trim().replace(/^#+/, "").trim().split(/\s+/).filter(Boolean).join("-").toLowerCase();
+          if (!c || tags.includes(c)) continue;
+          if ([...c].length > 40) throw `the tag "${c}" is longer than 40 characters`;
+          tags.push(c);
+        }
+        if (tags.length > 5) throw "a fact can have at most 5 tags";
+        f.tags = tags;
+        return structuredClone(f);
+      }
       case "forget_fact": {
         const f = findFact(args.id);
         f.forgotten ??= nowSecs();
         return structuredClone(f);
+      }
+      case "delete_fact": {
+        const f = findFact(args.id);
+        if (f.forgotten === null) throw `fact ${args.id} is in use: forget it first`;
+        fake.memory = fake.memory.filter((x) => x.id !== args.id);
+        return true;
       }
       case "restore_fact": {
         const f = findFact(args.id);

@@ -56,6 +56,8 @@ export type Fact = {
   updated: number;
   /** When the fact was forgotten, in Unix seconds. null for a fact in use. */
   forgotten: number | null;
+  /** Lowercase topic tags, for example ["testing", "people"]. */
+  tags: string[];
 };
 
 export type Priority = "urgent" | "high" | "normal" | "low";
@@ -511,8 +513,11 @@ export const memoryFacts = () => invoke<Fact[]>("memory_facts");
 export const addFact = (text: string) => invoke<Fact>("add_fact", { text });
 export const editFact = (id: number, text: string) => invoke<Fact>("edit_fact", { id, text });
 export const setFactCore = (id: number, core: boolean) => invoke<Fact>("set_fact_core", { id, core });
+export const setFactTags = (id: number, tags: string[]) => invoke<Fact>("set_fact_tags", { id, tags });
 export const forgetFact = (id: number) => invoke<Fact>("forget_fact", { id });
 export const restoreFact = (id: number) => invoke<Fact>("restore_fact", { id });
+/** Deletes a forgotten fact for good. false: deleted, but the database file is not cleaned yet. */
+export const deleteFact = (id: number) => invoke<boolean>("delete_fact", { id });
 export const newConversation = () => invoke<void>("new_conversation");
 export const tasks = () => invoke<Task[]>("tasks");
 /** notes: the optional description. */

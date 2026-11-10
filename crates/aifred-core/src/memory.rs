@@ -2,6 +2,9 @@
 //!
 //! - "Core" facts go into the AI instructions with each message.
 //! - The AI finds the other facts with a search (the memory tool server, aifred-tools).
+//! - A fact can have tags, for example "testing" and "people". The AI can
+//!   read all facts with one tag (facts_with_tag), and sees the tag names
+//!   with memory_tags.
 //! - A forgotten fact is not deleted. It gets a "forgotten" time, and the
 //!   user can restore it in the app.
 //!
@@ -44,9 +47,23 @@ pub struct Fact {
     pub updated: u64,
     /// When the fact was forgotten, in Unix seconds. None for a fact in use.
     pub forgotten: Option<u64>,
+    /// Lowercase tags, for example ["testing", "people"]. Can be empty.
+    pub tags: Vec<String>,
 }
 
-const COLUMNS: &str = "m.id, m.text, m.core, m.added_by, m.created, m.updated, m.forgotten";
+/// One tag and the number of facts in use that have it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TagCount {
+    pub tag: String,
+    pub facts: u64,
+}
+
+/// The most tags on one fact. More tags make the tag list less useful.
+pub const MAX_TAGS: usize = 5;
+/// The longest tag, in characters.
+const MAX_TAG_CHARS: usize = 40;
+
+const COLUMNS: &str = "m.id, m.text, m.core, m.added_by, m.created, m.updated, m.forgotten, m.tags";
 
 fn from_row(r: &Row) -> rusqlite::Result<Fact> {
     Ok(Fact {
@@ -57,7 +74,56 @@ fn from_row(r: &Row) -> rusqlite::Result<Fact> {
         created: r.get(4)?,
         updated: r.get(5)?,
         forgotten: r.get(6)?,
+        // A bad list counts as no tags: the fact itself stays usable.
+        tags: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
     })
+}
+
+/// Cleans the tags: no "#" at the start (tasks::clean_tag, as for task
+/// tags), lowercase, spaces become "-", and each tag once. "QA Team" and
+/// "#qa-team" are the same tag. Unlike task tags, fact tags are lowercase:
+/// the AI finds facts by the exact tag name (with_tag).
+/// A comma splits a tag in two: the app edits the tags as one line with
+/// commas.
+/// Empty tags go away. An error for more than MAX_TAGS tags or a tag that
+/// is too long.
+pub fn clean_tags(tags: &[String]) -> anyhow::Result<Vec<String>> {
+    let out = split_tags(tags);
+    if let Some(t) = out.iter().find(|t| t.chars().count() > MAX_TAG_CHARS) {
+        bail!("the tag \"{t}\" is longer than {MAX_TAG_CHARS} characters");
+    }
+    anyhow::ensure!(
+        out.len() <= MAX_TAGS,
+        "a fact can have at most {MAX_TAGS} tags"
+    );
+    Ok(out)
+}
+
+/// Like clean_tags, but with no error: a tag that is too long goes away,
+/// and only the first MAX_TAGS tags stay. For a new fact from the AI: bad
+/// tags must not stop the save of the fact. The answer shows the tags that
+/// stayed.
+fn keep_good_tags(tags: &[String]) -> Vec<String> {
+    let mut out = split_tags(tags);
+    out.retain(|t| t.chars().count() <= MAX_TAG_CHARS);
+    out.truncate(MAX_TAGS);
+    out
+}
+
+/// The cleaned tags of clean_tags, with no limits.
+fn split_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags.iter().flat_map(|t| t.split(',')) {
+        let t = crate::tasks::clean_tag(t)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("-")
+            .to_lowercase();
+        if !t.is_empty() && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 fn get(c: &Connection, id: i64) -> anyhow::Result<Fact> {
@@ -76,11 +142,24 @@ pub(crate) fn add_in(
     added_by: &str,
     core: bool,
 ) -> anyhow::Result<Fact> {
+    add_tagged_in(tx, text, added_by, core, &[])
+}
+
+/// add_in, with tags. Bad tags go away (keep_good_tags): the fact is
+/// saved also then.
+pub(crate) fn add_tagged_in(
+    tx: &Transaction,
+    text: &str,
+    added_by: &str,
+    core: bool,
+    tags: &[String],
+) -> anyhow::Result<Fact> {
     let text = clean(text)?;
+    let tags = serde_json::to_string(&keep_good_tags(tags))?;
     tx.execute(
-        "INSERT INTO memory (text, style, pos, core, added_by, created, updated)
-         VALUES (?1, 'item', (SELECT COALESCE(MAX(pos), -1) + 1 FROM memory), ?2, ?3, ?4, ?4)",
-        rusqlite::params![text, core, added_by, now() as i64],
+        "INSERT INTO memory (text, style, pos, core, added_by, created, updated, tags)
+         VALUES (?1, 'item', (SELECT COALESCE(MAX(pos), -1) + 1 FROM memory), ?2, ?3, ?4, ?4, ?5)",
+        rusqlite::params![text, core, added_by, now() as i64, tags],
     )?;
     get(tx, tx.last_insert_rowid())
 }
@@ -193,6 +272,64 @@ impl MemoryStore {
         db::write(&self.dir, |tx| add_in(tx, text, added_by, core))
     }
 
+    /// Adds one fact at the end, with tags (keep_good_tags).
+    pub fn add_tagged(
+        &self,
+        text: &str,
+        added_by: &str,
+        core: bool,
+        tags: &[String],
+    ) -> anyhow::Result<Fact> {
+        db::write(&self.dir, |tx| {
+            add_tagged_in(tx, text, added_by, core, tags)
+        })
+    }
+
+    /// Replaces the tags of a fact (clean_tags). An empty list removes them.
+    pub fn set_tags(&self, id: i64, tags: &[String]) -> anyhow::Result<Fact> {
+        let tags = serde_json::to_string(&clean_tags(tags)?)?;
+        self.change(id, "tags = ?2", rusqlite::types::Value::Text(tags))
+    }
+
+    /// The tags of the facts in use, with their number of facts. The tag
+    /// with the most facts first, then by name.
+    pub fn tags(&self) -> anyhow::Result<Vec<TagCount>> {
+        db::read(&self.dir, |c| {
+            let mut q = c.prepare(
+                "SELECT t.value, count(*) FROM memory m, json_each(m.tags) t
+                 WHERE m.forgotten IS NULL AND json_valid(m.tags)
+                 GROUP BY t.value ORDER BY count(*) DESC, t.value",
+            )?;
+            let rows = q.query_map([], |r| {
+                Ok(TagCount {
+                    tag: r.get(0)?,
+                    facts: r.get(1)?,
+                })
+            })?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+    }
+
+    /// The facts in use that have `tag`, in their order. An error for more
+    /// than one tag ("qa, testing"): the answer would silently have the
+    /// facts of only one of them.
+    pub fn with_tag(&self, tag: &str) -> anyhow::Result<Vec<Fact>> {
+        let tag = match split_tags(&[tag.to_string()]).as_slice() {
+            [] => bail!("the tag is empty"),
+            [one] => one.clone(),
+            _ => bail!("give one tag, not a list: \"{tag}\""),
+        };
+        db::read(&self.dir, |c| {
+            let mut q = c.prepare(&format!(
+                "SELECT {COLUMNS} FROM memory m
+                 WHERE m.forgotten IS NULL AND json_valid(m.tags)
+                   AND EXISTS (SELECT 1 FROM json_each(m.tags) t WHERE t.value = ?1)
+                 ORDER BY m.pos, m.id"
+            ))?;
+            Ok(q.query_map([tag], from_row)?.collect::<Result<_, _>>()?)
+        })
+    }
+
     /// Changes the text of a fact. A "text" fact (a block from memory.md,
     /// for example a heading and its lines) keeps its line breaks. A list
     /// item stays one line.
@@ -233,6 +370,69 @@ impl MemoryStore {
             "forgotten = COALESCE(forgotten, ?2)",
             rusqlite::types::Value::Integer(now() as i64),
         )
+    }
+
+    /// Deletes a forgotten fact for good: there is no restore. A fact in use
+    /// must be forgotten first, so one click cannot delete it.
+    /// - Triggers delete its word search and meaning search rows (db.rs).
+    /// - The FTS "optimize" merges the word search index, so no index page
+    ///   keeps the words of the fact.
+    /// - VACUUM then writes the database again from the rows that are left.
+    ///   So no free page or old copy of a row keeps the text: also not from
+    ///   edits before this version. It blocks other writers for a short time
+    ///   (about 0.02 seconds for a 7 MB file). A delete is a rare click, so
+    ///   that is acceptable.
+    /// - The checkpoint copies the new pages from the write-ahead log (the
+    ///   `-wal` file) into the main file and empties the log.
+    /// - The VACUUM or the checkpoint cannot finish while another program
+    ///   uses the database. Then the fact is deleted, but old copies of the
+    ///   text stay in the file until a later delete. The answer is false in
+    ///   that case. It is also false on an error there: the delete is saved,
+    ///   so an error would be wrong.
+    /// - The learned row (learn.rs) that points to the fact stays: AIfred
+    ///   learns a place only once. The id is never used again (AUTOINCREMENT,
+    ///   db.rs), so the row cannot point to another fact.
+    ///
+    /// Old chat messages that have the text of the fact stay.
+    pub fn delete(&self, id: i64) -> anyhow::Result<bool> {
+        db::write(&self.dir, |tx| {
+            let forgotten: Option<Option<i64>> = {
+                use rusqlite::OptionalExtension;
+                tx.query_row("SELECT forgotten FROM memory WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?
+            };
+            match forgotten {
+                None => bail!("no fact with id {id}"),
+                Some(None) => bail!("fact {id} is in use: forget it first"),
+                Some(Some(_)) => {}
+            }
+            tx.execute("DELETE FROM memory WHERE id = ?1", [id])?;
+            tx.execute(
+                "INSERT INTO memory_fts (memory_fts) VALUES ('optimize')",
+                [],
+            )?;
+            Ok(())
+        })?;
+        let clean = || -> anyhow::Result<bool> {
+            let c = db::open(&self.dir)?;
+            c.execute_batch("VACUUM")?;
+            // Column 0 is 1 when another program kept the checkpoint from finishing.
+            let busy: i64 = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            Ok(busy == 0)
+        };
+        let cleaned = match clean() {
+            Ok(done) => done,
+            Err(e) => {
+                eprintln!("aifred: fact {id} is deleted, but the clean-up failed: {e:#}");
+                false
+            }
+        };
+        if !cleaned {
+            eprintln!("aifred: fact {id} is deleted, but the database file is not cleaned yet");
+        }
+        Ok(cleaned)
     }
 
     pub fn restore(&self, id: i64) -> anyhow::Result<Fact> {
@@ -462,6 +662,179 @@ mod tests {
             "# Work\nI work at Rymera Web Co.\n- likes green tea"
         );
         assert!(m.edit(block.id, " \n ").is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn tags_are_cleaned_counted_and_filtered() {
+        let d = temp("memory-tags");
+        let m = MemoryStore::new(&d);
+        let qa = m
+            .add_tagged(
+                "Zara is a QA under the user",
+                "aifred",
+                false,
+                &[
+                    "People".into(),
+                    "#testing".into(),
+                    " QA Team ".into(),
+                    "people".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(qa.tags, vec!["people", "testing", "qa-team"]);
+        m.add_tagged(
+            "Run the tests before a review",
+            "you",
+            true,
+            &["testing".into()],
+        )
+        .unwrap();
+        let old = m
+            .add_tagged("The old QA lead was Bo", "you", false, &["testing".into()])
+            .unwrap();
+        m.add("I like tea", "you", true).unwrap();
+        m.forget(old.id).unwrap();
+        assert_eq!(
+            m.tags().unwrap(),
+            vec![
+                TagCount {
+                    tag: "testing".into(),
+                    facts: 2
+                },
+                TagCount {
+                    tag: "people".into(),
+                    facts: 1
+                },
+                TagCount {
+                    tag: "qa-team".into(),
+                    facts: 1
+                },
+            ],
+            "a forgotten fact does not count"
+        );
+        assert_eq!(
+            texts(&m.with_tag("#Testing").unwrap()),
+            vec![
+                "Zara is a QA under the user",
+                "Run the tests before a review"
+            ]
+        );
+        let changed = m.set_tags(qa.id, &["people".into()]).unwrap();
+        assert_eq!(changed.tags, vec!["people"]);
+        assert_eq!(m.with_tag("testing").unwrap().len(), 1);
+        let six: Vec<String> = (0..6).map(|i| format!("t{i}")).collect();
+        assert!(m.set_tags(qa.id, &six).is_err(), "more than MAX_TAGS");
+        assert!(m.set_tags(qa.id, &["a".repeat(41)]).is_err());
+        assert_eq!(
+            m.set_tags(qa.id, &["qa, Testing".into(), "people,".into()])
+                .unwrap()
+                .tags,
+            vec!["qa", "testing", "people"],
+            "a comma splits a tag"
+        );
+        assert!(m.with_tag(" # ").is_err());
+        assert!(
+            m.with_tag("qa, testing").is_err(),
+            "one tag only, so no facts go missing"
+        );
+        // A new fact is saved also with bad tags: they go away.
+        let many: Vec<String> = ["a".repeat(41)]
+            .into_iter()
+            .chain((0..7).map(|i| format!("t{i}")))
+            .collect();
+        let saved = m.add_tagged("Bad tags", "aifred", false, &many).unwrap();
+        assert_eq!(saved.tags, vec!["t0", "t1", "t2", "t3", "t4"]);
+        assert!(m.set_tags(999, &[]).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_a_forgotten_fact_for_good() {
+        let d = temp("memory-delete");
+        let m = MemoryStore::new(&d);
+        let other = m.add("I like tea", "you", true).unwrap();
+        let secret = m
+            .add_tagged(
+                &format!("My old door code is 0815-lion {}", "and more ".repeat(800)),
+                "you",
+                true,
+                &["home".into()],
+            )
+            .unwrap();
+        // An edit leaves the old text in a free part of the file: the long
+        // text had its own pages, and they are now free but not cleared.
+        m.edit(secret.id, "My door code is 4711-zebra").unwrap();
+        // A meaning vector with a byte pattern that the test can find.
+        let vector: Vec<u8> = std::iter::repeat_n(1234.5678f32.to_le_bytes(), 384)
+            .flatten()
+            .collect();
+        db::write(&d, |tx| {
+            tx.execute(
+                "INSERT INTO memory_vec (rowid, embedding) VALUES (?1, ?2)",
+                rusqlite::params![secret.id, vector],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            m.delete(secret.id).is_err(),
+            "a fact in use must be forgotten first"
+        );
+        m.forget(secret.id).unwrap();
+        // The patterns that the test looks for, and a check that finds them
+        // in the database files.
+        let patterns = [
+            ("the text", &b"4711-zebra"[..]),
+            ("the old text", &b"0815-lion"[..]),
+            ("the vector", &vector[..16]),
+        ];
+        let in_files = |pattern: &[u8]| {
+            ["aifred.db", "aifred.db-wal"].iter().any(|name| {
+                std::fs::read(d.join(name))
+                    .is_ok_and(|b| b.windows(pattern.len()).any(|w| w == pattern))
+            })
+        };
+        // Before the delete, the files have all patterns. Else the check
+        // after the delete would prove nothing.
+        db::open(&d)
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        for (what, pattern) in patterns {
+            assert!(
+                in_files(pattern),
+                "{what} is not in the file before the delete"
+            );
+        }
+        assert!(
+            m.delete(secret.id).unwrap(),
+            "nothing else reads, so the file is cleaned"
+        );
+        assert_eq!(texts(&m.list().unwrap()), vec!["I like tea"]);
+        assert!(m.restore(secret.id).is_err(), "no restore");
+        assert!(m.delete(secret.id).is_err(), "no fact with that id");
+        assert!(m.search("zebra", None).unwrap().is_empty());
+        assert!(m.tags().unwrap().is_empty());
+        let rows: i64 = db::read(&d, |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'zebra'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+        assert_eq!(rows, 0);
+        // The text, the old text, and the vector are not in the database
+        // files any more.
+        for (what, pattern) in patterns {
+            assert!(!in_files(pattern), "{what} is still in the file");
+        }
+        assert_eq!(m.list().unwrap()[0].id, other.id);
+        // The id of the deleted fact is not used again, also when it was
+        // the highest id.
+        let next = m.add("I like coffee", "you", true).unwrap();
+        assert!(next.id > secret.id, "id {} is used again", next.id);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

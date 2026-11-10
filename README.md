@@ -38,8 +38,11 @@ The source code:
 ## Memory
 
 - "What AIfred knows about you" in the sidebar is a list of facts. You can add, edit, and forget a fact. A forgotten fact goes to the "Forgotten" list, where you can restore it.
+- In the "Forgotten" list, "Delete" removes a fact for good. Click it two times. AIfred then writes the full database file again (VACUUM), so no old copy of the text stays in the file. This also removes old copies from earlier edits. When another AIfred program uses the database at that time, the clean-up waits until the next delete, and the app tells you. Old chat messages that mention the fact stay.
 - While all facts together are 2,000 tokens or less (about 8,000 characters), all of them go into every message.
 - When memory is larger, only the facts with "Always" on go into every message. For each question, the app also adds up to 8 other facts that match the question. Under the answer, "Used N facts from memory" shows them. AIfred can also search for more facts.
+- A fact can have up to 5 tags, for example `testing` or `people`. AIfred gives each new fact 1 to 3 tags and reuses the tags that exist. Click "Tags" under a fact to change them (commas between tags). Click a tag to show only its facts.
+- AIfred can list the tags and read all facts with one tag. The tag names are not in each message: AIfred asks for them when it needs them.
 - The facts that you add have "Always" on. AIfred can add facts in the chat. Those have "Always" off, unless AIfred decides that the fact matters in most chats.
 - AIfred can also search your old chats, your tasks, and the saved GitHub and ClickUp lists. A GitHub item or ClickUp task that left your list stays searchable.
 - Search finds words and meaning. For example, "book my flight" finds the fact "I prefer window seats".

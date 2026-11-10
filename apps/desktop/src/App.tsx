@@ -2057,6 +2057,7 @@ export default function App() {
                   facts={facts}
                   onAdd={(f) => setFacts((all) => [...all, f])}
                   onChange={(f) => setFacts((all) => all.map((x) => (x.id === f.id ? f : x)))}
+                  onDelete={(id) => setFacts((all) => all.filter((x) => x.id !== id))}
                 />
               </div>
             </div>

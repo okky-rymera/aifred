@@ -2250,6 +2250,145 @@ describe("memory page", () => {
     await waitFor(() => expect(fake.memory[0].forgotten).toBeNull());
   });
 
+  it("edits the tags of a fact and filters the list by a tag", async () => {
+    const fake = await startApp({
+      memory: [fact("Zara is our QA lead", { tags: ["people"] }), fact("I like short answers.")],
+    });
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: "Edit tags: I like short answers." }));
+    const box = screen.getByRole("textbox", { name: "Tags: I like short answers." });
+    await userEvent.type(box, "Style, #answers{Enter}");
+    await waitFor(() => expect(fake.memory[1].tags).toEqual(["style", "answers"]));
+    const filter = screen.getByRole("group", { name: "Filter by tag" });
+    await userEvent.click(within(filter).getByRole("button", { name: "#people 1" }));
+    expect(screen.getByText("Zara is our QA lead")).toBeInTheDocument();
+    expect(screen.queryByText("I like short answers.")).not.toBeInTheDocument();
+    await userEvent.click(within(filter).getByRole("button", { name: "All" }));
+    expect(screen.getByText("I like short answers.")).toBeInTheDocument();
+    // A tag on a fact also filters the list.
+    await userEvent.click(screen.getByRole("button", { name: "#style" }));
+    expect(screen.queryByText("Zara is our QA lead")).not.toBeInTheDocument();
+  });
+
+  it("shows the error for a tag that is too long and keeps the box open", async () => {
+    const fake = await startApp({ memory: [fact("I like tea")] });
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: "Edit tags: I like tea" }));
+    const box = screen.getByRole("textbox", { name: "Tags: I like tea" });
+    await userEvent.type(box, `drinks, ${"a".repeat(41)}{Enter}`);
+    expect(await screen.findByText(/Not saved: the tag "a{41}" is longer than 40 characters/)).toBeInTheDocument();
+    expect(fake.memory[0].tags).toEqual([]);
+    expect(box).toBeInTheDocument();
+    // Escape closes the box and keeps the old tags.
+    await userEvent.type(box, "{Escape}");
+    expect(screen.queryByRole("textbox", { name: "Tags: I like tea" })).not.toBeInTheDocument();
+    expect(fake.memory[0].tags).toEqual([]);
+  });
+
+  it("saves the tags one time when the box loses focus during the save", async () => {
+    const fake = await startApp({ memory: [fact("I like tea")] });
+    const slow = deferred<void>();
+    fake.onSetFactTags = () => slow.promise;
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: "Edit tags: I like tea" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Tags: I like tea" }), "drinks{Enter}");
+    // A click away while the save runs.
+    await userEvent.click(screen.getByPlaceholderText("Add a fact and press Enter"));
+    slow.resolve();
+    await waitFor(() => expect(fake.memory[0].tags).toEqual(["drinks"]));
+    expect(fake.calls.filter((c) => c.cmd === "set_fact_tags")).toHaveLength(1);
+  });
+
+  it("does not send a failed tag save again on each click away", async () => {
+    const fake = await startApp({ memory: [fact("I like tea")] });
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: "Edit tags: I like tea" }));
+    const box = screen.getByRole("textbox", { name: "Tags: I like tea" });
+    await userEvent.type(box, `${"a".repeat(41)}{Enter}`);
+    expect(await screen.findByText(/Not saved: the tag/)).toBeInTheDocument();
+    await userEvent.click(screen.getByPlaceholderText("Add a fact and press Enter"));
+    await userEvent.click(box);
+    await userEvent.click(screen.getByPlaceholderText("Add a fact and press Enter"));
+    expect(fake.calls.filter((c) => c.cmd === "set_fact_tags")).toHaveLength(1);
+    // Enter tries the same value again.
+    await userEvent.type(box, "{Enter}");
+    await waitFor(() => expect(fake.calls.filter((c) => c.cmd === "set_fact_tags")).toHaveLength(2));
+    // A changed value is saved.
+    await userEvent.clear(box);
+    await userEvent.type(box, "drinks{Enter}");
+    await waitFor(() => expect(fake.memory[0].tags).toEqual(["drinks"]));
+  });
+
+  it("saves the fact text one time when the box loses focus during the save", async () => {
+    const fake = await startApp({ memory: [fact("I like tea")] });
+    const slow = deferred<void>();
+    fake.onEditFact = () => slow.promise;
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: "I like tea" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Fact text" }), " a lot{Enter}");
+    await userEvent.click(screen.getByPlaceholderText("Add a fact and press Enter"));
+    slow.resolve();
+    await waitFor(() => expect(fake.memory[0].text).toBe("I like tea a lot"));
+    expect(fake.calls.filter((c) => c.cmd === "edit_fact")).toHaveLength(1);
+  });
+
+  it("does not send a failed text save again on a click away, but Enter tries again", async () => {
+    const fake = await startApp({ memory: [fact("I like tea")], fail: { edit_fact: "database is locked" } });
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: "I like tea" }));
+    const box = screen.getByRole("textbox", { name: "Fact text" });
+    await userEvent.type(box, " a lot{Enter}");
+    expect(await screen.findByText("Not saved: database is locked")).toBeInTheDocument();
+    await userEvent.click(screen.getByPlaceholderText("Add a fact and press Enter"));
+    await userEvent.click(box);
+    await userEvent.click(screen.getByPlaceholderText("Add a fact and press Enter"));
+    expect(fake.calls.filter((c) => c.cmd === "edit_fact")).toHaveLength(1);
+    delete fake.fail.edit_fact;
+    await userEvent.click(box);
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(fake.memory[0].text).toBe("I like tea a lot"));
+    expect(fake.calls.filter((c) => c.cmd === "edit_fact")).toHaveLength(2);
+  });
+
+  it("a tag filter goes away when no fact has the tag, and does not come back", async () => {
+    const fake = await startApp({
+      memory: [fact("Zara is our QA lead", { tags: ["testing"] }), fact("I like tea", { tags: ["drinks"] })],
+    });
+    await openMemory();
+    const filter = screen.getByRole("group", { name: "Filter by tag" });
+    await userEvent.click(within(filter).getByRole("button", { name: "#testing 1" }));
+    expect(screen.queryByText("I like tea")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Forget: Zara is our QA lead" }));
+    expect(await screen.findByText("I like tea")).toBeInTheDocument();
+    // The tag comes back on another fact. The list still shows all facts.
+    await userEvent.click(screen.getByRole("button", { name: "Edit tags: I like tea" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Tags: I like tea" }), ", testing{Enter}");
+    await waitFor(() => expect(fake.memory[1].tags).toEqual(["drinks", "testing"]));
+    expect(within(filter).getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("deletes a forgotten fact for good only after a second click", async () => {
+    const fake = await startApp({ memory: [fact("Door code 4711", { forgotten: 1 }), fact("I like tea")] });
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: /Forgotten \(1\)/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete for good: Door code 4711" }));
+    expect(fake.memory).toHaveLength(2);
+    await userEvent.click(screen.getByRole("button", { name: "Click again to delete for good: Door code 4711" }));
+    await waitFor(() => expect(fake.memory.map((f) => f.text)).toEqual(["I like tea"]));
+    expect(screen.queryByText("Door code 4711")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Forgotten/ })).not.toBeInTheDocument();
+  });
+
+  it("a failed delete says so and keeps the fact", async () => {
+    await startApp({ memory: [fact("Door code 4711", { forgotten: 1 })], fail: { delete_fact: "database is locked" } });
+    await openMemory();
+    await userEvent.click(screen.getByRole("button", { name: /Forgotten \(1\)/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete for good: Door code 4711" }));
+    await userEvent.click(screen.getByRole("button", { name: "Click again to delete for good: Door code 4711" }));
+    expect(await screen.findByText("Not deleted: database is locked")).toBeInTheDocument();
+    expect(screen.getByText("Door code 4711")).toBeInTheDocument();
+  });
+
   it("a failed save says so and keeps the text", async () => {
     await startApp({ fail: { add_fact: "database is locked" } });
     await openMemory();

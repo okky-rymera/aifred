@@ -42,6 +42,22 @@ struct AddArgs {
     /// True for a fact that matters in most chats, for example how the user wants answers.
     /// Such a fact goes into every message. Default false: you find the fact with search_memory.
     always: Option<bool>,
+    /// 1 to 3 short topic tags, for example ["testing", "people"]. Use the tags from memory_tags when one fits.
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct TagArgs {
+    /// One tag, from memory_tags. Example: "testing".
+    tag: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SetTagsArgs {
+    /// Fact id, from search_memory or facts_with_tag.
+    id: i64,
+    /// The full new list of tags, at most 5. It replaces the old tags. [] removes them.
+    tags: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -61,7 +77,7 @@ fn ok_json(v: &Value) -> Result<CallToolResult, ErrorData> {
 }
 
 fn fact(f: &Fact) -> Value {
-    json!({ "id": f.id, "text": f.text, "always": f.core, "added_by": f.added_by, "updated": f.updated })
+    json!({ "id": f.id, "text": f.text, "tags": f.tags, "always": f.core, "added_by": f.added_by, "updated": f.updated })
 }
 
 fn message(t: &Turn) -> Value {
@@ -103,7 +119,44 @@ impl MemoryTools {
         Parameters(a): Parameters<AddArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let f = MemoryStore::new(&self.dir)
-            .add(&a.text, "aifred", a.always.unwrap_or(false))
+            .add_tagged(
+                &a.text,
+                "aifred",
+                a.always.unwrap_or(false),
+                &a.tags.unwrap_or_default(),
+            )
+            .map_err(fail)?;
+        ok_json(&fact(&f))
+    }
+
+    #[tool(
+        description = "List the tags of the facts about the user, with the number of facts for each tag, the most used first. Use it before add_memory, so you reuse a tag that fits."
+    )]
+    async fn memory_tags(&self) -> Result<CallToolResult, ErrorData> {
+        let tags = MemoryStore::new(&self.dir).tags().map_err(fail)?;
+        ok_json(&json!(tags))
+    }
+
+    #[tool(
+        description = "Read all facts about the user that have one tag, for example all \"testing\" facts. Use it when a topic needs more facts than search_memory gives."
+    )]
+    async fn facts_with_tag(
+        &self,
+        Parameters(a): Parameters<TagArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let facts = MemoryStore::new(&self.dir).with_tag(&a.tag).map_err(fail)?;
+        ok_json(&json!(facts.iter().map(fact).collect::<Vec<_>>()))
+    }
+
+    #[tool(
+        description = "Change the tags of one fact, for example when the user asks for it, or to merge two tags with the same meaning. The new list replaces the old one."
+    )]
+    async fn tag_memory(
+        &self,
+        Parameters(a): Parameters<SetTagsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let f = MemoryStore::new(&self.dir)
+            .set_tags(a.id, &a.tags)
             .map_err(fail)?;
         ok_json(&fact(&f))
     }
@@ -185,12 +238,36 @@ mod tests {
             t.add_memory(Parameters(AddArgs {
                 text: "Sam sends the hosting invoice".into(),
                 always: None,
+                tags: Some(vec!["Billing".into()]),
             }))
             .await
             .unwrap(),
         );
         assert_eq!(added["added_by"], "aifred");
         assert_eq!(added["always"], false, "not in every message unless asked");
+        assert_eq!(added["tags"], json!(["billing"]));
+        assert_eq!(
+            body(t.memory_tags().await.unwrap()),
+            json!([{ "tag": "billing", "facts": 1 }])
+        );
+        let tagged = body(
+            t.facts_with_tag(Parameters(TagArgs {
+                tag: "billing".into(),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(tagged[0]["text"], "Sam sends the hosting invoice");
+        let id0 = tagged[0]["id"].as_i64().unwrap();
+        let retagged = body(
+            t.tag_memory(Parameters(SetTagsArgs {
+                id: id0,
+                tags: vec!["money".into(), "people".into()],
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(retagged["tags"], json!(["money", "people"]));
         let found = body(t.search_memory(search("invoices")).await.unwrap());
         assert_eq!(found[0]["text"], "Sam sends the hosting invoice");
         let id = found[0]["id"].as_i64().unwrap();
