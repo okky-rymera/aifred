@@ -82,6 +82,8 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
         let parents = crate::links::parents_for_ai(c)?;
         let notes = crate::context::map_in(c)?;
         let blocked = crate::blockers::open_blockers_in(c)?;
+        // AIfred's own status of each item (status.rs).
+        let statuses = crate::status::all_in(c)?;
         let mut q = c.prepare(
             "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM user_task WHERE done = 0 ORDER BY created DESC",
         )?;
@@ -112,7 +114,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             })?
             .collect::<Result<_, _>>()?;
         tasks.extend(aifred_tasks(c)?);
-        add_parent_and_notes(&mut tasks, &parents, &notes, &blocked);
+        add_parent_and_notes(&mut tasks, &parents, &notes, &blocked, &statuses);
 
         let mut github: Vec<Value> = rows(c, "github", None)?
             .into_iter()
@@ -130,7 +132,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 Ok(v)
             })
             .collect::<anyhow::Result<_>>()?;
-        add_parent_and_notes(&mut github, &parents, &notes, &blocked);
+        add_parent_and_notes(&mut github, &parents, &notes, &blocked, &statuses);
 
         let goals: Vec<Value> = crate::goals::list_in(c)?
             .into_iter()
@@ -165,7 +167,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 .collect::<anyhow::Result<_>>()?,
             None => Vec::new(),
         };
-        add_parent_and_notes(&mut mail, &parents, &notes, &blocked);
+        add_parent_and_notes(&mut mail, &parents, &notes, &blocked, &statuses);
         if let Some(email) = crate::gmail::for_ai(c, gmail_account.as_deref(), mail)? {
             out["email"] = email;
         }
@@ -227,7 +229,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                     v
                 })
                 .collect();
-            add_parent_and_notes(&mut tasks, &parents, &notes, &blocked);
+            add_parent_and_notes(&mut tasks, &parents, &notes, &blocked, &statuses);
             out["clickup"] =
                 json!({ "fetched_at": fetched_at(c, "clickup", Some(account))?, "tasks": tasks });
         }
@@ -235,7 +237,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
     })
 }
 
-/// Puts `parent` and `context` into each item of a list of items (tasks,
+/// Puts `parent`, `context`, and AIfred's `status` into each item of a list of items (tasks,
 /// GitHub, ClickUp, email) that has one in `parents` or `notes`. Only these
 /// lists get them: a correction or a review pick also has a `key`, but it
 /// is not an item. Notes from AIfred's own look-up also get
@@ -245,11 +247,33 @@ fn add_parent_and_notes(
     parents: &std::collections::HashMap<String, String>,
     notes: &std::collections::HashMap<String, (String, String)>,
     blocked: &std::collections::BTreeMap<String, Vec<String>>,
+    statuses: &std::collections::HashMap<String, crate::status::ItemStatus>,
 ) {
     for v in items {
-        let Some(k) = v["key"].as_str() else {
+        let Some(k) = v["key"].as_str().map(str::to_string) else {
             continue;
         };
+        let k = k.as_str();
+        if let Some(st) = statuses.get(k).filter(|_| !k.starts_with("gmail:")) {
+            // The ClickUp name can mean another thing in each list: it is
+            // only a detail. AIfred's status is the one that counts.
+            if k.starts_with("clickup:")
+                && let Some(name) = v.get("status").cloned()
+            {
+                v["clickup_status"] = name;
+            }
+            v["status"] = crate::status::label(&st.status).into();
+            // This item continues Unfinished items, for example the rock of
+            // the last quarter.
+            if !st.continues.is_empty() {
+                v["continues"] = st
+                    .continues
+                    .iter()
+                    .map(|l| l.title.clone().unwrap_or_else(|| l.key.clone()))
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+        }
         let (p, n, b) = (
             parents.get(k).cloned(),
             notes.get(k).cloned(),
@@ -276,10 +300,12 @@ fn rows(
     source: &str,
     account: Option<&str>,
 ) -> anyhow::Result<Vec<(String, Option<String>)>> {
-    let mut q = c.prepare(
+    let mut q = c.prepare(&format!(
         "SELECT data, summary, details FROM work_item
-         WHERE source = ?1 AND in_list = 1 AND (?2 IS NULL OR account = ?2) ORDER BY pos",
-    )?;
+         WHERE source = ?1 AND in_list = 1 AND status NOT IN {}
+           AND (?2 IS NULL OR account = ?2) ORDER BY pos",
+        crate::status::CLOSED_SQL
+    ))?;
     let rows = q.query_map(rusqlite::params![source, account], |r| {
         let details: String = r.get(2)?;
         Ok((r.get::<_, String>(0)?, for_item(r.get(1)?, &details)))

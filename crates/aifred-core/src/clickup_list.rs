@@ -15,7 +15,9 @@ const SOURCE: &str = "clickup";
 /// Change this when the saved list must not be used after an update.
 /// 1: tasks in a "done" status are left out. Older lists can have them.
 /// 2: the saved text has the custom fields. Older lists do not have them.
-const VERSION: u32 = 2;
+/// 3: the saved tasks have the status group, list, folder, and space, for
+///    AIfred's own status (status.rs).
+const VERSION: u32 = 3;
 
 /// How long the notes of note_closed stay, in seconds. The undo works only
 /// on the day of the close: 2 days is enough for a day that ends late.
@@ -164,14 +166,18 @@ impl ClickupStore {
         })
     }
 
-    /// Takes one task out of the saved list, after the user marked it done.
-    /// The task stays for search. The time of the list does not change.
-    /// A missing task is not an error.
-    pub fn remove(&self, id: &str) -> anyhow::Result<()> {
+    /// Takes one task out of the saved list, after the user marked it done
+    /// at `now`. The task stays for search. The time of the list does not
+    /// change. A missing task is not an error. The close is AIfred's own,
+    /// so its reason is known: Done. A status that the user picked before
+    /// the close does not win over it (status.rs).
+    pub fn remove(&self, id: &str, now: u64) -> anyhow::Result<()> {
         db::write(&self.dir, |tx| {
             tx.execute(
-                "UPDATE work_item SET in_list = 0 WHERE source = ?1 AND item_id = ?2",
-                [SOURCE, id],
+                "UPDATE work_item SET in_list = 0, closed_at = ?3, close_reason = ?4,
+                   close_label = NULL, close_tries = 0, close_checked = ?3
+                 WHERE source = ?1 AND item_id = ?2 AND in_list = 1",
+                rusqlite::params![SOURCE, id, now as i64, crate::status::DONE],
             )?;
             Ok(())
         })
@@ -268,7 +274,13 @@ pub(crate) mod tests {
             url: format!("https://app.clickup.com/t/{id}"),
             status: "to do".into(),
             status_color: String::new(),
+            status_type: "open".into(),
             list: "Sprint".into(),
+            list_id: "901".into(),
+            folder_id: String::new(),
+            folder: String::new(),
+            space_id: "s1".into(),
+            space: "Team".into(),
             workspace: "Rymera".into(),
             priority: None,
             due: None,
@@ -379,8 +391,8 @@ pub(crate) mod tests {
         let s = ClickupStore::new(&d);
         s.save("acct", tasks(vec![item("a", 1), item("b", 2)]), 1000)
             .unwrap();
-        s.remove("a").unwrap();
-        s.remove("nope").unwrap();
+        s.remove("a", 5).unwrap();
+        s.remove("nope", 5).unwrap();
         let l = s.cached("acct", u64::MAX, 5000).unwrap().unwrap();
         assert_eq!(ids(&l), vec!["b"]);
         assert_eq!(l.fetched_at, 1000);
@@ -486,7 +498,7 @@ pub(crate) mod tests {
                 .is_empty(),
             "another account sees nothing"
         );
-        s.remove("b").unwrap();
+        s.remove("b", 5).unwrap();
         assert!(s.search("acct", "invoice", false, None).unwrap().is_empty());
         assert_eq!(s.search("acct", "invoice", true, None).unwrap().len(), 1);
         std::fs::remove_dir_all(&d).unwrap();

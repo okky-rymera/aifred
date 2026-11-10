@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 34;
+const VERSION: i64 = 37;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -945,6 +945,68 @@ CREATE TABLE item_blocker (
 CREATE INDEX item_blocker_by_blocker ON item_blocker(blocker);
 ";
 
+/// AIfred's own status of each item (status.rs). `work_item.status` is the
+/// stored part: the user's choice, the reason of a close, or the ClickUp
+/// rule. It decides if a downloaded item is open (items::is_open). Waiting
+/// and In progress from blockers and the work timer are added on read.
+const SCHEMA_35: &str = "
+ALTER TABLE task ADD COLUMN closed_as TEXT;  -- a done task: NULL or 'done' = finished, 'moved', or 'cancelled'
+ALTER TABLE work_item ADD COLUMN status TEXT NOT NULL DEFAULT 'todo';       -- status.rs: one of status::ALL
+ALTER TABLE work_item ADD COLUMN status_by TEXT NOT NULL DEFAULT 'default'; -- who set it: status::By
+ALTER TABLE work_item ADD COLUMN close_reason TEXT;  -- after the item left: 'done', 'moved', 'cancelled'; NULL: not known
+ALTER TABLE work_item ADD COLUMN close_label TEXT;   -- the name of the close in the source, like 'partially complete'
+ALTER TABLE work_item ADD COLUMN close_tries INTEGER NOT NULL DEFAULT 0;  -- failed reads of close_reason
+
+-- The status that the user picked for one item.
+CREATE TABLE item_status (
+  key    TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  ts     INTEGER NOT NULL
+);
+
+-- The user's rules for ClickUp status names. The narrowest scope wins.
+CREATE TABLE status_rule (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,               -- the ClickUp status name, in lower case
+  scope      TEXT NOT NULL,               -- 'list', 'folder', 'space', or 'all'
+  scope_id   TEXT NOT NULL DEFAULT '',    -- the ClickUp id of the list, folder, or space; '' for 'all'
+  scope_name TEXT NOT NULL DEFAULT '',    -- its name, for the Settings page
+  status     TEXT NOT NULL,               -- one of status::ALL
+  ts         INTEGER NOT NULL,
+  UNIQUE (name, scope, scope_id)
+);
+";
+
+/// "Moved" is "Unfinished" now. ClickUp rules keep the space and the
+/// ClickUp group, for the Settings page. An Unfinished item can link to the
+/// item that continues it.
+const SCHEMA_36: &str = "
+UPDATE task SET closed_as = 'unfinished' WHERE closed_as = 'moved';
+UPDATE item_status SET status = 'unfinished' WHERE status = 'moved';
+UPDATE status_rule SET status = 'unfinished' WHERE status = 'moved';
+UPDATE work_item SET status = 'unfinished' WHERE status = 'moved';
+UPDATE work_item SET close_reason = 'unfinished' WHERE close_reason = 'moved';
+ALTER TABLE status_rule ADD COLUMN space_id TEXT NOT NULL DEFAULT '';   -- the ClickUp space of the list or space
+ALTER TABLE status_rule ADD COLUMN space_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE status_rule ADD COLUMN kind TEXT NOT NULL DEFAULT '';       -- the ClickUp group of the status: open, unstarted, custom, done, closed
+
+-- The item that continues an Unfinished item, for example the copy of a
+-- rock in the next quarter. No row: the user accepts it as it is.
+CREATE TABLE status_next (
+  key      TEXT PRIMARY KEY,
+  next_key TEXT NOT NULL,
+  ts       INTEGER NOT NULL
+);
+";
+
+/// When an item left the list, so a pick of the user from before the close
+/// does not win over the close (status.rs). An item that is still open in
+/// its source after it left is read again now and then: when that was.
+const SCHEMA_37: &str = "
+ALTER TABLE work_item ADD COLUMN closed_at INTEGER;  -- when the item left the list, in Unix seconds; NULL: in the list, or not known
+ALTER TABLE work_item ADD COLUMN close_checked INTEGER NOT NULL DEFAULT 0;  -- the last read of an item that is still open in its source
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -1117,6 +1179,16 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 34 {
         tx.execute_batch(SCHEMA_34)?;
+    }
+    if version < 35 {
+        tx.execute_batch(SCHEMA_35)?;
+    }
+    if version < 36 {
+        tx.execute_batch(SCHEMA_36)?;
+        crate::status::refresh_in(&tx)?;
+    }
+    if version < 37 {
+        tx.execute_batch(SCHEMA_37)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -1314,9 +1386,11 @@ pub(crate) fn save_list(
     version: u32,
     now: u64,
 ) -> anyhow::Result<()> {
+    // An item that leaves the list now gets the time (status.rs closed_at).
     tx.execute(
-        "UPDATE work_item SET in_list = 0 WHERE source = ?1",
-        [source],
+        "UPDATE work_item SET in_list = 0, closed_at = CASE WHEN in_list = 1 THEN ?2 ELSE closed_at END
+         WHERE source = ?1",
+        rusqlite::params![source, now as i64],
     )?;
     let mut upsert = tx.prepare(
         "INSERT INTO work_item (source, item_id, account, title, place, url, data, in_list, pos, first_seen, last_seen, details)
@@ -1324,7 +1398,8 @@ pub(crate) fn save_list(
          ON CONFLICT (source, item_id) DO UPDATE SET
            account = excluded.account, title = excluded.title, place = excluded.place, url = excluded.url,
            data = excluded.data, in_list = 1, pos = excluded.pos, last_seen = excluded.last_seen,
-           details = COALESCE(?10, work_item.details)",
+           details = COALESCE(?10, work_item.details),
+           close_reason = NULL, close_label = NULL, close_tries = 0, closed_at = NULL, close_checked = 0",
     )?;
     for (pos, i) in items.iter().enumerate() {
         upsert.execute(rusqlite::params![
@@ -1338,6 +1413,9 @@ pub(crate) fn save_list(
            account = excluded.account, fetched_at = excluded.fetched_at, version = excluded.version, cut = excluded.cut",
         rusqlite::params![source, account, now as i64, version, serde_json::to_string(cut)?],
     )?;
+    // New status names and new items: AIfred's status of each (status.rs).
+    drop(upsert);
+    crate::status::refresh_in(tx)?;
     Ok(())
 }
 

@@ -38,6 +38,7 @@ use aifred_core::plan::{DayPlan, Estimate, PlanItem};
 use aifred_core::review::{self, DayCheck, Pick, WeekReview};
 use aifred_core::settings::{self, Settings};
 use aifred_core::side::SideTurn;
+use aifred_core::status::{self, Before as StatusBefore, Rule};
 use aifred_core::tasks::{Task, TaskFields};
 use aifred_core::uploads::FileRef;
 use aifred_core::waiting::{self, NewWaiting, Waiting, WaitingChange};
@@ -835,10 +836,18 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
     }
     match github::my_items(&github::owners_from_env()).await {
         Ok(f) => {
+            let d = dir.clone();
             let list = blocking(&app, move |_| {
-                GithubStore::new(&dir).save_fetch(f.items, &f.no_links, now())
+                GithubStore::new(&d).save_fetch(f.items, &f.no_links, now())
             })
             .await?;
+            // Why the items that left the list closed (status.rs). It runs
+            // after the answer: the list does not wait for it.
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = status::look_up_github(&dir, now()).await {
+                    eprintln!("aifred: cannot read why GitHub items closed: {e:#}");
+                }
+            });
             // Only new and changed items get new vectors and summaries.
             app.fill_vectors();
             app.summarize_items();
@@ -1187,10 +1196,17 @@ async fn clickup_items(app: State<'_, App>, force: bool) -> CmdResult<ClickupLis
     }
     match client.my_tasks().await {
         Ok(items) => {
+            let d = dir.clone();
             let list = blocking(&app, move |_| {
-                ClickupStore::new(&dir).save(&account, items, now())
+                ClickupStore::new(&d).save(&account, items, now())
             })
             .await?;
+            // Why the tasks that left the list closed (status.rs).
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = status::look_up_clickup(&dir, &client, now()).await {
+                    eprintln!("aifred: cannot read why ClickUp tasks closed: {e:#}");
+                }
+            });
             app.fill_vectors();
             app.summarize_items();
             app.sort_items();
@@ -1230,7 +1246,7 @@ async fn clickup_mark_done(app: State<'_, App>, id: String) -> CmdResult<String>
     let before = clickup_client(&dir)?.mark_done(&id).await.map_err(err)?;
     // ClickUp has the change. If the saved list cannot change, the task only
     // shows until the next reload, so this is not an error.
-    if let Err(e) = blocking(&app, move |_| ClickupStore::new(&dir).remove(&id)).await {
+    if let Err(e) = blocking(&app, move |_| ClickupStore::new(&dir).remove(&id, now())).await {
         eprintln!("aifred: cannot update the saved ClickUp list: {e}");
     }
     Ok(before)
@@ -1809,6 +1825,83 @@ async fn item_meta(app: State<'_, App>) -> CmdResult<Vec<ItemMeta>> {
     blocking(&app, |a| aifred_core::items::meta(&a.dir, now())).await
 }
 
+/// The user picks AIfred's status for one item (status.rs). It changes
+/// only AIfred. Returns what it was before, for the undo.
+#[tauri::command]
+async fn set_item_status(
+    app: State<'_, App>,
+    key: String,
+    status: String,
+) -> CmdResult<StatusBefore> {
+    blocking(&app, move |a| status::set(&a.dir, &key, &status, now())).await
+}
+
+#[tauri::command]
+async fn restore_item_status(app: State<'_, App>, before: StatusBefore) -> CmdResult<()> {
+    blocking(&app, move |a| status::restore(&a.dir, &before, now())).await
+}
+
+/// Opens a GitHub or ClickUp item that is closed only in AIfred again
+/// (status.rs open_again). Returns what it was before, for the undo.
+#[tauri::command]
+async fn open_item_again(app: State<'_, App>, key: String) -> CmdResult<StatusBefore> {
+    blocking(&app, move |a| status::open_again(&a.dir, &key, now())).await
+}
+
+#[tauri::command]
+async fn status_rules(app: State<'_, App>) -> CmdResult<Vec<Rule>> {
+    blocking(&app, |a| status::rules(&a.dir)).await
+}
+
+/// Adds or changes a rule for a ClickUp status name. Returns all rules and
+/// the rule from before (None: there was none), for the undo.
+#[tauri::command]
+async fn set_status_rule(app: State<'_, App>, rule: Rule) -> CmdResult<(Vec<Rule>, Option<Rule>)> {
+    blocking(&app, move |a| status::set_rule(&a.dir, &rule, now())).await
+}
+
+#[tauri::command]
+async fn delete_status_rule(app: State<'_, App>, rule: Rule) -> CmdResult<Vec<Rule>> {
+    blocking(&app, move |a| status::delete_rule(&a.dir, &rule)).await
+}
+
+/// How many of the user's ClickUp tasks each rule changes now, by rule id.
+#[tauri::command]
+async fn status_rule_use(app: State<'_, App>) -> CmdResult<std::collections::HashMap<i64, u32>> {
+    blocking(&app, |a| status::rule_use(&a.dir)).await
+}
+
+/// Links an Unfinished item to the item that continues it. None removes
+/// the link. Returns the link from before, for the undo.
+#[tauri::command]
+async fn set_status_next(
+    app: State<'_, App>,
+    key: String,
+    next: Option<String>,
+) -> CmdResult<Option<String>> {
+    blocking(&app, move |a| {
+        status::set_next(&a.dir, &key, next.as_deref(), now())
+    })
+    .await
+}
+
+/// The ClickUp spaces of the user, for the status rules on the Settings page.
+#[tauri::command]
+async fn clickup_spaces(app: State<'_, App>) -> CmdResult<Vec<aifred_core::clickup::CuSpace>> {
+    let client = clickup_client(&app.assistant.dir)?;
+    client.spaces().await.map_err(err)
+}
+
+/// The statuses of one ClickUp space and of each list in it.
+#[tauri::command]
+async fn clickup_space_statuses(
+    app: State<'_, App>,
+    space_id: String,
+) -> CmdResult<aifred_core::clickup::SpaceStatuses> {
+    let client = clickup_client(&app.assistant.dir)?;
+    client.space_statuses(&space_id).await.map_err(err)
+}
+
 #[tauri::command]
 async fn item_details(app: State<'_, App>, key: String) -> CmdResult<ItemDetails> {
     blocking(&app, move |a| aifred_core::items::details(&a.dir, &key)).await
@@ -1960,6 +2053,16 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         set_job_status,
         delete_job,
         item_meta,
+        set_item_status,
+        restore_item_status,
+        open_item_again,
+        status_rules,
+        set_status_rule,
+        delete_status_rule,
+        status_rule_use,
+        set_status_next,
+        clickup_spaces,
+        clickup_space_statuses,
         item_details,
         item_context,
         set_item_context,

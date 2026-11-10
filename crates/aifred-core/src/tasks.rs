@@ -52,6 +52,10 @@ pub struct Task {
     /// Files that the user keeps on the task (uploads.rs).
     #[serde(default)]
     pub files: Vec<FileRef>,
+    /// How a done task closed (status.rs): "unfinished" or "cancelled". None:
+    /// it is finished work, or it is not done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_as: Option<String>,
 }
 
 /// The fields to set on a task. None keeps the field as it is (on an add:
@@ -102,7 +106,7 @@ fn new_id() -> String {
     format!("t{nanos}")
 }
 
-const COLUMNS: &str = "id, title, notes, done, added_by, created, done_at, due, start, priority, tags, checklist, files";
+const COLUMNS: &str = "id, title, notes, done, added_by, created, done_at, due, start, priority, tags, checklist, files, closed_as";
 
 /// A JSON column as a value. A bad value is a read error, not an empty list.
 pub(crate) fn json_column<T: serde::de::DeserializeOwned>(
@@ -130,6 +134,10 @@ fn from_row(r: &Row) -> rusqlite::Result<Task> {
         tags: json_column(r, 10)?,
         checklist: json_column(r, 11)?,
         files: json_column(r, 12)?,
+        // "done" is the same as NULL: finished work.
+        closed_as: r
+            .get::<_, Option<String>>(13)?
+            .filter(|c| c != crate::status::DONE),
     })
 }
 
@@ -447,6 +455,7 @@ impl TaskStore {
             crate::links::remove_in(tx, &format!("task:{id}"), now())?;
             crate::blockers::remove_item_in(tx, &format!("task:{id}"))?;
             crate::missions::forget_in(tx, &format!("task:{id}"))?;
+            crate::status::forget_in(tx, &format!("task:{id}"))?;
             Ok(())
         })
     }
@@ -499,6 +508,7 @@ fn blank(added_by: &str) -> Task {
         tags: Vec::new(),
         checklist: Vec::new(),
         files: Vec::new(),
+        closed_as: None,
     }
 }
 
@@ -567,8 +577,9 @@ pub(crate) fn add_steps_in(
     Ok((task, added))
 }
 
-/// set_done_work(), in a change that is open.
-fn set_done_in(
+/// set_done_work(), in a change that is open. A task that is done here is
+/// finished work, so closed_as goes back to NULL (status.rs).
+pub(crate) fn set_done_in(
     tx: &Transaction,
     id: &str,
     done: bool,
@@ -583,7 +594,7 @@ fn set_done_in(
         bail!("no task with id {id}");
     };
     tx.execute(
-        "UPDATE task SET done = ?1, done_at = ?2, updated = ?3 WHERE doer = 'you' AND id = ?4",
+        "UPDATE task SET done = ?1, done_at = ?2, closed_as = NULL, updated = ?3 WHERE doer = 'you' AND id = ?4",
         rusqlite::params![done, done_at, now() as i64, id],
     )?;
     // A task that is done now starts the jobs that wait for it (jobs.rs).

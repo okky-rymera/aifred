@@ -426,6 +426,80 @@ pub async fn my_items(owners: &[String]) -> anyhow::Result<Fetch> {
 
 /// Merges the three searches. merge() keeps the first copy of an item, but
 /// the links can be on the copy of another search: the one that looked them up.
+/// How an item that left the list closed on GitHub (close_state).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Closed {
+    /// Still open: it left the list for another reason (for example, the
+    /// user is not assigned now).
+    Open,
+    /// An issue closed as completed, or a merged pull request.
+    Completed,
+    /// An issue closed as "not planned" or as a duplicate, or a pull
+    /// request closed with no merge. The text is GitHub's reason.
+    NotDone(String),
+}
+
+#[derive(Deserialize)]
+struct RawClose {
+    state: String,
+    #[serde(default)]
+    state_reason: Option<String>,
+    #[serde(default)]
+    pull_request: Option<RawPull>,
+}
+
+#[derive(Deserialize)]
+struct RawPull {
+    #[serde(default)]
+    merged_at: Option<String>,
+}
+
+/// Reads the reply of `gh api repos/<repo>/issues/<number>`. GitHub sends
+/// pull requests on this address too, with `pull_request`.
+fn parse_close(json: &[u8]) -> anyhow::Result<Closed> {
+    let r: RawClose = serde_json::from_slice(json)?;
+    if r.state != "closed" {
+        return Ok(Closed::Open);
+    }
+    if let Some(p) = r.pull_request {
+        return Ok(if p.merged_at.is_some() {
+            Closed::Completed
+        } else {
+            Closed::NotDone("closed with no merge".into())
+        });
+    }
+    Ok(match r.state_reason.as_deref() {
+        Some("not_planned") => Closed::NotDone("not planned".into()),
+        Some("duplicate") => Closed::NotDone("duplicate".into()),
+        _ => Closed::Completed,
+    })
+}
+
+/// How the item `id` ("owner/name#number") closed. One `gh` call.
+pub async fn close_state(id: &str) -> anyhow::Result<Closed> {
+    let Some((repo, number)) = id.rsplit_once('#') else {
+        bail!("\"{id}\" is not owner/name#number");
+    };
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+            && !s.contains("..")
+    };
+    if !ok(repo) || repo.matches('/').count() != 1 || number.parse::<u64>().is_err() {
+        bail!("\"{id}\" is not owner/name#number");
+    }
+    let out = Command::new("gh")
+        .args(["api", &format!("repos/{repo}/issues/{number}")])
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !out.status.success() {
+        bail!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    parse_close(&out.stdout)
+}
+
 fn combine(lists: [Searched; 3]) -> Fetch {
     let mut links = HashMap::new();
     let mut no_links = Vec::new();
@@ -480,6 +554,32 @@ mod tests {
         {"id":"PR_12","repository":{"name":"docs","nameWithOwner":"acme/docs"},"number":12,"title":"Typo",
          "url":"https://github.com/acme/docs/pull/12","updatedAt":"2026-09-01T10:00:00Z"}
     ]"#;
+
+    #[test]
+    fn close_state_reads_why_an_item_closed() {
+        let c = |j: &str| parse_close(j.as_bytes()).unwrap();
+        assert_eq!(c(r#"{"state":"open","state_reason":null}"#), Closed::Open);
+        assert_eq!(
+            c(r#"{"state":"closed","state_reason":"completed"}"#),
+            Closed::Completed
+        );
+        assert_eq!(
+            c(r#"{"state":"closed","state_reason":"not_planned"}"#),
+            Closed::NotDone("not planned".into())
+        );
+        assert_eq!(
+            c(r#"{"state":"closed","state_reason":"duplicate"}"#),
+            Closed::NotDone("duplicate".into())
+        );
+        assert_eq!(
+            c(r#"{"state":"closed","pull_request":{"merged_at":"2026-01-01T00:00:00Z"}}"#),
+            Closed::Completed
+        );
+        assert_eq!(
+            c(r#"{"state":"closed","pull_request":{"merged_at":null}}"#),
+            Closed::NotDone("closed with no merge".into())
+        );
+    }
 
     #[test]
     fn parse_reads_gh_output() {

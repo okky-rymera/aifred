@@ -137,7 +137,7 @@ impl ClickupTools {
 #[tool_router]
 impl ClickupTools {
     #[tool(
-        description = "List the user's open ClickUp tasks (assigned to them, in all workspaces), newest change first. fetched_at is when the list came from ClickUp (Unix seconds). A note says when the list is not complete."
+        description = "List the user's open ClickUp tasks (assigned to them, in all workspaces), newest change first. fetched_at is when the list came from ClickUp (Unix seconds). A note says when the list is not complete. `aifred_status` is AIfred's own status: use it, not the ClickUp `status` name, which can mean another thing in each list. A task with aifred_status Unfinished or Cancelled is closed in AIfred: it is not open work."
     )]
     async fn my_tasks(
         &self,
@@ -146,6 +146,19 @@ impl ClickupTools {
         let list = self.list().await?;
         let mut items = list.items;
         items.truncate(a.limit.unwrap_or(50).clamp(1, 200) as usize);
+        // AIfred's own status of each task (aifred-core status.rs).
+        let statuses = aifred_core::status::all(&self.dir).unwrap_or_default();
+        let items: Vec<serde_json::Value> = items
+            .into_iter()
+            .map(|i| {
+                let key = format!("clickup:{}", i.id);
+                let mut v = json!(i);
+                if let Some(st) = statuses.get(&key) {
+                    v["aifred_status"] = aifred_core::status::label(&st.status).into();
+                }
+                v
+            })
+            .collect();
         let mut out = json!({ "tasks": items, "fetched_at": list.fetched_at });
         if let Some(note) = list.warning {
             out["note"] = json!(note);
@@ -241,7 +254,7 @@ impl ClickupTools {
         }
         // ClickUp has the change. The saved list shows the task until the
         // next download when this fails, so it is not an error.
-        if let Err(e) = ClickupStore::new(&self.dir).remove(id) {
+        if let Err(e) = ClickupStore::new(&self.dir).remove(id, now()) {
             eprintln!("aifred-clickup-mcp: cannot update the saved ClickUp list: {e:#}");
         }
         ok_json(&json!({ "id": id, "done": true, "before": before }))

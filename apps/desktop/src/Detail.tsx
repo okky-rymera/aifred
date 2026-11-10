@@ -5,7 +5,14 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { Composer, Files, Md, Messages } from "./Chat";
 import { useApp } from "./ctx";
-import { SRC_NAME, dayOfSecs, dueInfo, fmtTime, shortDay, type Item } from "./items";
+import {
+  SRC_NAME,
+  dayOfSecs,
+  dueInfo,
+  fmtTime,
+  shortDay,
+  type Item,
+} from "./items";
 import { Minutes } from "./Calendar";
 import { PriPill } from "./Home";
 import { BlockedBy, SameWork } from "./Links";
@@ -14,6 +21,7 @@ import { DocSuggest } from "./Docs";
 import { SheetComments } from "./Sheets";
 import { ReplyDraft, useItemActions } from "./Drafts";
 import { ItemContextSection } from "./Context";
+import { ContinuedIn, StatusPicker } from "./Status";
 
 /** Text that saves when you leave the box, or press Enter. */
 function useField(value: string, save: (v: string) => void) {
@@ -28,7 +36,8 @@ function useField(value: string, save: (v: string) => void) {
   }, [value]);
   return {
     value: v,
-    onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setV(e.target.value),
+    onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      setV(e.target.value),
     onBlur: () => {
       if (v !== last.current) {
         last.current = v;
@@ -41,20 +50,43 @@ function useField(value: string, save: (v: string) => void) {
 function LocalFields({ item }: { item: Item }) {
   const { editTask, today } = useApp();
   const t = item.task!;
-  const tags = useField(t.tags.join(", "), (v) => editTask(t.id, { tags: v.split(",").map((x) => x.trim()).filter(Boolean) }));
+  const tags = useField(t.tags.join(", "), (v) =>
+    editTask(t.id, {
+      tags: v
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean),
+    }),
+  );
   return (
     <>
       <dt>Due</dt>
       <dd>
-        <input type="date" aria-label="Due date" value={t.due ?? ""} onChange={(e) => editTask(t.id, { due: e.target.value })} />
+        <input
+          type="date"
+          aria-label="Due date"
+          value={t.due ?? ""}
+          onChange={(e) => editTask(t.id, { due: e.target.value })}
+        />
       </dd>
       <dt title="The task waits under Later until this day">Start</dt>
       <dd>
-        <input type="date" aria-label="Start date" value={t.start ?? ""} onChange={(e) => editTask(t.id, { start: e.target.value })} />
+        <input
+          type="date"
+          aria-label="Start date"
+          value={t.start ?? ""}
+          onChange={(e) => editTask(t.id, { start: e.target.value })}
+        />
       </dd>
       <dt>Priority</dt>
       <dd>
-        <select aria-label="Priority" value={t.priority ?? ""} onChange={(e) => editTask(t.id, { priority: e.target.value as api.Priority | "" })}>
+        <select
+          aria-label="Priority"
+          value={t.priority ?? ""}
+          onChange={(e) =>
+            editTask(t.id, { priority: e.target.value as api.Priority | "" })
+          }
+        >
           <option value="">No priority</option>
           <option value="urgent">Urgent</option>
           <option value="high">High</option>
@@ -69,7 +101,9 @@ function LocalFields({ item }: { item: Item }) {
           aria-label="Tags"
           placeholder="With commas between them, for example work, travel"
           {...tags}
-          onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+          onKeyDown={(e) =>
+            e.key === "Enter" && (e.target as HTMLInputElement).blur()
+          }
         />
       </dd>
       {t.due && (
@@ -89,14 +123,32 @@ function Steps({ item }: { item: Item }) {
   return (
     <>
       <div className="d-sec">
-        Checklist{t.checklist.length > 0 && <span className="c">{t.checklist.filter((c) => c.done).length}/{t.checklist.length}</span>}
+        Checklist
+        {t.checklist.length > 0 && (
+          <span className="c">
+            {t.checklist.filter((c) => c.done).length}/{t.checklist.length}
+          </span>
+        )}
       </div>
       <ul className="steps">
         {t.checklist.map((c, i) => (
           <li key={`${i}-${c.text}`}>
-            <button className="chk" aria-pressed={c.done} aria-label={`Step done: ${c.text}`} onClick={() => tickStep(t.id, i)} />
+            <button
+              className="chk"
+              aria-pressed={c.done}
+              aria-label={`Step done: ${c.text}`}
+              onClick={() => tickStep(t.id, i)}
+            />
             <span className={`st${c.done ? " sd" : ""}`}>{c.text}</span>
-            <button className="rm" aria-label={`Remove step: ${c.text}`} onClick={() => editTask(t.id, { checklist: t.checklist.filter((_, j) => j !== i) })}>
+            <button
+              className="rm"
+              aria-label={`Remove step: ${c.text}`}
+              onClick={() =>
+                editTask(t.id, {
+                  checklist: t.checklist.filter((_, j) => j !== i),
+                })
+              }
+            >
               ✕
             </button>
           </li>
@@ -112,7 +164,12 @@ function Steps({ item }: { item: Item }) {
               if (e.key === "Enter" && step.trim()) {
                 const text = step.trim();
                 setStep("");
-                if (!(await editTask(t.id, { checklist: [...t.checklist, { text, done: false }] }))) setStep(text);
+                if (
+                  !(await editTask(t.id, {
+                    checklist: [...t.checklist, { text, done: false }],
+                  }))
+                )
+                  setStep(text);
               }
             }}
           />
@@ -127,7 +184,10 @@ function Description({ item }: { item: Item }) {
   const [extra, setExtra] = useState<api.ItemDetails | null>(null);
   const [error, setError] = useState("");
   const t = item.task;
-  const notes = useField(t?.notes ?? "", (v) => t && editTask(t.id, { notes: v }));
+  const notes = useField(
+    t?.notes ?? "",
+    (v) => t && editTask(t.id, { notes: v }),
+  );
   useEffect(() => {
     if (t) return;
     let live = true;
@@ -145,7 +205,12 @@ function Description({ item }: { item: Item }) {
     return (
       <>
         <div className="d-sec">Description</div>
-        <textarea className="d-text" aria-label="Task description" placeholder="Add notes for this task" {...notes} />
+        <textarea
+          className="d-text"
+          aria-label="Task description"
+          placeholder="Add notes for this task"
+          {...notes}
+        />
       </>
     );
   }
@@ -155,7 +220,8 @@ function Description({ item }: { item: Item }) {
       {fields.length > 0 && (
         <>
           <div className="d-sec">
-            Fields · from {SRC_NAME[item.src]} <span className="c">{fields.length}</span>
+            Fields · from {SRC_NAME[item.src]}{" "}
+            <span className="c">{fields.length}</span>
           </div>
           <dl className="fields" style={{ marginTop: -8 }}>
             {fields.map((f, i) => (
@@ -176,10 +242,15 @@ function Description({ item }: { item: Item }) {
         ) : !extra ? (
           <span style={{ color: "var(--faint)" }}>Loading…</span>
         ) : extra.details.trim() ? (
-          <Md text={extra.details} onItem={open} hasItem={(k) => byKey.has(k)} />
+          <Md
+            text={extra.details}
+            onItem={open}
+            hasItem={(k) => byKey.has(k)}
+          />
         ) : (
           <span style={{ color: "var(--faint)" }}>
-            AIfred has no description of this item yet. It saves the description when it reads the item, for example when you ask about it below.
+            AIfred has no description of this item yet. It saves the description
+            when it reads the item, for example when you ask about it below.
           </span>
         )}
       </div>
@@ -198,7 +269,8 @@ function Links({ item }: { item: Item }) {
       <div className="links">
         {links.map((l) => (
           <a key={l.id} href={l.url} className="x" title={l.title}>
-            {l.pull_request ? "PR" : "Issue"} {l.repo === item.gh!.repo ? "" : l.repo.split("/")[1]}#{l.number}
+            {l.pull_request ? "PR" : "Issue"}{" "}
+            {l.repo === item.gh!.repo ? "" : l.repo.split("/")[1]}#{l.number}
           </a>
         ))}
       </div>
@@ -206,8 +278,29 @@ function Links({ item }: { item: Item }) {
   );
 }
 
-export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.ReactNode; handle?: React.ReactNode }) {
-  const { close, toggleDone, sched, addToPlan, removeFromPlan, plan, itemChat, askItem, models, setModel, open, byKey, deleteTask, today, editTask } = useApp();
+export function Detail(props: {
+  item: Item;
+  hidden?: boolean;
+  tabs?: React.ReactNode;
+  handle?: React.ReactNode;
+}) {
+  const {
+    close,
+    toggleDone,
+    sched,
+    addToPlan,
+    removeFromPlan,
+    plan,
+    itemChat,
+    askItem,
+    models,
+    setModel,
+    open,
+    byKey,
+    deleteTask,
+    today,
+    editTask,
+  } = useApp();
   const i = props.item;
   const chat = itemChat(i.key);
   const actions = useItemActions(i.key);
@@ -219,11 +312,20 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
   });
 
   useEffect(() => {
-    if (chat.msgs.length || chat.busy) body.current?.scrollTo({ top: body.current.scrollHeight, behavior: "smooth" });
+    if (chat.msgs.length || chat.busy)
+      body.current?.scrollTo({
+        top: body.current.scrollHeight,
+        behavior: "smooth",
+      });
   }, [chat.msgs.length, chat.busy]);
 
   return (
-    <aside className="detail" role="dialog" aria-label="Task details" hidden={props.hidden}>
+    <aside
+      className="detail"
+      role="dialog"
+      aria-label="Task details"
+      hidden={props.hidden}
+    >
       {props.handle}
       {props.tabs}
       <div className="d-head">
@@ -241,32 +343,63 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
           </a>
         )}
         {i.task && (
-          <button className="iconbtn danger" onClick={() => deleteTask(i)} title="Delete this task">
+          <button
+            className="iconbtn danger"
+            onClick={() => deleteTask(i)}
+            title="Delete this task"
+          >
             Delete
           </button>
         )}
-        <button className="iconbtn close" onClick={close} aria-label="Close details">
+        <button
+          className="iconbtn close"
+          onClick={close}
+          aria-label="Close details"
+        >
           ✕
         </button>
       </div>
       <div className="d-body" ref={body}>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {i.task ? (
-            <input className="d-title" aria-label="Task title" {...title} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />
+            <input
+              className="d-title"
+              aria-label="Task title"
+              {...title}
+              onKeyDown={(e) =>
+                e.key === "Enter" && (e.target as HTMLInputElement).blur()
+              }
+            />
           ) : (
             <h3 className="d-title">{i.title}</h3>
           )}
           <div className="d-status">
-            {i.src !== "gh" ? (
-              <button className={`statusbtn${i.done ? " isdone" : ""}`} onClick={() => toggleDone(i)}>
-                {i.done ? "✓ Finished" : i.src === "cu" ? "Close in ClickUp" : i.src === "gm" ? "No answer needed" : "Mark as finished"}
+            {(i.done && !i.task && !i.mail) ||
+            i.status === "unfinished" ||
+            i.status === "cancelled" ? null : i.src !== "gh" ? (
+              <button
+                className={`statusbtn${i.done ? " isdone" : ""}`}
+                onClick={() => toggleDone(i)}
+              >
+                {i.done
+                  ? "✓ Finished"
+                  : i.src === "cu"
+                    ? "Close in ClickUp"
+                    : i.src === "gm"
+                      ? "No answer needed"
+                      : "Mark as finished"}
               </button>
             ) : (
-              <span className="hintx">GitHub is read-only. The item leaves the list when it closes there.</span>
+              <span className="hintx">
+                GitHub is read-only. A status here changes only AIfred.
+              </span>
             )}
+            <StatusPicker item={i} />
             {i.isNew && <span className="pill">New today</span>}
             <PriPill p={i.priority} />
-            {i.task?.added_by === "aifred" && <span className="pill high">Added by AIfred</span>}
+            {i.task?.added_by === "aifred" && (
+              <span className="pill high">Added by AIfred</span>
+            )}
           </div>
         </div>
         {i.summary && (
@@ -284,19 +417,26 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
                 <>
                   <dt>Waits since</dt>
                   <dd className="ro">
-                    {dayOfSecs(i.mail.since, today)} · {i.mail.messages} message{i.mail.messages > 1 ? "s" : ""}
+                    {dayOfSecs(i.mail.since, today)} · {i.mail.messages} message
+                    {i.mail.messages > 1 ? "s" : ""}
                     {i.mail.direct ? "" : " · you are in Cc"}
                   </dd>
                 </>
               ) : (
                 <>
                   <dt>Due</dt>
-                  <dd className="ro">{i.due ? `${shortDay(i.due, today)} · ${dueInfo(i.due, today).text}` : "No due day"}</dd>
+                  <dd className="ro">
+                    {i.due
+                      ? `${shortDay(i.due, today)} · ${dueInfo(i.due, today).text}`
+                      : "No due day"}
+                  </dd>
                 </>
               )}
               {i.cu && (
                 <>
-                  <dt>Status</dt>
+                  <dt title="The name in ClickUp. It can mean another thing in each list: AIfred's own status is at the top.">
+                    ClickUp status
+                  </dt>
                   <dd className="ro">{i.cu.status}</dd>
                 </>
               )}
@@ -306,7 +446,13 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
           <dd>
             <span className="ctl">
               <Minutes item={i} />
-              <span className="hintx">{i.minutesBy === "aifred" ? "✦ guessed by AIfred" : i.minutesBy === "you" ? "set by you" : "no guess yet"}</span>
+              <span className="hintx">
+                {i.minutesBy === "aifred"
+                  ? "✦ guessed by AIfred"
+                  : i.minutesBy === "you"
+                    ? "set by you"
+                    : "no guess yet"}
+              </span>
             </span>
           </dd>
           <dt>Today's plan</dt>
@@ -316,12 +462,20 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
                 <span className="planned">
                   {fmtTime(at)}–{fmtTime(at + i.minutes)}
                 </span>{" "}
-                <button className="linkbtn" onClick={() => removeFromPlan(i.key)}>
+                <button
+                  className="linkbtn"
+                  onClick={() => removeFromPlan(i.key)}
+                >
                   Take out
                 </button>
               </>
             ) : (
-              <button className="linkbtn" style={{ paddingLeft: 6 }} disabled={i.done} onClick={() => addToPlan(i.key)}>
+              <button
+                className="linkbtn"
+                style={{ paddingLeft: 6 }}
+                disabled={i.done}
+                onClick={() => addToPlan(i.key)}
+              >
                 + Add to today's plan
               </button>
             )}
@@ -330,16 +484,33 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
         {why && !i.done && <span className="why">{why}</span>}
         <NextStep item={i} />
         <Description item={i} />
-        <ItemContextSection key={i.key} itemKey={i.key} version={chat.busy ? -1 : chat.msgs.length} />
+        <ItemContextSection
+          key={i.key}
+          itemKey={i.key}
+          version={chat.busy ? -1 : chat.msgs.length}
+        />
         <Links item={i} />
+        <ContinuedIn item={i} />
         <SameWork item={i} />
         <BlockedBy item={i} />
         {i.task && <Steps item={i} />}
         {!i.task && !i.done && <div className="d-sec">Steps</div>}
         <SuggestSteps item={i} />
-        <ReplyDraft item={i} log={actions.list.filter((a) => a.app === "gmail")} load={actions.reload} />
-        <DocSuggest item={i} log={actions.list.filter((a) => a.app === "docs")} load={actions.reload} />
-        <SheetComments item={i} log={actions.list.filter((a) => a.app === "sheets")} load={actions.reload} />
+        <ReplyDraft
+          item={i}
+          log={actions.list.filter((a) => a.app === "gmail")}
+          load={actions.reload}
+        />
+        <DocSuggest
+          item={i}
+          log={actions.list.filter((a) => a.app === "docs")}
+          load={actions.reload}
+        />
+        <SheetComments
+          item={i}
+          log={actions.list.filter((a) => a.app === "sheets")}
+          load={actions.reload}
+        />
         {i.task && i.task.files.length > 0 && (
           <>
             <div className="d-sec">
@@ -352,7 +523,13 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
           <>
             <div className="d-sec">Asked about this item</div>
             <div className="d-asks">
-              <Messages list={chat.msgs} busy={chat.busy} progress={chat.progress} onItem={open} hasItem={(k) => byKey.has(k)} />
+              <Messages
+                list={chat.msgs}
+                busy={chat.busy}
+                progress={chat.progress}
+                onItem={open}
+                hasItem={(k) => byKey.has(k)}
+              />
             </div>
           </>
         )}

@@ -14,10 +14,26 @@ import { HelpCard, useAsking, useHasQuestions } from "./Context";
 import { NextStep, stepTaskKey } from "./Steps";
 import { progressText } from "./Mission";
 import { SRC_NAME, addDays, parentOf, dayOf, dayOfSecs, daysBetween, isItemBlock, dueInfo, dur, fmtTime, groupItems, isPlanRequest, joinLinked, longDay, parseTask, shortDay, treeDepths, type Item } from "./items";
+import { StatusPill } from "./Status";
 
 export function Check(props: { item: Item }) {
-  const { toggleDone } = useApp();
+  const { toggleDone, openAgain } = useApp();
   const i = props.item;
+  // A GitHub or ClickUp item that is closed only in AIfred (for example
+  // Unfinished): the tick opens it again in AIfred. ClickUp does not change.
+  if (i.done && !i.task && !i.mail)
+    return (
+      <button
+        className={`chk p-${i.priority ?? "normal"}`}
+        aria-pressed
+        aria-label={`Open again: ${i.title}`}
+        title={`${api.STATUS_NAME[i.status]} in AIfred. Click to open it again. ${SRC_NAME[i.src]} does not change.`}
+        onClick={(e) => {
+          e.stopPropagation();
+          void openAgain(i);
+        }}
+      />
+    );
   // GitHub items have no tick: AIfred only reads GitHub. An item leaves the list when it closes there.
   if (i.src === "gh") return <span className="chk-none" title="GitHub is read-only. The item leaves the list when it closes on GitHub." />;
   const label = i.src === "cu" ? `Close in ClickUp: ${i.title}` : i.src === "gm" ? `No answer needed: ${i.title}` : `${i.done ? "Open again" : "Finish"}: ${i.title}`;
@@ -55,12 +71,7 @@ export function SrcLine({ item: i, extra }: { item: Item; extra?: React.ReactNod
       </span>
       {i.gh && <span className="tagc">{REASON[i.gh.reason]}</span>}
       {i.mail && <MailTag m={i.mail} />}
-      {i.cu && (
-        <span className="pill status" title={`ClickUp status in ${i.cu.workspace}`}>
-          <i style={{ background: i.cu.status_color || "var(--faint)" }} aria-hidden />
-          {i.cu.status}
-        </span>
-      )}
+      <StatusPill item={i} />
       {i.tags.map((t) => (
         <span key={t} className="tagc">
           #{t}

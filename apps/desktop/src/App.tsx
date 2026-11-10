@@ -2,11 +2,34 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as api from "./api";
 import { Composer, ICON, Messages, type ChatMsg } from "./Chat";
-import { Ctx, openQuestions, useApp, type AppCtx, type CardMode, type ChatState, type ListState, type Talk } from "./ctx";
+import {
+  Ctx,
+  openQuestions,
+  useApp,
+  type AppCtx,
+  type CardMode,
+  type ChatState,
+  type ListState,
+  type Talk,
+} from "./ctx";
 import { Detail } from "./Detail";
 import { MissionDetail, missionChatKey, sideThread } from "./Mission";
 import { Home } from "./Home";
-import { WEEK, addDays, buildItems, dayName, dayOf, dur, eventsOn, fmtTime, schedule, shortDay, type DayEvents, type Item, type Schedule } from "./items";
+import {
+  WEEK,
+  addDays,
+  buildItems,
+  dayName,
+  dayOf,
+  dur,
+  eventsOn,
+  fmtTime,
+  schedule,
+  shortDay,
+  type DayEvents,
+  type Item,
+  type Schedule,
+} from "./items";
 import { TasksPage } from "./Tasks";
 import { MemoryList } from "./Memory";
 import { CalendarView, PlanChat } from "./Calendar";
@@ -60,17 +83,23 @@ function store(key: string, value: string | null) {
 const pickArg = (m: string | null) => m ?? "default";
 
 /** A message with files and no text asks AIfred to look at the files. */
-const withFiles = (text: string, files: unknown[]) => (text.trim() || !files.length ? text : "Look at these files.");
+const withFiles = (text: string, files: unknown[]) =>
+  text.trim() || !files.length ? text : "Look at these files.";
 
 /** Puts an email back in its list, newest first (for Undo). */
-const putBack = (list: api.Mail[], m: api.Mail) => [m, ...list.filter((x) => x.id !== m.id)].sort((a, b) => b.last_at - a.last_at);
+const putBack = (list: api.Mail[], m: api.Mail) =>
+  [m, ...list.filter((x) => x.id !== m.id)].sort(
+    (a, b) => b.last_at - a.last_at,
+  );
 
 /** The real time of a finished item for a toast, with a space first:
  * " It took 12 m, the guess was 10 m." A forgotten timer (more than 10
  * hours) does not count, and the text says so. "" for no work time. */
 const tookText = (d: api.WorkDone | null) => {
   if (!d) return "";
-  const took = d.minutes ? ` It took ${dur(d.minutes)}${d.guess ? `, the guess was ${dur(d.guess)}` : ""}.` : "";
+  const took = d.minutes
+    ? ` It took ${dur(d.minutes)}${d.guess ? `, the guess was ${dur(d.guess)}` : ""}.`
+    : "";
   const skipped = !d.skipped
     ? ""
     : d.skipped === 1
@@ -80,7 +109,12 @@ const tookText = (d: api.WorkDone | null) => {
 };
 
 const turnMsgs = (turns: (api.Turn | api.SideTurn)[]): ChatMsg[] =>
-  turns.map((t) => ({ role: t.role, text: t.text, files: t.files, info: "info" in t ? t.info : undefined }));
+  turns.map((t) => ({
+    role: t.role,
+    text: t.text,
+    files: t.files,
+    info: "info" in t ? t.info : undefined,
+  }));
 
 export default function App() {
   const today = useToday();
@@ -92,15 +126,24 @@ export default function App() {
   // part of Settings reads it again after each change.
   const [google, setGoogle] = useState<api.GoogleStatus | null>(null);
   const loadGoogle = useCallback(() => {
-    api.googleStatus().then(setGoogle).catch(() => {});
+    api
+      .googleStatus()
+      .then(setGoogle)
+      .catch(() => {});
   }, []);
   useEffect(loadGoogle, [loadGoogle]);
   const [tasks, setTasks] = useState<api.Task[]>([]);
   const [tasksError, setTasksError] = useState("");
   const [tasksLoaded, setTasksLoaded] = useState(false);
-  const [github, setGithub] = useState<api.GithubList>({ items: [], fetched_at: 0 });
+  const [github, setGithub] = useState<api.GithubList>({
+    items: [],
+    fetched_at: 0,
+  });
   const [githubState, setGithubState] = useState<ListState>("loading");
-  const [clickup, setClickup] = useState<api.ClickupList>({ items: [], fetched_at: 0 });
+  const [clickup, setClickup] = useState<api.ClickupList>({
+    items: [],
+    fetched_at: 0,
+  });
   const [clickupState, setClickupState] = useState<ListState>("loading");
   // True after the first load of each list came back (also with an error).
   // A later reload must not make the home page wait again (homeLoading).
@@ -112,13 +155,21 @@ export default function App() {
   useEffect(() => {
     if (clickupState !== "loading") setClickupBack(true);
   }, [clickupState]);
-  const [calendar, setCalendar] = useState<api.CalendarList>({ events: [], fetched_at: 0 });
+  const [calendar, setCalendar] = useState<api.CalendarList>({
+    events: [],
+    fetched_at: 0,
+  });
   const [calendarState, setCalendarState] = useState<ListState>("loading");
-  const [mail, setMail] = useState<api.MailList>({ reply: [], sent: [], fetched_at: 0 });
+  const [mail, setMail] = useState<api.MailList>({
+    reply: [],
+    sent: [],
+    fetched_at: 0,
+  });
   const [mailState, setMailState] = useState<ListState>("loading");
   const [waiting, setWaiting] = useState<api.Waiting[]>([]);
   const [waitingError, setWaitingError] = useState("");
-  const [clickupToken, setClickupToken] = useState<api.ClickupTokenStatus | null>(null);
+  const [clickupToken, setClickupToken] =
+    useState<api.ClickupTokenStatus | null>(null);
   const [settings, setSettings] = useState<api.Settings | null>(null);
   const [update, setUpdate] = useState<api.UpdateStatus | null>(null);
   const [restartError, setRestartError] = useState("");
@@ -138,7 +189,10 @@ export default function App() {
   const [work, setWork] = useState<api.Running | null>(null);
   // The mode of the home box stays when you go to another page.
   const [homeMode, setHomeMode] = useState<"ask" | "task">("ask");
-  const [reviewCards, setReviewCards] = useState<{ day: CardMode; week: CardMode }>({ day: "auto", week: "auto" });
+  const [reviewCards, setReviewCards] = useState<{
+    day: CardMode;
+    week: CardMode;
+  }>({ day: "auto", week: "auto" });
   // A card that you closed comes back on a new day.
   useEffect(() => setReviewCards({ day: "auto", week: "auto" }), [today]);
   /** The plans of today and the next days, by day. null: the day has no plan. */
@@ -160,12 +214,16 @@ export default function App() {
   const [planLoaded, setPlanLoaded] = useState("");
   /** The day that the Calendar page shows, and how it shows it. */
   const [calDay, setCalDay] = useState(today);
-  const [calView, setCalViewState] = useState<"day" | "week">(() => (stored("aifred-cal-view") === "week" ? "week" : "day"));
+  const [calView, setCalViewState] = useState<"day" | "week">(() =>
+    stored("aifred-cal-view") === "week" ? "week" : "day",
+  );
   const [models, setModels] = useState<AppCtx["models"]>(() => ({
     main: null,
     plan: stored("aifred-model-plan") || null,
     // "" is a saved pick of Default. No saved pick at all is Haiku.
-    item: ((m) => (m === null ? "haiku" : m || null))(stored("aifred-model-item")),
+    item: ((m) => (m === null ? "haiku" : m || null))(
+      stored("aifred-model-item"),
+    ),
   }));
 
   /** False until the saved main model is loaded. Before that, a question
@@ -191,7 +249,11 @@ export default function App() {
   const planBusyDay = Object.keys(planChats).find((d) => planChats[d].busy);
   const [itemChats, setItemChats] = useState<Record<string, ChatState>>({});
   // A restart to update must wait for every running answer and the brief.
-  const anyBusy = main.busy || planBusyDay !== undefined || Object.values(itemChats).some((c) => c.busy) || briefState === "writing";
+  const anyBusy =
+    main.busy ||
+    planBusyDay !== undefined ||
+    Object.values(itemChats).some((c) => c.busy) ||
+    briefState === "writing";
   const [sel, setSel] = useState<string | null>(null);
   /** The id of the mission that is open on the right side. Only one of
    * `sel` and `selMission` is set: the side shows one item or one mission. */
@@ -237,10 +299,22 @@ export default function App() {
       .catch((e) => setTasksError(String(e)));
   }, []);
   const loadMeta = useCallback(() => {
-    api.itemMeta().then(setMeta).catch(() => {});
-    api.estimates().then(setEst).catch(() => {});
-    api.itemLinks().then(setLinks).catch(() => {});
-    api.itemBlockers().then(setBlockers).catch(() => {});
+    api
+      .itemMeta()
+      .then(setMeta)
+      .catch(() => {});
+    api
+      .estimates()
+      .then(setEst)
+      .catch(() => {});
+    api
+      .itemLinks()
+      .then(setLinks)
+      .catch(() => {});
+    api
+      .itemBlockers()
+      .then(setBlockers)
+      .catch(() => {});
   }, []);
 
   /** Loads can overlap (reload, then a tick). Only the answer to the newest load may change the screen. */
@@ -371,14 +445,18 @@ export default function App() {
   const clickupOn = clickupToken?.set ?? false;
 
   useEffect(() => {
-    const failed = (what: string) => (e: unknown) => setLoadError(`Cannot load ${what}: ${e}`);
+    const failed = (what: string) => (e: unknown) =>
+      setLoadError(`Cannot load ${what}: ${e}`);
     api
       .history()
       .then((turns) => setMain((c) => ({ ...c, msgs: turnMsgs(turns) })))
       .catch(failed("the conversation"));
     api.info().then(setInfo).catch(failed("app info"));
     api.memoryFacts().then(setFacts).catch(failed("memory"));
-    api.workRunning().then(setWork).catch(() => {});
+    api
+      .workRunning()
+      .then(setWork)
+      .catch(() => {});
     api
       .getSettings()
       .then((s) => setSettings({ ...api.DEFAULT_SETTINGS, ...s }))
@@ -401,32 +479,49 @@ export default function App() {
     loadMail(false);
     loadWaiting();
     checkClickup(false);
-  }, [loadTasks, loadMeta, loadGithub, loadCalendar, loadMail, loadWaiting, checkClickup]);
+  }, [
+    loadTasks,
+    loadMeta,
+    loadGithub,
+    loadCalendar,
+    loadMail,
+    loadWaiting,
+    checkClickup,
+  ]);
 
   /** Loads the plans of today and the next days. A day that changed on the
    * screen after the load started keeps the newer plan of the screen. */
-  const loadPlans = useCallback((tries = 3) => {
-    const from = today;
-    const seen = { ...planEdits.current };
-    api
-      .dayPlans(from, addDays(from, WEEK - 1))
-      .then((list) => {
-        if (planDay.current !== from) return;
-        const got: Record<string, api.DayPlan | null> = {};
-        for (let n = 0; n < WEEK; n++) got[addDays(from, n)] = null;
-        for (const p of list) got[p.day] = p;
-        setPlans((old) => {
-          const m = { ...got };
-          for (const day of Object.keys(m)) if (planEdits.current[day] !== seen[day] && day in old) m[day] = old[day];
-          return m;
+  const loadPlans = useCallback(
+    (tries = 3) => {
+      const from = today;
+      const seen = { ...planEdits.current };
+      api
+        .dayPlans(from, addDays(from, WEEK - 1))
+        .then((list) => {
+          if (planDay.current !== from) return;
+          const got: Record<string, api.DayPlan | null> = {};
+          for (let n = 0; n < WEEK; n++) got[addDays(from, n)] = null;
+          for (const p of list) got[p.day] = p;
+          setPlans((old) => {
+            const m = { ...got };
+            for (const day of Object.keys(m))
+              if (planEdits.current[day] !== seen[day] && day in old)
+                m[day] = old[day];
+            return m;
+          });
+          setPlanLoaded(from);
+        })
+        .catch(() => {
+          // Try again soon. Until the plans load, the plan changes stay off.
+          if (tries > 1)
+            setTimeout(
+              () => planDay.current === from && loadPlans(tries - 1),
+              3000,
+            );
         });
-        setPlanLoaded(from);
-      })
-      .catch(() => {
-        // Try again soon. Until the plans load, the plan changes stay off.
-        if (tries > 1) setTimeout(() => planDay.current === from && loadPlans(tries - 1), 3000);
-      });
-  }, [today]);
+    },
+    [today],
+  );
 
   /** Shows the plan chat of `day`, with its old messages. The promise ends when the old messages are in. */
   const openPlanChat = useCallback((day: string): Promise<void> => {
@@ -435,7 +530,15 @@ export default function App() {
     if (loading) return loading;
     const load = api
       .sideHistory(`plan:${day}`)
-      .then((t) => setPlanChats((all) => ({ ...all, [day]: { ...(all[day] ?? EMPTY_CHAT), msgs: [...turnMsgs(t), ...(all[day]?.msgs ?? [])] } })))
+      .then((t) =>
+        setPlanChats((all) => ({
+          ...all,
+          [day]: {
+            ...(all[day] ?? EMPTY_CHAT),
+            msgs: [...turnMsgs(t), ...(all[day]?.msgs ?? [])],
+          },
+        })),
+      )
       .catch(() => {
         chatLoaded.current.delete(day);
       });
@@ -478,7 +581,11 @@ export default function App() {
 
   /** Reads the brief of `day` again, when it is still on the screen. */
   const reloadBrief = useCallback((day: string | undefined) => {
-    if (day) api.brief(day).then((b) => b && setBrief((old) => (old?.day === day ? b : old))).catch(() => {});
+    if (day)
+      api
+        .brief(day)
+        .then((b) => b && setBrief((old) => (old?.day === day ? b : old)))
+        .catch(() => {});
   }, []);
 
   /** Reads today's brief again and shows it. Only a newer brief of the same
@@ -487,16 +594,28 @@ export default function App() {
   const loadTodayBrief = useCallback(() => {
     api
       .brief(today)
-      .then((b) => b && setBrief((old) => (old && old.day === b.day && old.written > b.written ? old : b)))
+      .then(
+        (b) =>
+          b &&
+          setBrief((old) =>
+            old && old.day === b.day && old.written > b.written ? old : b,
+          ),
+      )
       .catch(() => {});
   }, [today]);
 
   // AIfred's sort moved new items into subtasks in the background. Show the
   // new trees, and the brief with its note about the moves, at once.
   const afterSort = useCallback(() => {
-    api.itemLinks().then(setLinks).catch(() => {});
+    api
+      .itemLinks()
+      .then(setLinks)
+      .catch(() => {});
     // The sort also takes away the blockers of gone items (links.rs drop_gone_in).
-    api.itemBlockers().then(setBlockers).catch(() => {});
+    api
+      .itemBlockers()
+      .then(setBlockers)
+      .catch(() => {});
     loadTodayBrief();
   }, [loadTodayBrief]);
   useItemsSorted(afterSort);
@@ -508,7 +627,13 @@ export default function App() {
     const timer = setInterval(() => {
       api
         .brief(today)
-        .then((b) => b && setBrief((old) => (old && old.written >= b.written && old.day === b.day ? old : b)))
+        .then(
+          (b) =>
+            b &&
+            setBrief((old) =>
+              old && old.written >= b.written && old.day === b.day ? old : b,
+            ),
+        )
         .catch(() => {});
     }, 60_000);
     return () => clearInterval(timer);
@@ -525,19 +650,37 @@ export default function App() {
       loadMail("timer");
     }, refreshMinutes * 60_000);
     return () => clearInterval(timer);
-  }, [refreshMinutes, loadGithub, loadClickup, loadCalendar, loadMail, clickupOn]);
+  }, [
+    refreshMinutes,
+    loadGithub,
+    loadClickup,
+    loadCalendar,
+    loadMail,
+    clickupOn,
+  ]);
 
   // The first start downloads the meaning search model. Check again until it is ready.
   const meaningStarting = info?.meaning_search === "starting";
   useEffect(() => {
     if (!meaningStarting) return;
-    const timer = setInterval(() => api.info().then(setInfo).catch(() => {}), 10_000);
+    const timer = setInterval(
+      () =>
+        api
+          .info()
+          .then(setInfo)
+          .catch(() => {}),
+      10_000,
+    );
     return () => clearInterval(timer);
   }, [meaningStarting]);
 
   // The app checks for updates by itself (main.rs). Read its status each minute.
   useEffect(() => {
-    const load = () => api.updateStatus().then(setUpdate).catch(() => {});
+    const load = () =>
+      api
+        .updateStatus()
+        .then(setUpdate)
+        .catch(() => {});
     load();
     const timer = setInterval(load, 60_000);
     return () => clearInterval(timer);
@@ -546,19 +689,25 @@ export default function App() {
   /** Writes today's brief. `release` true: the brief stops holding its
    * missions for the questions (brief.rs), also when the server still sees
    * a question that this window does not show. */
-  const writeBriefWith = useCallback((release: boolean) => {
-    const day = today;
-    briefTried.current.add(day);
-    setBriefState("writing");
-    api
-      .writeBrief(day, release)
-      .then((b) => {
-        if (b.day === dayOf(new Date())) setBrief(b);
-        setBriefState("idle");
-        api.estimates().then(setEst).catch(() => {});
-      })
-      .catch((e) => setBriefState(String(e)));
-  }, [today]);
+  const writeBriefWith = useCallback(
+    (release: boolean) => {
+      const day = today;
+      briefTried.current.add(day);
+      setBriefState("writing");
+      api
+        .writeBrief(day, release)
+        .then((b) => {
+          if (b.day === dayOf(new Date())) setBrief(b);
+          setBriefState("idle");
+          api
+            .estimates()
+            .then(setEst)
+            .catch(() => {});
+        })
+        .catch((e) => setBriefState(String(e)));
+    },
+    [today],
+  );
   const writeBrief = useCallback(() => writeBriefWith(false), [writeBriefWith]);
 
   // The load state of each source of items, by the start of the item key ("github:...").
@@ -593,13 +742,23 @@ export default function App() {
   // It does not wait for Gmail: the brief gets the emails itself, and Gmail can be slow.
   const listsReady = githubState !== "loading" && clickupState !== "loading";
   useEffect(() => {
-    if (!settings?.auto_brief || briefLoaded !== today || brief || !listsReady || briefTried.current.has(today)) return;
+    if (
+      !settings?.auto_brief ||
+      briefLoaded !== today ||
+      brief ||
+      !listsReady ||
+      briefTried.current.has(today)
+    )
+      return;
     writeBrief();
   }, [settings?.auto_brief, briefLoaded, today, brief, listsReady, writeBrief]);
 
   // ---------- Items ----------
 
-  const goalText = useCallback((id: number | undefined) => goals?.goals.find((g) => g.id === id)?.text, [goals]);
+  const goalText = useCallback(
+    (id: number | undefined) => goals?.goals.find((g) => g.id === id)?.text,
+    [goals],
+  );
   const items = useMemo(() => {
     // The goal of each item that the brief ranked. A goal that the user removed since then is left out.
     const goalOf: Record<string, string> = {};
@@ -607,8 +766,28 @@ export default function App() {
       const t = goalText(id);
       if (t) goalOf[key] = t;
     }
-    return buildItems(tasks, github.items, clickup.items, meta, est, brief?.why ?? {}, goalOf, mail.reply, brief?.next, brief?.draft);
-  }, [tasks, github.items, clickup.items, meta, est, brief, goalText, mail.reply]);
+    return buildItems(
+      tasks,
+      github.items,
+      clickup.items,
+      meta,
+      est,
+      brief?.why ?? {},
+      goalOf,
+      mail.reply,
+      brief?.next,
+      brief?.draft,
+    );
+  }, [
+    tasks,
+    github.items,
+    clickup.items,
+    meta,
+    est,
+    brief,
+    goalText,
+    mail.reply,
+  ]);
 
   const byKey = useMemo(() => new Map(items.map((i) => [i.key, i])), [items]);
 
@@ -617,11 +796,17 @@ export default function App() {
   // does not show cannot hold the missions for the whole day. It waits for
   // the GitHub and ClickUp lists: while they load, the card shows no question.
   useEffect(() => {
-    if (!brief || brief.day !== today || briefState === "writing" || talk) return;
+    if (!brief || brief.day !== today || briefState === "writing" || talk)
+      return;
     if (githubState === "loading" || clickupState === "loading") return;
-    if (openQuestions(brief, byKey, today, skipped, githubState, clickupState).length > 0) return;
+    if (
+      openQuestions(brief, byKey, today, skipped, githubState, clickupState)
+        .length > 0
+    )
+      return;
     // The same second counts: the brief can have read the items before the answer.
-    const answered = lastAnswer.current > 0 && lastAnswer.current >= brief.written;
+    const answered =
+      lastAnswer.current > 0 && lastAnswer.current >= brief.written;
     if (!answered && (!brief.held || heldDays.current.has(brief.day))) return;
     if (heldTried.current.has(brief.written)) return;
     heldTried.current.add(brief.written);
@@ -633,7 +818,17 @@ export default function App() {
     // example a ClickUp task that is not in the loaded list. Else the
     // missions wait for the whole day.
     writeBriefWith(true);
-  }, [brief, today, briefState, writeBriefWith, talk, byKey, skipped, githubState, clickupState]);
+  }, [
+    brief,
+    today,
+    briefState,
+    writeBriefWith,
+    talk,
+    byKey,
+    skipped,
+    githubState,
+    clickupState,
+  ]);
   const cfg = settings ?? api.DEFAULT_SETTINGS;
   /** The open plan items and the schedule of today and each next day. */
   // The events of each day do not change when an item changes: keep them apart.
@@ -646,13 +841,22 @@ export default function App() {
     return out;
   }, [today, calendar.events]);
   const week = useMemo(() => {
-    const out: Record<string, { items: Item[]; sched: Schedule; events: DayEvents }> = {};
+    const out: Record<
+      string,
+      { items: Item[]; sched: Schedule; events: DayEvents }
+    > = {};
     for (const [day, events] of Object.entries(weekEvents)) {
       const p = plans[day]?.items ?? [];
-      const dayItems = p.map((x) => byKey.get(x.key)).filter((i): i is Item => !!i);
+      const dayItems = p
+        .map((x) => byKey.get(x.key))
+        .filter((i): i is Item => !!i);
       const pins: Record<string, number> = {};
       for (const x of p) if (x.at !== undefined) pins[x.key] = x.at;
-      out[day] = { items: dayItems, sched: schedule(dayItems, cfg, events.busy, pins), events };
+      out[day] = {
+        items: dayItems,
+        sched: schedule(dayItems, cfg, events.busy, pins),
+        events,
+      };
     }
     return out;
   }, [weekEvents, plans, byKey, cfg]);
@@ -665,17 +869,28 @@ export default function App() {
   }, [sel, byKey, sourcesLoading]);
   // A mission that left today's list (done, "Not today", a new brief) closes its panel.
   useEffect(() => {
-    if (selMission !== null && brief && !brief.missions?.some((m) => m.id === selMission)) setSelMission(null);
+    if (
+      selMission !== null &&
+      brief &&
+      !brief.missions?.some((m) => m.id === selMission)
+    )
+      setSelMission(null);
   }, [selMission, brief]);
 
   // ---------- Toast ----------
 
   const toastTimer = useRef<number | undefined>(undefined);
-  const toast = useCallback((text: string, undo?: () => void, error?: boolean) => {
-    setToast({ text, undo, error });
-    clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), error ? 6000 : 4000);
-  }, []);
+  const toast = useCallback(
+    (text: string, undo?: () => void, error?: boolean) => {
+      setToast({ text, undo, error });
+      clearTimeout(toastTimer.current);
+      toastTimer.current = window.setTimeout(
+        () => setToast(null),
+        error ? 6000 : 4000,
+      );
+    },
+    [],
+  );
 
   /** Runs a change. A failure shows its reason. Returns true when it worked. */
   const run = useCallback(
@@ -708,7 +923,8 @@ export default function App() {
 
   // ---------- Actions on items ----------
 
-  const putTask = (t: api.Task) => setTasks((all) => all.map((x) => (x.id === t.id ? t : x)));
+  const putTask = (t: api.Task) =>
+    setTasks((all) => all.map((x) => (x.id === t.id ? t : x)));
 
   // ---------- Work time ----------
 
@@ -727,9 +943,20 @@ export default function App() {
    * opens the item again. With `forgetsTime`, the undo itself makes the
    * backend forget the real time, so the screen does not ask for it. */
   const finishedToast = useCallback(
-    (key: string, text: string | null, d: api.WorkDone | null, undo?: () => void, forgetsTime = false) => {
+    (
+      key: string,
+      text: string | null,
+      d: api.WorkDone | null,
+      undo?: () => void,
+      forgetsTime = false,
+    ) => {
       if (text === null && !d) return;
-      const msg = text === null ? `Finished: ${d!.title}.${tookText(d)}` : d ? `${text}.${tookText(d)}` : text;
+      const msg =
+        text === null
+          ? `Finished: ${d!.title}.${tookText(d)}`
+          : d
+            ? `${text}.${tookText(d)}`
+            : text;
       toast(
         msg,
         undo &&
@@ -751,7 +978,11 @@ export default function App() {
         d = await endWork(key);
       } catch (e) {
         // The timer stays on screen, so you can click Done again.
-        toast(`${text ? `${text}. ` : ""}The work time is not saved: ${e}`, undo, true);
+        toast(
+          `${text ? `${text}. ` : ""}The work time is not saved: ${e}`,
+          undo,
+          true,
+        );
         return;
       }
       finishedToast(key, text, d, undo);
@@ -767,13 +998,22 @@ export default function App() {
    * the Undo of the hide.
    */
   const hideMail = useCallback(
-    async (m: api.Mail, list: "reply" | "sent", text: string, workKey?: string, keepUndo?: (undo: () => void) => void): Promise<boolean> => {
+    async (
+      m: api.Mail,
+      list: "reply" | "sent",
+      text: string,
+      workKey?: string,
+      keepUndo?: (undo: () => void) => void,
+    ): Promise<boolean> => {
       if (mailBusy.current.has(m.id)) return false;
       mailBusy.current.add(m.id);
       try {
         const ok = await run(api.hideEmail(m.id, true), () => {
           mailEdits.current++;
-          setMail((l) => ({ ...l, [list]: l[list].filter((x) => x.id !== m.id) }));
+          setMail((l) => ({
+            ...l,
+            [list]: l[list].filter((x) => x.id !== m.id),
+          }));
         });
         if (!ok) return false;
         let d: api.WorkDone | null = null;
@@ -801,8 +1041,41 @@ export default function App() {
     [run, toast, endWork],
   );
 
-  const startWork = useCallback((key: string) => void run(api.startWork(key), setWork), [run]);
-  const stopWork = useCallback(() => void run(api.stopWork(), () => setWork(null)), [run]);
+  const startWork = useCallback(
+    (key: string) => void run(api.startWork(key), setWork),
+    [run],
+  );
+  const stopWork = useCallback(
+    () => void run(api.stopWork(), () => setWork(null)),
+    [run],
+  );
+
+  /** Closes the ClickUp task of `i` in ClickUp: the only change AIfred
+   * makes there. Its undo is in the list of closed ClickUp tasks. With
+   * `keepUndo`, no toast of its own (see toggleDone). True when it worked. */
+  const closeInClickup = useCallback(
+    (i: Item, keepUndo?: (undo: () => void) => void): Promise<boolean> => {
+      const c = i.cu;
+      if (!c || closing.current.has(c.id)) return Promise.resolve(false);
+      closing.current.add(c.id);
+      return run(api.clickupMarkDone(c.id), (before) => {
+        setClickup((l) => ({
+          ...l,
+          items: l.items.filter((x) => x.id !== c.id),
+        }));
+        setClosed((l) => [
+          ...l.filter((x) => x.id !== c.id),
+          { id: c.id, title: c.title, before },
+        ]);
+        // In a mission, the work ends with no toast of its own: it must
+        // not replace the toast of the mission and its Undo. A failed save
+        // keeps the timer on the screen, so you can click Done again.
+        if (keepUndo) void endWork(i.key).catch(() => {});
+        else void afterFinish(i.key, null);
+      }).finally(() => closing.current.delete(c.id));
+    },
+    [run, afterFinish, endWork],
+  );
 
   /** Closes or opens `i`. Each close shows a toast with an undo. With
    * `keepUndo`, a task or an email gives its undo to the caller and shows
@@ -811,6 +1084,10 @@ export default function App() {
    * `keepUndo` it shows no toast either. */
   const toggleDone = useCallback(
     (i: Item, keepUndo?: (undo: () => void) => void) => {
+      // A GitHub or ClickUp item that is closed only in AIfred (for
+      // example Unfinished): the tick and the timer must not change
+      // ClickUp. openAgain() opens it, and Done in the status menu closes it.
+      if (i.done && (i.gh || i.cu)) return Promise.resolve(false);
       if (i.task) {
         const done = !i.done;
         // The backend ends the work with the task and keeps its real time,
@@ -823,30 +1100,26 @@ export default function App() {
           if (done) setWork((w) => (w?.key === i.key ? null : w));
           putTask(t);
           // The undo opens the task again. Then the backend forgets its real time.
-          const undo = () => run(api.setTaskDone(t.id, false), (r) => putTask(r.task));
+          const undo = () =>
+            run(api.setTaskDone(t.id, false), (r) => putTask(r.task));
           if (done && keepUndo) keepUndo(undo);
-          else if (done) finishedToast(i.key, `Finished: ${i.title}`, d, undo, true);
+          else if (done)
+            finishedToast(i.key, `Finished: ${i.title}`, d, undo, true);
         });
       } else if (i.mail) {
-        return hideMail(i.mail, "reply", `Hidden: ${i.mail.subject}. It comes back when a new message comes.`, i.key, keepUndo);
+        return hideMail(
+          i.mail,
+          "reply",
+          `Hidden: ${i.mail.subject}. It comes back when a new message comes.`,
+          i.key,
+          keepUndo,
+        );
       } else if (i.cu) {
-        const c = i.cu;
-        if (closing.current.has(c.id)) return Promise.resolve(false);
-        closing.current.add(c.id);
-        // This changes the real task in ClickUp, so there is an undo.
-        return run(api.clickupMarkDone(c.id), (before) => {
-          setClickup((l) => ({ ...l, items: l.items.filter((x) => x.id !== c.id) }));
-          setClosed((l) => [...l.filter((x) => x.id !== c.id), { id: c.id, title: c.title, before }]);
-          // In a mission, the work ends with no toast of its own: it must
-          // not replace the toast of the mission and its Undo. A failed save
-          // keeps the timer on the screen, so you can click Done again.
-          if (keepUndo) void endWork(i.key).catch(() => {});
-          else void afterFinish(i.key, null);
-        }).finally(() => closing.current.delete(c.id));
+        return closeInClickup(i, keepUndo);
       }
       return Promise.resolve(false);
     },
-    [run, hideMail, afterFinish, finishedToast, endWork],
+    [run, hideMail, finishedToast, closeInClickup],
   );
 
   /** The "Done" button of the work timer. AIfred only reads GitHub, so a
@@ -855,11 +1128,73 @@ export default function App() {
   const finishItem = useCallback(
     (key: string) => {
       const i = byKey.get(key);
-      if (!i) void afterFinish(key, null);
+      // Closed in AIfred already: only the work ends. For Unfinished or
+      // Cancelled, the backend keeps no real time (worktime.rs).
+      if (!i || (i.done && !i.task)) void afterFinish(key, null);
       else if (i.gh) void afterFinish(i.key, `Finished: ${i.title}`, () => {});
       else toggleDone(i);
     },
     [byKey, afterFinish, toggleDone],
+  );
+
+  /** Sets AIfred's own status of `i` (status.rs), with an undo. It changes
+   * only AIfred, except Done of a ClickUp task: that closes the real task,
+   * also one that is closed only in AIfred (the only change AIfred makes
+   * there). Done of an open local task or an email goes through
+   * toggleDone(). True when it worked. */
+  const setStatus = useCallback(
+    async (i: Item, s: api.Status): Promise<boolean> => {
+      if (s === i.status) return true;
+      if (s === "done") {
+        if (i.cu) return closeInClickup(i);
+        if (!i.gh && !(i.task && i.done)) return toggleDone(i);
+      }
+      if (i.mail) return false;
+      const reload = () => {
+        loadTasks();
+        loadMeta();
+      };
+      return run(api.setItemStatus(i.key, s), (before) => {
+        // A closed status ends the work: the backend stops the timer. Done
+        // keeps the real time, Unfinished and Cancelled keep none. The undo
+        // puts the time from before back (status.rs restore).
+        if (api.isClosed(s)) setWork((w) => (w?.key === i.key ? null : w));
+        reload();
+        toast(`${i.title}: ${api.STATUS_NAME[s]}`, () =>
+          run(api.restoreItemStatus(before), reload),
+        );
+      });
+    },
+    [run, toggleDone, closeInClickup, loadTasks, loadMeta, toast],
+  );
+
+  /** Opens a GitHub or ClickUp item that is closed only in AIfred again,
+   * with an undo. Your pick goes away, so the timer or a blocker decides
+   * again; a rule that still closes it is overridden with To do. */
+  const openAgain = useCallback(
+    (i: Item): Promise<boolean> =>
+      run(api.openItemAgain(i.key), (before) => {
+        loadMeta();
+        toast(`${i.title}: open again`, () =>
+          run(api.restoreItemStatus(before), () => loadMeta()),
+        );
+      }),
+    [run, loadMeta, toast],
+  );
+
+  /** Links an Unfinished item to the item that continues it. null: accepted as it is. */
+  const setStatusNext = useCallback(
+    (i: Item, next: Item | null): Promise<boolean> =>
+      run(api.setStatusNext(i.key, next?.key ?? null), (before) => {
+        loadMeta();
+        toast(
+          next
+            ? `${i.title}: continued in ${next.title}`
+            : `${i.title}: accepted as it is`,
+          () => run(api.setStatusNext(i.key, before), () => loadMeta()),
+        );
+      }),
+    [run, loadMeta, toast],
   );
 
   const undoClose = useCallback(
@@ -876,7 +1211,11 @@ export default function App() {
 
   const putWaiting = (w: api.Waiting) => {
     waitingEdits.current++;
-    setWaiting((all) => (all.some((x) => x.id === w.id) ? all.map((x) => (x.id === w.id ? w : x)) : [...all, w]));
+    setWaiting((all) =>
+      all.some((x) => x.id === w.id)
+        ? all.map((x) => (x.id === w.id ? w : x))
+        : [...all, w],
+    );
   };
   const dropWaiting = (id: number) => {
     waitingEdits.current++;
@@ -905,7 +1244,10 @@ export default function App() {
   );
 
   /** Hides an email that you sent from the suggestions: you wait for nothing. */
-  const hideSent = useCallback((m: api.Mail) => hideMail(m, "sent", `Hidden: ${m.subject}`), [hideMail]);
+  const hideSent = useCallback(
+    (m: api.Mail) => hideMail(m, "sent", `Hidden: ${m.subject}`),
+    [hideMail],
+  );
 
   const addWaiting = useCallback(
     (item: api.NewWaiting) =>
@@ -914,7 +1256,10 @@ export default function App() {
         // An item from an email takes it off the suggestions.
         if (item.thread) {
           mailEdits.current++;
-          setMail((l) => ({ ...l, sent: l.sent.filter((x) => x.id !== item.thread) }));
+          setMail((l) => ({
+            ...l,
+            sent: l.sent.filter((x) => x.id !== item.thread),
+          }));
         }
       }),
     [run],
@@ -924,7 +1269,10 @@ export default function App() {
     (id: number, changes: api.WaitingChanges) =>
       run(api.updateWaiting(id, changes), (w) => {
         putWaiting(w);
-        if (changes.done) toast(`Closed: ${w.what}`, () => run(api.updateWaiting(w.id, { done: false }), putWaiting));
+        if (changes.done)
+          toast(`Closed: ${w.what}`, () =>
+            run(api.updateWaiting(w.id, { done: false }), putWaiting),
+          );
       }),
     [run, toast],
   );
@@ -947,30 +1295,46 @@ export default function App() {
     (fields: api.TaskChanges & { title: string }) =>
       run(api.createTask(fields), (t) => {
         setTasks((all) => [...all, t]);
-        toast(`Added: ${t.title}`, () => run(api.deleteTask(t.id), () => setTasks((all) => all.filter((x) => x.id !== t.id))));
+        toast(`Added: ${t.title}`, () =>
+          run(api.deleteTask(t.id), () =>
+            setTasks((all) => all.filter((x) => x.id !== t.id)),
+          ),
+        );
         loadMeta();
       }),
     [run, toast, loadMeta],
   );
 
-  const editTask = useCallback((id: string, changes: api.TaskChanges) => run(api.editTask(id, changes), putTask), [run]);
+  const editTask = useCallback(
+    (id: string, changes: api.TaskChanges) =>
+      run(api.editTask(id, changes), putTask),
+    [run],
+  );
 
   const addSteps = useCallback(
     (key: string, steps: string[]) =>
       run(api.addSteps(key, steps), (a) => {
         const t = a.task;
         const loadLinks = () => {
-          api.itemLinks().then(setLinks).catch(() => {});
-          api.itemBlockers().then(setBlockers).catch(() => {});
+          api
+            .itemLinks()
+            .then(setLinks)
+            .catch(() => {});
+          api
+            .itemBlockers()
+            .then(setBlockers)
+            .catch(() => {});
         };
         if (a.created) {
           setTasks((all) => [...all, t]);
           loadLinks();
-          toast(`Made the task "${t.title}" with ${a.added} step${a.added === 1 ? "" : "s"}, under this item`, () =>
-            run(api.deleteTask(t.id), () => {
-              setTasks((all) => all.filter((x) => x.id !== t.id));
-              loadLinks();
-            }),
+          toast(
+            `Made the task "${t.title}" with ${a.added} step${a.added === 1 ? "" : "s"}, under this item`,
+            () =>
+              run(api.deleteTask(t.id), () => {
+                setTasks((all) => all.filter((x) => x.id !== t.id));
+                loadLinks();
+              }),
           );
           return;
         }
@@ -979,9 +1343,14 @@ export default function App() {
           toast(`"${t.title}" has these steps already`);
           return;
         }
-        const added = t.checklist.slice(t.checklist.length - a.added).map((c) => c.text);
+        const added = t.checklist
+          .slice(t.checklist.length - a.added)
+          .map((c) => c.text);
         // Undo takes out the added steps that are not done, in one save. Other changes since then stay.
-        toast(`Added ${a.added} step${a.added === 1 ? "" : "s"} to "${t.title}"`, () => run(api.removeTaskSteps(t.id, added), putTask));
+        toast(
+          `Added ${a.added} step${a.added === 1 ? "" : "s"} to "${t.title}"`,
+          () => run(api.removeTaskSteps(t.id, added), putTask),
+        );
       }),
     [run, toast],
   );
@@ -1005,8 +1374,14 @@ export default function App() {
         setTasks((all) => all.filter((x) => x.id !== t.id));
         if (now.current.sel === i.key) setSel(null);
         // The backend takes the task out of its group and its blockers too (tasks.rs).
-        api.itemLinks().then(setLinks).catch(() => {});
-        api.itemBlockers().then(setBlockers).catch(() => {});
+        api
+          .itemLinks()
+          .then(setLinks)
+          .catch(() => {});
+        api
+          .itemBlockers()
+          .then(setBlockers)
+          .catch(() => {});
         toast(`Deleted: ${t.title}`);
       });
     },
@@ -1031,7 +1406,11 @@ export default function App() {
     (day: string = today) => {
       if (planLoaded === today && day in plansNow.current) return true;
       loadPlans(1);
-      toast(`The plan for ${dayName(day, today)} is still loading. Try again in a moment.`, undefined, true);
+      toast(
+        `The plan for ${dayName(day, today)} is still loading. Try again in a moment.`,
+        undefined,
+        true,
+      );
       return false;
     },
     [planLoaded, today, loadPlans, toast],
@@ -1040,7 +1419,11 @@ export default function App() {
   /** Sends one save of the plan of `day` after the saves before it. `put`:
    * shows the saved plan, but only when no newer save of the day started. */
   const queueSave = useCallback(
-    <T,>(day: string, send: () => Promise<T>, put?: (v: T) => void): Promise<T> => {
+    <T,>(
+      day: string,
+      send: () => Promise<T>,
+      put?: (v: T) => void,
+    ): Promise<T> => {
       const seq = (saveSeq.current[day] ?? 0) + 1;
       saveSeq.current[day] = seq;
       const done = (saveQueue.current[day] ?? Promise.resolve()).then(send);
@@ -1065,14 +1448,22 @@ export default function App() {
   );
 
   /** "today's plan", or "the plan for Tue 10 Nov". */
-  const planName = useCallback((day: string) => (day === today ? "today's plan" : `the plan for ${shortDay(day, today)}`), [today]);
+  const planName = useCallback(
+    (day: string) =>
+      day === today ? "today's plan" : `the plan for ${shortDay(day, today)}`,
+    [today],
+  );
 
   /**
    * Saves the plan of `day` that `change` makes from its old items. `text`
    * says what changed, with an undo.
    */
   const writePlan = useCallback(
-    (day: string, change: (old: api.PlanItem[]) => api.PlanItem[], text?: string) => {
+    (
+      day: string,
+      change: (old: api.PlanItem[]) => api.PlanItem[],
+      text?: string,
+    ) => {
       if (!plansReady(day)) return;
       const before = plansNow.current[day] ?? null;
       const next = change(before?.items ?? []);
@@ -1080,12 +1471,21 @@ export default function App() {
       const mode = before?.mode === "ai" ? "ai" : "self";
       putPlan(day, { day, mode, items: next, updated: Date.now() / 1000 });
       const seq = (saveSeq.current[day] ?? 0) + 1;
-      queueSave(day, () => api.setDayPlan(day, mode, next), (p) => putPlan(day, p))
+      queueSave(
+        day,
+        () => api.setDayPlan(day, mode, next),
+        (p) => putPlan(day, p),
+      )
         .then(() => {
           if (text) {
             toast(text, () => {
               putPlan(day, before);
-              if (before) queueSave(day, () => api.setDayPlan(day, before.mode, before.items), (p) => putPlan(day, p)).catch(() => {});
+              if (before)
+                queueSave(
+                  day,
+                  () => api.setDayPlan(day, before.mode, before.items),
+                  (p) => putPlan(day, p),
+                ).catch(() => {});
               else queueSave(day, () => api.clearDayPlan(day)).catch(() => {});
             });
           }
@@ -1109,7 +1509,9 @@ export default function App() {
     (items: api.PlanItem[], keys: string[]): api.PlanItem[] => {
       const old = items.map((p) => p.key);
       const shown = new Set(keys);
-      const hidden = new Set(old.filter((k) => !shown.has(k) && !byKey.has(k) && !listLoaded(k)));
+      const hidden = new Set(
+        old.filter((k) => !shown.has(k) && !byKey.has(k) && !listLoaded(k)),
+      );
       const merged: string[] = [];
       let n = 0;
       for (const k of old) {
@@ -1125,7 +1527,8 @@ export default function App() {
 
   /** Saves a new order of the plan of `day` (today when not given). */
   const savePlan = useCallback(
-    (keys: string[], text?: string, day: string = today) => writePlan(day, (old) => withKeys(old, keys), text),
+    (keys: string[], text?: string, day: string = today) =>
+      writePlan(day, (old) => withKeys(old, keys), text),
     [writePlan, withKeys, today],
   );
 
@@ -1134,12 +1537,19 @@ export default function App() {
     (key: string, day: string) => {
       const i = byKey.get(key);
       if (!i?.start || i.start <= day) return false;
-      toast(`${i.title} starts on ${shortDay(i.start, today)}, so it cannot go on ${shortDay(day, today)}.`, undefined, true);
+      toast(
+        `${i.title} starts on ${shortDay(i.start, today)}, so it cannot go on ${shortDay(day, today)}.`,
+        undefined,
+        true,
+      );
       return true;
     },
     [byKey, toast, today],
   );
-  const keysOf = useCallback((day: string) => (week[day]?.items ?? []).map((i) => i.key), [week]);
+  const keysOf = useCallback(
+    (day: string) => (week[day]?.items ?? []).map((i) => i.key),
+    [week],
+  );
   const addToPlan = useCallback(
     (key: string, opts: { index?: number; day?: string; at?: number } = {}) => {
       const day = opts.day ?? today;
@@ -1149,14 +1559,22 @@ export default function App() {
       const name = planName(day);
       writePlan(
         day,
-        (old) => withKeys(old, keys).map((p) => (p.key === key && opts.at !== undefined ? { ...p, at: opts.at } : p)),
+        (old) =>
+          withKeys(old, keys).map((p) =>
+            p.key === key && opts.at !== undefined ? { ...p, at: opts.at } : p,
+          ),
         `Added to ${name}${opts.at !== undefined ? ` at ${fmtTime(opts.at)}` : ""}: ${byKey.get(key)?.title ?? ""}`,
       );
     },
     [today, keysOf, planName, writePlan, withKeys, byKey, startsAfter],
   );
   const removeFromPlan = useCallback(
-    (key: string, day: string = today) => savePlan(keysOf(day).filter((k) => k !== key), `Taken out of the plan: ${byKey.get(key)?.title ?? ""}`, day),
+    (key: string, day: string = today) =>
+      savePlan(
+        keysOf(day).filter((k) => k !== key),
+        `Taken out of the plan: ${byKey.get(key)?.title ?? ""}`,
+        day,
+      ),
     [today, keysOf, savePlan, byKey],
   );
   /** Fixes the start time of a plan item. null: AIfred places it in the next free time. */
@@ -1171,7 +1589,9 @@ export default function App() {
             const { at: _old, ...rest } = p;
             return at === null ? rest : { ...rest, at };
           }),
-        at === null ? `No fixed time: ${title}` : `Moved to ${fmtTime(at)}: ${title}`,
+        at === null
+          ? `No fixed time: ${title}`
+          : `Moved to ${fmtTime(at)}: ${title}`,
       );
     },
     [byKey, writePlan],
@@ -1183,7 +1603,14 @@ export default function App() {
    * the move is saved.
    */
   const movePlan = useCallback(
-    (key: string, from: string, to: string, at: number | null, text: string, undoMore?: () => void) => {
+    (
+      key: string,
+      from: string,
+      to: string,
+      at: number | null,
+      text: string,
+      undoMore?: () => void,
+    ) => {
       const old = plansNow.current[from]?.items ?? [];
       const n = old.findIndex((p) => p.key === key);
       // The plan on the screen can be older than the saved plan. Then the
@@ -1210,7 +1637,13 @@ export default function App() {
     (key: string, from: string, to: string, at: number | null) => {
       if (!plansReady(from)) return;
       if (startsAfter(key, to)) return;
-      movePlan(key, from, to, at, `Moved to ${planName(to)}: ${byKey.get(key)?.title ?? ""}`);
+      movePlan(
+        key,
+        from,
+        to,
+        at,
+        `Moved to ${planName(to)}: ${byKey.get(key)?.title ?? ""}`,
+      );
     },
     [plansReady, byKey, movePlan, planName, startsAfter],
   );
@@ -1223,9 +1656,14 @@ export default function App() {
       if (!plansReady()) return;
       const next = addDays(today, 1);
       const before = { due: t.due ?? "", start: t.start ?? "" };
-      const changes: api.TaskChanges = { due: next, ...(t.start && t.start > next ? { start: "" } : {}) };
+      const changes: api.TaskChanges = {
+        due: next,
+        ...(t.start && t.start > next ? { start: "" } : {}),
+      };
       // A planned task moves to the plan of tomorrow too, in one change.
-      const planned = (plansNow.current[today]?.items ?? []).some((p) => p.key === i.key);
+      const planned = (plansNow.current[today]?.items ?? []).some(
+        (p) => p.key === i.key,
+      );
       run(api.editTask(t.id, changes), (nt) => {
         putTask(nt);
         const undoTask = () => run(api.editTask(t.id, before), putTask);
@@ -1233,10 +1671,21 @@ export default function App() {
           toast(`Moved to tomorrow: ${t.title}`, undoTask);
           return;
         }
-        movePlan(i.key, today, next, null, `Moved to tomorrow: ${t.title}`, undoTask).then((moved) => {
+        movePlan(
+          i.key,
+          today,
+          next,
+          null,
+          `Moved to tomorrow: ${t.title}`,
+          undoTask,
+        ).then((moved) => {
           // The task stays in today's plan: it must stay due on its old day too.
           // The error message of the move stays on the screen.
-          if (!moved) api.editTask(t.id, before).then(putTask).catch(() => {});
+          if (!moved)
+            api
+              .editTask(t.id, before)
+              .then(putTask)
+              .catch(() => {});
         });
       });
     },
@@ -1245,7 +1694,12 @@ export default function App() {
 
   const setMinutes = useCallback((key: string, minutes: number) => {
     setEst((e) => ({ ...e, [key]: { minutes, by: "you" } }));
-    api.setEstimate(key, minutes).catch(() => api.estimates().then(setEst).catch(() => {}));
+    api.setEstimate(key, minutes).catch(() =>
+      api
+        .estimates()
+        .then(setEst)
+        .catch(() => {}),
+    );
   }, []);
 
   // ---------- Chats ----------
@@ -1254,10 +1708,15 @@ export default function App() {
     // AIfred can add or finish tasks, add facts, and change the plan while it answers.
     loadTasks();
     loadMeta();
-    api.memoryFacts().then(setFacts).catch(() => {});
+    api
+      .memoryFacts()
+      .then(setFacts)
+      .catch(() => {});
     // In the goal queue: a reload that ends after a later goal change must
     // not show the old goals again.
-    const goals = goalQueue.current.catch(() => undefined).then(() => api.goals());
+    const goals = goalQueue.current
+      .catch(() => undefined)
+      .then(() => api.goals());
     goalQueue.current = goals;
     goals.then(setGoals).catch(() => {});
     loadPlans();
@@ -1265,8 +1724,14 @@ export default function App() {
     loadTodayBrief();
     // AIfred can put an item under another item (move_item), and say that
     // an item waits for another item (set_blocker).
-    api.itemLinks().then(setLinks).catch(() => {});
-    api.itemBlockers().then(setBlockers).catch(() => {});
+    api
+      .itemLinks()
+      .then(setLinks)
+      .catch(() => {});
+    api
+      .itemBlockers()
+      .then(setBlockers)
+      .catch(() => {});
   }, [loadTasks, loadMeta, loadPlans, loadTodayBrief]);
 
   /** Runs one question in a chat and puts the messages in `set`. */
@@ -1278,21 +1743,40 @@ export default function App() {
     ask: (progress: (e: api.ProgressEvent) => void) => Promise<api.Answer>,
   ): Promise<boolean> {
     if (busy || !text.trim()) return false;
-    set((c) => ({ busy: true, progress: [], msgs: [...c.msgs, { role: "user", text: text.trim(), files }] }));
+    set((c) => ({
+      busy: true,
+      progress: [],
+      msgs: [...c.msgs, { role: "user", text: text.trim(), files }],
+    }));
     // False after an error: the box that sent the text puts it back, so
     // you can send it again.
     let ok = true;
     try {
-      const a = await ask((e) => set((c) => ({ ...c, progress: [...c.progress, api.describe(e)] })));
-      set((c) => ({ ...c, msgs: [...c.msgs, { role: "assistant", text: a.text, info: a.info, facts: a.memory }] }));
+      const a = await ask((e) =>
+        set((c) => ({ ...c, progress: [...c.progress, api.describe(e)] })),
+      );
+      set((c) => ({
+        ...c,
+        msgs: [
+          ...c.msgs,
+          { role: "assistant", text: a.text, info: a.info, facts: a.memory },
+        ],
+      }));
     } catch (e) {
       ok = false;
-      set((c) => ({ ...c, msgs: [...c.msgs, { role: "error", text: String(e) }] }));
+      set((c) => ({
+        ...c,
+        msgs: [...c.msgs, { role: "error", text: String(e) }],
+      }));
     } finally {
       set((c) => ({ ...c, busy: false, progress: [] }));
       reloadAfterAnswer();
     }
-    if ((now.current.sel || now.current.mission !== null) && now.current.side === "task") setUnread(true);
+    if (
+      (now.current.sel || now.current.mission !== null) &&
+      now.current.side === "task"
+    )
+      setUnread(true);
     return ok;
   }
 
@@ -1302,14 +1786,24 @@ export default function App() {
     if (page !== "home") setPage("home");
     text = withFiles(text, files);
     const model = mainModelKnown.current ? pickArg(models.main) : undefined;
-    return chat(setMain, main.busy, text, files, (p) => api.ask(text.trim(), p, { model, files: files.map((f) => f.id) }));
+    return chat(setMain, main.busy, text, files, (p) =>
+      api.ask(text.trim(), p, { model, files: files.map((f) => f.id) }),
+    );
   };
 
-  const sendPlan = (text: string, files: api.FileRef[] = [], day: string = calDay) => {
+  const sendPlan = (
+    text: string,
+    files: api.FileRef[] = [],
+    day: string = calDay,
+  ) => {
     // Check first: a send that cannot run must not change the chat on the screen.
     const busyDay = planRunning.current ?? planBusyDay;
     if (busyDay !== undefined) {
-      toast(`AIfred is still working on ${planName(busyDay)}. Try again when it is done.`, undefined, true);
+      toast(
+        `AIfred is still working on ${planName(busyDay)}. Try again when it is done.`,
+        undefined,
+        true,
+      );
       return Promise.resolve(false);
     }
     // Files with no text send "Look at these files.".
@@ -1319,11 +1813,19 @@ export default function App() {
     const history = openPlanChat(day);
     planRunning.current = day;
     // The answer goes into the chat of its own day, also when another day is on the screen.
-    const set = (f: (c: ChatState) => ChatState) => setPlanChats((all) => ({ ...all, [day]: f(all[day] ?? EMPTY_CHAT) }));
+    const set = (f: (c: ChatState) => ChatState) =>
+      setPlanChats((all) => ({ ...all, [day]: f(all[day] ?? EMPTY_CHAT) }));
     // Wait for the old messages first. Else the new turn can be in the
     // history and on the screen too, and it shows 2 times.
     return history
-      .then(() => chat(set, false, text, files, (p) => api.askSide(`plan:${day}`, text.trim(), p, { model: pickArg(models.plan), files: files.map((f) => f.id) })))
+      .then(() =>
+        chat(set, false, text, files, (p) =>
+          api.askSide(`plan:${day}`, text.trim(), p, {
+            model: pickArg(models.plan),
+            files: files.map((f) => f.id),
+          }),
+        ),
+      )
       .finally(() => {
         planRunning.current = null;
       });
@@ -1331,9 +1833,15 @@ export default function App() {
 
   /** `key` is an item key, or "mission:<id>" for the chat of a mission. */
   const askItem = (key: string, text: string, files: api.FileRef[]) => {
-    const set = (f: (c: ChatState) => ChatState) => setItemChats((all) => ({ ...all, [key]: f(all[key] ?? EMPTY_CHAT) }));
+    const set = (f: (c: ChatState) => ChatState) =>
+      setItemChats((all) => ({ ...all, [key]: f(all[key] ?? EMPTY_CHAT) }));
     text = withFiles(text, files);
-    return chat(set, itemChats[key]?.busy ?? false, text, files, (p) => api.askSide(sideThread(key), text.trim(), p, { model: pickArg(models.item), files: files.map((f) => f.id) }));
+    return chat(set, itemChats[key]?.busy ?? false, text, files, (p) =>
+      api.askSide(sideThread(key), text.trim(), p, {
+        model: pickArg(models.item),
+        files: files.map((f) => f.id),
+      }),
+    );
   };
 
   // The chat of an item or a mission loads when its panel opens, one time. A message
@@ -1407,7 +1915,9 @@ export default function App() {
     const p = plans[day] ?? null;
     if (mode === "self") {
       if (!plansReady(day)) return;
-      run(api.setDayPlan(day, "self", p?.items ?? []), (np) => putPlan(day, np));
+      run(api.setDayPlan(day, "self", p?.items ?? []), (np) =>
+        putPlan(day, np),
+      );
       return;
     }
     setPlanChatOpen(true);
@@ -1423,10 +1933,16 @@ export default function App() {
   };
 
   const startOver = (day: string = calDay) => {
-    run(Promise.all([api.clearDayPlan(day), api.clearSide(`plan:${day}`)]), () => {
-      putPlan(day, null);
-      setPlanChats((all) => ({ ...all, [day]: { ...EMPTY_CHAT, busy: all[day]?.busy ?? false } }));
-    });
+    run(
+      Promise.all([api.clearDayPlan(day), api.clearSide(`plan:${day}`)]),
+      () => {
+        putPlan(day, null);
+        setPlanChats((all) => ({
+          ...all,
+          [day]: { ...EMPTY_CHAT, busy: all[day]?.busy ?? false },
+        }));
+      },
+    );
   };
 
   const open = (key: string) => {
@@ -1435,7 +1951,11 @@ export default function App() {
     setSelMission(null);
     setSide("task");
     if (page !== "home" && page !== "plan" && page !== "tasks") setPage("home");
-    requestAnimationFrame(() => document.getElementById(`row-${key}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+    requestAnimationFrame(() =>
+      document
+        .getElementById(`row-${key}`)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+    );
   };
   /** Opens a mission of today on the right side, like an item. */
   const openMission = (id: number) => {
@@ -1443,7 +1963,11 @@ export default function App() {
     setSel(null);
     setSide("task");
     setPage("home");
-    requestAnimationFrame(() => document.getElementById(`mission-${id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+    requestAnimationFrame(() =>
+      document
+        .getElementById(`mission-${id}`)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+    );
   };
   const close = () => {
     clearSel();
@@ -1493,7 +2017,12 @@ export default function App() {
       onPointerDown={(e) => {
         if (e.button > 0) return;
         e.preventDefault();
-        const start = { x: e.clientX, w: (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().width };
+        const start = {
+          x: e.clientX,
+          w: (
+            e.currentTarget.parentElement as HTMLElement
+          ).getBoundingClientRect().width,
+        };
         const el = e.currentTarget;
         el.setPointerCapture?.(e.pointerId);
         document.body.classList.add("sizing");
@@ -1518,7 +2047,9 @@ export default function App() {
       onKeyDown={(e) => {
         if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
         e.preventDefault();
-        const cur = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().width;
+        const cur = (
+          e.currentTarget.parentElement as HTMLElement
+        ).getBoundingClientRect().width;
         setW(clampW(cur + (e.key === "ArrowLeft" ? 20 : -20)));
       }}
     />
@@ -1528,9 +2059,15 @@ export default function App() {
 
   const onPlan = page === "plan";
   const chatOn = onPlan ? true : page === "home" && mainOpen;
-  const selItem = sel && (page === "home" || page === "tasks" || onPlan) ? byKey.get(sel) : undefined;
+  const selItem =
+    sel && (page === "home" || page === "tasks" || onPlan)
+      ? byKey.get(sel)
+      : undefined;
   // The missions show only on the home page.
-  const selM = selMission !== null && page === "home" ? brief?.missions?.find((m) => m.id === selMission) : undefined;
+  const selM =
+    selMission !== null && page === "home"
+      ? brief?.missions?.find((m) => m.id === selMission)
+      : undefined;
   const selTitle = selItem?.title ?? selM?.title;
   const showSide = (v: "chat" | "task") => {
     setSide(v);
@@ -1549,11 +2086,16 @@ export default function App() {
           aria-selected={side === "chat"}
           tabIndex={0}
           onClick={() => showSide("chat")}
-          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), showSide("chat"))}
+          onKeyDown={(e) =>
+            (e.key === "Enter" || e.key === " ") &&
+            (e.preventDefault(), showSide("chat"))
+          }
         >
           {ICON.chat}
           <span className="lb">{onPlan ? "Plan chat" : "Conversation"}</span>
-          {unread && side !== "chat" && <span className="new" title="New answer" />}
+          {unread && side !== "chat" && (
+            <span className="new" title="New answer" />
+          )}
           {!onPlan && (
             <button
               className="x"
@@ -1575,7 +2117,10 @@ export default function App() {
           aria-selected={side === "task"}
           tabIndex={0}
           onClick={() => showSide("task")}
-          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), showSide("task"))}
+          onKeyDown={(e) =>
+            (e.key === "Enter" || e.key === " ") &&
+            (e.preventDefault(), showSide("task"))
+          }
         >
           {ICON.task}
           <span className="lb">{selTitle}</span>
@@ -1611,19 +2156,35 @@ export default function App() {
       // items of the tree keep theirs.
       const key = i.whyKey ?? i.key;
       const title = i.linked?.find((l) => l.key === key)?.title ?? i.title;
-      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => k !== key));
+      const drop = <T,>(r: Record<string, T> | undefined) =>
+        r && Object.fromEntries(Object.entries(r).filter(([k]) => k !== key));
       run(api.correctBrief(key, kind, day), (c) => {
         // Like missions::today: a mission with the corrected item leaves the list.
         setBrief((b) =>
           b && b.day === shown
-            ? { ...b, why: drop(b.why)!, goal: drop(b.goal), missions: b.missions?.filter((m) => !m.items.some((x) => x.key === key)) }
+            ? {
+                ...b,
+                why: drop(b.why)!,
+                goal: drop(b.goal),
+                missions: b.missions?.filter(
+                  (m) => !m.items.some((x) => x.key === key),
+                ),
+              }
             : b,
         );
-        if (c.learned) api.memoryFacts().then(setFacts).catch(() => {});
+        if (c.learned)
+          api
+            .memoryFacts()
+            .then(setFacts)
+            .catch(() => {});
         const undo = () =>
           run(api.undoCorrection(c.correction.id), () => {
             reloadBrief(shown);
-            if (c.learned) api.memoryFacts().then(setFacts).catch(() => {});
+            if (c.learned)
+              api
+                .memoryFacts()
+                .then(setFacts)
+                .catch(() => {});
           });
         const text = c.learned
           ? `AIfred learned: ${c.learned.text}`
@@ -1640,7 +2201,11 @@ export default function App() {
 
   /** Puts a changed mission into the brief on the screen. */
   const putMission = useCallback((m: api.Mission) => {
-    setBrief((b) => (b?.missions ? { ...b, missions: b.missions.map((x) => (x.id === m.id ? m : x)) } : b));
+    setBrief((b) =>
+      b?.missions
+        ? { ...b, missions: b.missions.map((x) => (x.id === m.id ? m : x)) }
+        : b,
+    );
   }, []);
 
   /** Ticks a step of the mission, or takes the tick away. The items do not change.
@@ -1652,7 +2217,10 @@ export default function App() {
       const k = `${m.id}:${index}`;
       if (stepBusy.current.has(k)) return;
       stepBusy.current.add(k);
-      void run(api.setMissionStep(m.id, index, !m.checklist[index]?.done), putMission).finally(() => stepBusy.current.delete(k));
+      void run(
+        api.setMissionStep(m.id, index, !m.checklist[index]?.done),
+        putMission,
+      ).finally(() => stepBusy.current.delete(k));
     },
     [run, putMission],
   );
@@ -1668,19 +2236,39 @@ export default function App() {
       // Like missions::correct: only the open items get a correction, so
       // only they lose their reason. A closed item keeps its reason.
       const keys = new Set(m.items.filter((i) => i.open).map((i) => i.key));
-      const drop = <T,>(r: Record<string, T> | undefined) => r && Object.fromEntries(Object.entries(r).filter(([k]) => !keys.has(k)));
+      const drop = <T,>(r: Record<string, T> | undefined) =>
+        r &&
+        Object.fromEntries(Object.entries(r).filter(([k]) => !keys.has(k)));
       run(api.correctMission(m.id, kind, day), (cs) => {
         setBrief((b) =>
-          b && b.day === shown ? { ...b, missions: b.missions?.filter((x) => x.id !== m.id), why: drop(b.why)!, goal: drop(b.goal) } : b,
+          b && b.day === shown
+            ? {
+                ...b,
+                missions: b.missions?.filter((x) => x.id !== m.id),
+                why: drop(b.why)!,
+                goal: drop(b.goal),
+              }
+            : b,
         );
         const learned = cs.map((c) => c.learned).filter((f) => !!f);
-        if (learned.length) api.memoryFacts().then(setFacts).catch(() => {});
+        if (learned.length)
+          api
+            .memoryFacts()
+            .then(setFacts)
+            .catch(() => {});
         const undo = () =>
           run(
-            cs.reduce<Promise<unknown>>((p, c) => p.then(() => api.undoCorrection(c.correction.id)), Promise.resolve()),
+            cs.reduce<Promise<unknown>>(
+              (p, c) => p.then(() => api.undoCorrection(c.correction.id)),
+              Promise.resolve(),
+            ),
             () => {
               reloadBrief(shown);
-              if (learned.length) api.memoryFacts().then(setFacts).catch(() => {});
+              if (learned.length)
+                api
+                  .memoryFacts()
+                  .then(setFacts)
+                  .catch(() => {});
             },
           );
         const text = learned.length
@@ -1703,14 +2291,19 @@ export default function App() {
       return run(change, (c) => {
         putMission(c.mission);
         reloadBrief(shown);
-        toast(text, () => run(api.restoreMissionItem(c.before), () => reloadBrief(shown)));
+        toast(text, () =>
+          run(api.restoreMissionItem(c.before), () => reloadBrief(shown)),
+        );
       });
     },
     [brief, run, putMission, reloadBrief, toast],
   );
   const addToMission = useCallback(
     (m: api.Mission, key: string) =>
-      changeMission(api.addMissionItem(m.id, key), `Added to ${m.title}: ${byKey.get(key)?.title ?? key}. AIfred keeps it there.`),
+      changeMission(
+        api.addMissionItem(m.id, key),
+        `Added to ${m.title}: ${byKey.get(key)?.title ?? key}. AIfred keeps it there.`,
+      ),
     [changeMission, byKey],
   );
   const removeFromMission = useCallback(
@@ -1731,7 +2324,9 @@ export default function App() {
    * close, the mission stays open. */
   const finishMission = useCallback(
     async (m: api.Mission, close: string[]) => {
-      const items = close.map((k) => byKey.get(k)).filter((i): i is Item => !!i && !i.done && !i.gh);
+      const items = close
+        .map((k) => byKey.get(k))
+        .filter((i): i is Item => !!i && !i.done && !i.gh);
       const undos: (() => void)[] = [];
       const undoItems = () => undos.forEach((u) => u());
       for (const i of items) {
@@ -1748,7 +2343,11 @@ export default function App() {
         }
       }
       return run(api.finishMission(m.id), () => {
-        setBrief((b) => (b?.missions ? { ...b, missions: b.missions.filter((x) => x.id !== m.id) } : b));
+        setBrief((b) =>
+          b?.missions
+            ? { ...b, missions: b.missions.filter((x) => x.id !== m.id) }
+            : b,
+        );
         const shown = brief?.day;
         // The undo opens the mission and its closed tasks and emails again.
         // A closed ClickUp task stays closed: open it in the list of
@@ -1759,7 +2358,12 @@ export default function App() {
             reloadBrief(shown);
           });
         const n = undos.length;
-        toast(n ? `Mission done: ${m.title}. Undo opens it and its ${n === 1 ? "closed item" : `${n} closed items`} again.` : `Mission done: ${m.title}`, undo);
+        toast(
+          n
+            ? `Mission done: ${m.title}. Undo opens it and its ${n === 1 ? "closed item" : `${n} closed items`} again.`
+            : `Mission done: ${m.title}`,
+          undo,
+        );
       });
     },
     [run, byKey, toggleDone, toast, brief, reloadBrief],
@@ -1767,7 +2371,10 @@ export default function App() {
 
   // ---------- Subtasks (links.rs) ----------
 
-  const titleOf = useCallback((key: string) => byKey.get(key)?.title ?? key, [byKey]);
+  const titleOf = useCallback(
+    (key: string) => byKey.get(key)?.title ?? key,
+    [byKey],
+  );
 
   /** A move takes the subtasks of the item with it (links.rs). So the undo
    * only puts the item back under its old parent, or out again. It also
@@ -1777,7 +2384,9 @@ export default function App() {
     (main: string, key: string) =>
       run(api.linkItems(main, key), (c) => {
         setLinks({ links: c.links });
-        toast(`${titleOf(key)} is now a subtask of ${titleOf(main)}`, () => run(api.restoreLink(c.before), setLinks));
+        toast(`${titleOf(key)} is now a subtask of ${titleOf(main)}`, () =>
+          run(api.restoreLink(c.before), setLinks),
+        );
       }),
     [run, toast, titleOf],
   );
@@ -1786,7 +2395,12 @@ export default function App() {
     (key: string) =>
       run(api.unlinkItem(key), (c) => {
         setLinks({ links: c.links });
-        toast(`Moved out: ${titleOf(key)}`, c.before.link ? () => run(api.restoreLink(c.before), setLinks) : undefined);
+        toast(
+          `Moved out: ${titleOf(key)}`,
+          c.before.link
+            ? () => run(api.restoreLink(c.before), setLinks)
+            : undefined,
+        );
       }),
     [run, toast, titleOf],
   );
@@ -1798,7 +2412,9 @@ export default function App() {
     (key: string, blocker: string) =>
       run(api.addBlocker(key, blocker), (c) => {
         setBlockers({ blockers: c.blockers });
-        toast(`${titleOf(key)} now waits for ${titleOf(blocker)}`, () => run(api.restoreBlocker(c.before), setBlockers));
+        toast(`${titleOf(key)} now waits for ${titleOf(blocker)}`, () =>
+          run(api.restoreBlocker(c.before), setBlockers),
+        );
       }),
     [run, toast, titleOf],
   );
@@ -1808,7 +2424,9 @@ export default function App() {
     (key: string, blocker: string) =>
       run(api.removeBlocker(key, blocker), (c) => {
         setBlockers({ blockers: c.blockers });
-        toast(`${titleOf(key)} does not wait for ${titleOf(blocker)} now`, () => run(api.restoreBlocker(c.before), setBlockers));
+        toast(`${titleOf(key)} does not wait for ${titleOf(blocker)} now`, () =>
+          run(api.restoreBlocker(c.before), setBlockers),
+        );
       }),
     [run, toast, titleOf],
   );
@@ -1819,9 +2437,15 @@ export default function App() {
       const ids = moves.map((m) => m.id);
       return run(api.undoMoves(ids), (l) => {
         setLinks(l);
-        setBrief((b) => (b?.moves ? { ...b, moves: b.moves.filter((m) => !ids.includes(m.id)) } : b));
+        setBrief((b) =>
+          b?.moves
+            ? { ...b, moves: b.moves.filter((m) => !ids.includes(m.id)) }
+            : b,
+        );
         const names = moves.map((m) => m.title).join(", ");
-        toast(`Put back: ${names}. AIfred does not move ${moves.length > 1 ? "them" : "it"} again.`);
+        toast(
+          `Put back: ${names}. AIfred does not move ${moves.length > 1 ? "them" : "it"} again.`,
+        );
       });
     },
     [run, toast],
@@ -1873,7 +2497,9 @@ export default function App() {
     homeLoading:
       briefLoaded !== today ||
       (!tasksLoaded && !tasksError) ||
-      ((brief?.ask?.length ?? 0) > 0 && ((githubState === "loading" && !githubBack) || (clickupState === "loading" && !clickupBack))),
+      ((brief?.ask?.length ?? 0) > 0 &&
+        ((githubState === "loading" && !githubBack) ||
+          (clickupState === "loading" && !clickupBack))),
     githubState,
     clickupState,
     githubWarning: github.warning,
@@ -1917,6 +2543,9 @@ export default function App() {
     models,
     setModel: pickModel,
     toggleDone,
+    setStatus,
+    openAgain,
+    setStatusNext,
     work,
     startWork,
     stopWork,
@@ -1946,7 +2575,8 @@ export default function App() {
     writeBrief,
     toast,
     reviewCards,
-    setReviewCard: (card, mode) => setReviewCards((c) => ({ ...c, [card]: mode })),
+    setReviewCard: (card, mode) =>
+      setReviewCards((c) => ({ ...c, [card]: mode })),
     reload: () => {
       reloadAfterAnswer();
       loadWaiting();
@@ -1975,8 +2605,18 @@ export default function App() {
     const one = (name: string, state: ListState, at: number, warn?: string) => {
       if (state === "off") return;
       if (state === "loading") parts.push(<span key={name}>{name}…</span>);
-      else if (state !== "ok") parts.push(<span key={name} className="err" title={state}>{name}: error</span>);
-      else parts.push(<span key={name} className={warn ? "warn" : ""} title={warn}>{name} {at ? agoSecs(at) : ""}</span>);
+      else if (state !== "ok")
+        parts.push(
+          <span key={name} className="err" title={state}>
+            {name}: error
+          </span>,
+        );
+      else
+        parts.push(
+          <span key={name} className={warn ? "warn" : ""} title={warn}>
+            {name} {at ? agoSecs(at) : ""}
+          </span>,
+        );
     };
     one("GitHub", githubState, github.fetched_at, github.warning);
     one("ClickUp", clickupState, clickup.fetched_at, clickup.warning);
@@ -1988,8 +2628,22 @@ export default function App() {
   const loading = states.includes("loading");
   const bad = states.some((s) => !["loading", "ok", "off"].includes(s));
 
-  const rail = (k: Page | "chat", icon: React.ReactNode, label: string, onClick: () => void, on: boolean, dot?: boolean) => (
-    <button key={k} className={on ? "on" : ""} title={label} aria-label={label} aria-pressed={on} onClick={onClick}>
+  const rail = (
+    k: Page | "chat",
+    icon: React.ReactNode,
+    label: string,
+    onClick: () => void,
+    on: boolean,
+    dot?: boolean,
+  ) => (
+    <button
+      key={k}
+      className={on ? "on" : ""}
+      title={label}
+      aria-label={label}
+      aria-pressed={on}
+      onClick={onClick}
+    >
       {icon}
       {dot && <span className="new" />}
     </button>
@@ -2000,7 +2654,11 @@ export default function App() {
       <div
         ref={appRef}
         className={`app ${onPlan ? "plan" : "home"}`}
-        style={sideW ? ({ "--side-w": `${clampW(sideW)}px` } as React.CSSProperties) : undefined}
+        style={
+          sideW
+            ? ({ "--side-w": `${clampW(sideW)}px` } as React.CSSProperties)
+            : undefined
+        }
         onClick={onClick}
       >
         <div className="chrome">
@@ -2034,24 +2692,58 @@ export default function App() {
         </div>
         <div className="body">
           <nav className="rail" aria-label="App">
-            {rail("home", ICON.home, "Home", () => (setPage("home"), clearSel()), page === "home")}
+            {rail(
+              "home",
+              ICON.home,
+              "Home",
+              () => (setPage("home"), clearSel()),
+              page === "home",
+            )}
             {rail("plan", ICON.cal, "Calendar", () => goPlan(), onPlan)}
             {rail("tasks", ICON.task, "Tasks", goTasks, page === "tasks")}
-            {rail("chat", ICON.chat, "Conversation", ctx.openMain, page === "home" && mainOpen)}
-            {rail("memory", ICON.mem, "What AIfred knows about you", () => (setPage("memory"), clearSel()), page === "memory")}
+            {rail(
+              "chat",
+              ICON.chat,
+              "Conversation",
+              ctx.openMain,
+              page === "home" && mainOpen,
+            )}
+            {rail(
+              "memory",
+              ICON.mem,
+              "What AIfred knows about you",
+              () => (setPage("memory"), clearSel()),
+              page === "memory",
+            )}
             <span className="sp" />
-            {rail("settings", ICON.gear, "Settings", () => (setPage("settings"), clearSel()), page === "settings", update?.state === "ready")}
+            {rail(
+              "settings",
+              ICON.gear,
+              "Settings",
+              () => (setPage("settings"), clearSel()),
+              page === "settings",
+              update?.state === "ready",
+            )}
           </nav>
 
           {page === "home" && (
             <div className="home-col">
               <div className="banners">
                 {loadError && <div className="banner err">{loadError}</div>}
-                {info?.api_key_set && <div className="banner err">ANTHROPIC_API_KEY is set: Claude uses the API key, not your login.</div>}
+                {info?.api_key_set && (
+                  <div className="banner err">
+                    ANTHROPIC_API_KEY is set: Claude uses the API key, not your
+                    login.
+                  </div>
+                )}
                 {update?.state === "ready" && (
                   <div className="banner">
                     <span>AIfred {update.latest} is ready.</span>
-                    <RestartButton small busy={anyBusy} onError={setRestartError} />
+                    <RestartButton
+                      small
+                      busy={anyBusy}
+                      onError={setRestartError}
+                    />
                     {restartError && <span>{restartError}</span>}
                   </div>
                 )}
@@ -2059,7 +2751,11 @@ export default function App() {
               <Home />
             </div>
           )}
-          {onPlan && <CalendarView onChat={() => (setPlanChatOpen(true), showSide("chat"))} />}
+          {onPlan && (
+            <CalendarView
+              onChat={() => (setPlanChatOpen(true), showSide("chat"))}
+            />
+          )}
           {page === "settings" && settings && (
             <div className="scroll page-main page">
               <div className="page-inner">
@@ -2069,6 +2765,7 @@ export default function App() {
                   info={info}
                   clickupToken={clickupToken}
                   onClickupTokenChanged={() => checkClickup(true)}
+                  onStatusRulesChanged={loadMeta}
                   onGoogleChanged={() => {
                     loadGoogle();
                     loadCalendar(true);
@@ -2093,33 +2790,64 @@ export default function App() {
               <div className="page-inner">
                 <h2 className="title">What AIfred knows about you</h2>
                 <p className="note-line" style={{ paddingTop: 0 }}>
-                  AIfred uses these facts in your chats. It also adds and forgets facts when you tell it to.
+                  AIfred uses these facts in your chats. It also adds and
+                  forgets facts when you tell it to.
                 </p>
                 <MemoryList
                   facts={facts}
                   onAdd={(f) => setFacts((all) => [...all, f])}
-                  onChange={(f) => setFacts((all) => all.map((x) => (x.id === f.id ? f : x)))}
-                  onDelete={(id) => setFacts((all) => all.filter((x) => x.id !== id))}
+                  onChange={(f) =>
+                    setFacts((all) => all.map((x) => (x.id === f.id ? f : x)))
+                  }
+                  onDelete={(id) =>
+                    setFacts((all) => all.filter((x) => x.id !== id))
+                  }
                 />
               </div>
             </div>
           )}
 
           {selItem && (
-            <Detail key={selItem.key} item={selItem} hidden={chatOn && side === "chat"} tabs={tabs} handle={handle} />
+            <Detail
+              key={selItem.key}
+              item={selItem}
+              hidden={chatOn && side === "chat"}
+              tabs={tabs}
+              handle={handle}
+            />
           )}
-          {selM && <MissionDetail key={selM.id} m={selM} hidden={chatOn && side === "chat"} tabs={tabs} handle={handle} />}
+          {selM && (
+            <MissionDetail
+              key={selM.id}
+              m={selM}
+              hidden={chatOn && side === "chat"}
+              tabs={tabs}
+              handle={handle}
+            />
+          )}
           {page === "home" && mainOpen && (
-            <aside className="chat" aria-label="Conversation" hidden={selTitle !== undefined && side === "task"}>
+            <aside
+              className="chat"
+              aria-label="Conversation"
+              hidden={selTitle !== undefined && side === "task"}
+            >
               {handle}
               {tabs}
               <div className="chat-h">
                 Conversation
                 <span className="sp" />
-                <button className="linkbtn" onClick={startNew} disabled={main.busy}>
+                <button
+                  className="linkbtn"
+                  onClick={startNew}
+                  disabled={main.busy}
+                >
                   New
                 </button>
-                <button className="linkbtn" title="Close the conversation panel" onClick={() => setMainOpen(false)}>
+                <button
+                  className="linkbtn"
+                  title="Close the conversation panel"
+                  onClick={() => setMainOpen(false)}
+                >
                   Close
                 </button>
               </div>
@@ -2127,13 +2855,20 @@ export default function App() {
             </aside>
           )}
           {onPlan && (
-            <aside className={`chat${planChatOpen ? " open" : ""}`} aria-label="Plan chat" hidden={selTitle !== undefined && side === "task"}>
+            <aside
+              className={`chat${planChatOpen ? " open" : ""}`}
+              aria-label="Plan chat"
+              hidden={selTitle !== undefined && side === "task"}
+            >
               {handle}
               {tabs}
               <div className="chat-h">
                 Plan chat
                 <span className="sp" />
-                <button className="linkbtn m-only" onClick={() => setPlanChatOpen(false)}>
+                <button
+                  className="linkbtn m-only"
+                  onClick={() => setPlanChatOpen(false)}
+                >
                   Close
                 </button>
               </div>
@@ -2142,35 +2877,47 @@ export default function App() {
           )}
         </div>
         <div className="toasts">
-        {closed.map((c) => (
-          <div key={c.id} className="toast" role="status">
-            <span>Closed in ClickUp: {c.title}</span>
-            <button aria-label={`Undo: ${c.title}`} onClick={() => undoClose(c)}>
-              Undo
-            </button>
-            <button aria-label={`Hide this message: ${c.title}`} onClick={() => setClosed((l) => l.filter((x) => x.id !== c.id))}>
-              ✕
-            </button>
-          </div>
-        ))}
-        {toastState && (
-          <div className={`toast${toastState.error ? " err" : ""}`} role={toastState.error ? "alert" : "status"}>
-            <span>{toastState.text}</span>
-            {toastState.undo && (
+          {closed.map((c) => (
+            <div key={c.id} className="toast" role="status">
+              <span>Closed in ClickUp: {c.title}</span>
               <button
-                onClick={() => {
-                  toastState.undo!();
-                  setToast(null);
-                }}
+                aria-label={`Undo: ${c.title}`}
+                onClick={() => undoClose(c)}
               >
                 Undo
               </button>
-            )}
-            <button aria-label="Hide this message" onClick={() => setToast(null)}>
-              ✕
-            </button>
-          </div>
-        )}
+              <button
+                aria-label={`Hide this message: ${c.title}`}
+                onClick={() => setClosed((l) => l.filter((x) => x.id !== c.id))}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          {toastState && (
+            <div
+              className={`toast${toastState.error ? " err" : ""}`}
+              role={toastState.error ? "alert" : "status"}
+            >
+              <span>{toastState.text}</span>
+              {toastState.undo && (
+                <button
+                  onClick={() => {
+                    toastState.undo!();
+                    setToast(null);
+                  }}
+                >
+                  Undo
+                </button>
+              )}
+              <button
+                aria-label="Hide this message"
+                onClick={() => setToast(null)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </Ctx.Provider>
@@ -2187,7 +2934,13 @@ function MainMessages() {
   return (
     <>
       <div className="msgs" ref={ref}>
-        <Messages list={main.msgs} busy={main.busy} progress={main.progress} onItem={open} hasItem={(k) => byKey.has(k)} />
+        <Messages
+          list={main.msgs}
+          busy={main.busy}
+          progress={main.progress}
+          onItem={open}
+          hasItem={(k) => byKey.has(k)}
+        />
       </div>
       <div className="chat-in">
         <Composer

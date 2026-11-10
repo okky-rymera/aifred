@@ -3,10 +3,15 @@
 // Rust app (items.rs): "task:<id>", "github:<id>", "clickup:<id>", or
 // "gmail:<thread id>". The plan, the time guesses, the brief,
 // and the item chats use it.
-import type * as api from "./api";
+import * as api from "./api";
 
 export type Src = "me" | "gh" | "cu" | "gm";
-export const SRC_NAME: Record<Src, string> = { me: "Mine", gh: "GitHub", cu: "ClickUp", gm: "Email" };
+export const SRC_NAME: Record<Src, string> = {
+  me: "Mine",
+  gh: "GitHub",
+  cu: "ClickUp",
+  gm: "Email",
+};
 
 /** A time guess when there is none: 30 minutes. */
 export const DEFAULT_MINUTES = 30;
@@ -23,7 +28,18 @@ export type Item = {
   start: string | null;
   priority: api.Priority | null;
   tags: string[];
+  /** Closed in AIfred: Done, Unfinished, or Cancelled (status). */
   done: boolean;
+  /** AIfred's own status (status.rs). The same for all sources. */
+  status: api.Status;
+  /** Who or what set the status: "you", "rule", "timer", and so on (api.ItemStatus). */
+  statusBy?: string;
+  /** The status name in ClickUp or GitHub, when there is one. */
+  statusSource?: string;
+  /** Unfinished: the item that continues it. None: accepted as it is. */
+  statusNext?: api.Linked;
+  /** The Unfinished items that this item continues. */
+  statusContinues?: api.Linked[];
   /** Came in the last day (GitHub and ClickUp only). */
   isNew: boolean;
   minutes: number;
@@ -83,14 +99,49 @@ export function daysBetween(from: string, to: string): number {
 }
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const LONG_WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const LONG_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+const LONG_WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+const LONG_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 
 /** "Fri 6 Nov", and the year when it is not this year. */
 export function shortDay(day: string, today: string): string {
   const d = dateOf(day);
-  const year = day.slice(0, 4) === today.slice(0, 4) ? "" : ` ${d.getFullYear()}`;
+  const year =
+    day.slice(0, 4) === today.slice(0, 4) ? "" : ` ${d.getFullYear()}`;
   return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}${year}`;
 }
 
@@ -106,7 +157,10 @@ export function longDay(day: string): string {
 }
 
 /** The text and the color of a due day. */
-export function dueInfo(day: string, today: string): { text: string; cls: "" | "late" | "today" } {
+export function dueInfo(
+  day: string,
+  today: string,
+): { text: string; cls: "" | "late" | "today" } {
   const n = daysBetween(today, day);
   if (n === 0) return { text: "Today", cls: "today" };
   if (n === 1) return { text: "Tomorrow", cls: "" };
@@ -115,7 +169,12 @@ export function dueInfo(day: string, today: string): { text: string; cls: "" | "
   return { text: shortDay(day, today), cls: "" };
 }
 
-const RANK: Record<api.Priority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+const RANK: Record<api.Priority, number> = {
+  urgent: 0,
+  high: 1,
+  normal: 2,
+  low: 3,
+};
 
 /** The nearest due day first (no due day last), then the highest priority, then the title from A to Z. */
 export function byPlan(a: Item, b: Item): number {
@@ -129,7 +188,8 @@ export function byPlan(a: Item, b: Item): number {
 }
 
 /** "Mon 2 Nov" of a time in Unix seconds. */
-export const dayOfSecs = (t: number, today: string) => shortDay(dayOf(new Date(t * 1000)), today);
+export const dayOfSecs = (t: number, today: string) =>
+  shortDay(dayOf(new Date(t * 1000)), today);
 
 /** All items, from the four lists and what the app knows about them. */
 export function buildItems(
@@ -145,6 +205,19 @@ export function buildItems(
   draft: Record<string, api.DraftKind> = {},
 ): Item[] {
   const m = new Map(meta.map((x) => [x.key, x]));
+  /** The status from the backend, or To do. `done` follows it. */
+  const st = (key: string, fallback: api.Status = "todo") => {
+    const s = m.get(key)?.status;
+    const status = s?.status ?? fallback;
+    return {
+      status,
+      statusBy: s?.by,
+      statusSource: s?.source,
+      statusNext: s?.next,
+      statusContinues: s?.continues,
+      done: api.isClosed(status),
+    };
+  };
   const extra = (key: string) => {
     const e = est[key];
     return {
@@ -170,8 +243,16 @@ export function buildItems(
       start: t.start,
       priority: t.priority,
       tags: t.tags,
-      done: t.done,
       task: t,
+      // A done task has its status in the task. An open one gets it from the meta.
+      ...(t.done
+        ? {
+            status: t.closed_as ?? "done",
+            statusBy: "you",
+            statusNext: m.get(key)?.status?.next,
+            done: true,
+          }
+        : { ...st(key), done: false }),
       ...extra(key),
       isNew: false,
     });
@@ -188,7 +269,7 @@ export function buildItems(
       start: null,
       priority: null,
       tags: [],
-      done: false,
+      ...st(key),
       gh: g,
       ...extra(key),
     });
@@ -205,14 +286,15 @@ export function buildItems(
       start: null,
       priority: c.priority ?? null,
       tags: [],
-      done: false,
+      ...st(key),
       cu: c,
       ...extra(key),
     });
   }
   for (const m of mail) {
     const key = `gmail:${m.id}`;
-    const who = m.people.join(", ") + (m.more_people ? ` +${m.more_people}` : "");
+    const who =
+      m.people.join(", ") + (m.more_people ? ` +${m.more_people}` : "");
     out.push({
       key,
       src: "gm",
@@ -224,6 +306,7 @@ export function buildItems(
       priority: null,
       tags: [],
       done: false,
+      status: "todo",
       mail: m,
       ...extra(key),
     });
@@ -239,7 +322,8 @@ export const MAX_GROUP = 10;
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** The parent of `key`, or undefined for a top item. */
-export const parentOf = (links: api.ItemLink[], key: string) => links.find((l) => l.key === key)?.main;
+export const parentOf = (links: api.ItemLink[], key: string) =>
+  links.find((l) => l.key === key)?.main;
 
 /** The top item of `key`'s tree. The walk stops after MAX_GROUP levels, like links::head_in. */
 export function rootOf(links: api.ItemLink[], key: string): string {
@@ -256,14 +340,18 @@ export function rootOf(links: api.ItemLink[], key: string): string {
  * its parents are also in `keys`. An item whose parents do not show is at
  * level 0. With the whole tree as `keys`, this is the level under the top
  * item. The item panel and the Tasks page both indent by it. */
-export function treeDepths(links: api.ItemLink[], keys: string[]): Map<string, number> {
+export function treeDepths(
+  links: api.ItemLink[],
+  keys: string[],
+): Map<string, number> {
   const parent = new Map(links.map((l) => [l.key, l.main]));
   const shown = new Set(keys);
   const out = new Map<string, number>();
   for (const k of keys) {
     let n = 0;
     let at = parent.get(k);
-    for (let steps = 0; at && steps < MAX_GROUP; steps++, at = parent.get(at)) if (shown.has(at)) n++;
+    for (let steps = 0; at && steps < MAX_GROUP; steps++, at = parent.get(at))
+      if (shown.has(at)) n++;
     out.set(k, n);
   }
   return out;
@@ -275,7 +363,8 @@ export function treeDepths(links: api.ItemLink[], keys: string[]): Map<string, n
  * the home list, the item panel, the link actions, and the test fake all use it. */
 export function linkGroups(links: api.ItemLink[]): Map<string, string[]> {
   const kids = new Map<string, string[]>();
-  for (const l of [...links].sort((a, b) => byText(a.key, b.key))) kids.set(l.main, [...(kids.get(l.main) ?? []), l.key]);
+  for (const l of [...links].sort((a, b) => byText(a.key, b.key)))
+    kids.set(l.main, [...(kids.get(l.main) ?? []), l.key]);
   const under = new Set(links.map((l) => l.key));
   const out = new Map<string, string[]>();
   for (const top of kids.keys()) {
@@ -316,12 +405,20 @@ export function joinLinked(items: Item[], links: api.ItemLink[]): Item[] {
   const rows = new Map<string, Item>();
   const under = new Set<string>();
   for (const keys of linkGroups(links).values()) {
-    const open = keys.map((k) => byKey.get(k)).filter((i): i is Item => !!i && !i.done);
+    const open = keys
+      .map((k) => byKey.get(k))
+      .filter((i): i is Item => !!i && !i.done);
     if (open.length < 2) continue;
     const [head, ...rest] = open;
-    const dues = open.map((i) => i.due).filter((d): d is string => !!d).sort();
+    const dues = open
+      .map((i) => i.due)
+      .filter((d): d is string => !!d)
+      .sort();
     const starts = open.map((i) => i.start);
-    const pri = open.map((i) => i.priority).filter((p): p is api.Priority => !!p).sort((a, b) => RANK[a] - RANK[b]);
+    const pri = open
+      .map((i) => i.priority)
+      .filter((p): p is api.Priority => !!p)
+      .sort((a, b) => RANK[a] - RANK[b]);
     const withWhy = open.find((i) => i.why);
     // The reason and the next action come from the same item.
     const ranked = head.why ? head : (withWhy ?? head);
@@ -341,21 +438,38 @@ export function joinLinked(items: Item[], links: api.ItemLink[]): Item[] {
     });
     for (const i of rest) under.add(i.key);
   }
-  return items.filter((i) => !under.has(i.key)).map((i) => rows.get(i.key) ?? i);
+  return items
+    .filter((i) => !under.has(i.key))
+    .map((i) => rows.get(i.key) ?? i);
 }
 
-export type Groups = { now: Item[]; today: Item[]; isNew: Item[]; soon: Item[]; later: Item[]; done: Item[] };
+export type Groups = {
+  now: Item[];
+  today: Item[];
+  isNew: Item[];
+  soon: Item[];
+  later: Item[];
+  done: Item[];
+};
 
 /** The groups of the home list. */
 export function groupItems(items: Item[], today: string): Groups {
   const open = items.filter((i) => !i.done).sort(byPlan);
   const later = open.filter((i) => i.start && i.start > today);
   const active = open.filter((i) => !later.includes(i));
-  const now = active.filter((i) => i.priority === "urgent" || (i.due !== null && i.due < today));
+  const now = active.filter(
+    (i) => i.priority === "urgent" || (i.due !== null && i.due < today),
+  );
   const isNew = active.filter((i) => i.isNew && !now.includes(i));
-  const todayList = active.filter((i) => i.due === today && !now.includes(i) && !isNew.includes(i));
-  const soon = active.filter((i) => !now.includes(i) && !isNew.includes(i) && !todayList.includes(i));
-  const done = items.filter((i) => i.done).sort((a, b) => (b.task?.done_at ?? 0) - (a.task?.done_at ?? 0));
+  const todayList = active.filter(
+    (i) => i.due === today && !now.includes(i) && !isNew.includes(i),
+  );
+  const soon = active.filter(
+    (i) => !now.includes(i) && !isNew.includes(i) && !todayList.includes(i),
+  );
+  const done = items
+    .filter((i) => i.done)
+    .sort((a, b) => (b.task?.done_at ?? 0) - (a.task?.done_at ?? 0));
   return { now, today: todayList, isNew, soon, later, done };
 }
 
@@ -371,12 +485,17 @@ export function isPlanRequest(text: string): boolean {
 }
 
 /** A new task from one line, with no AI call (the "Add task" mode of the home box). */
-export type QuickTask = { title: string; due: string | null; priority: api.Priority | null; tags: string[] };
+export type QuickTask = {
+  title: string;
+  due: string | null;
+  priority: api.Priority | null;
+  tags: string[];
+};
 
 /** The day of the next weekday `wd` (0 is Sunday) after today. */
 function nextWeekday(today: string, wd: number): string {
   const d = dateOf(today).getDay();
-  return addDays(today, ((wd - d + 7) % 7) || 7);
+  return addDays(today, (wd - d + 7) % 7 || 7);
 }
 
 /** Reads one line as a new task: "pay rent friday high #home" is "Pay rent",
@@ -385,27 +504,41 @@ export function parseTask(text: string, today: string): QuickTask | null {
   const raw = text.trim();
   if (!raw) return null;
   const tags: string[] = [];
-  let title = raw.replace(/(^|\s)#([\p{L}\p{N}_-]+)/gu, (_, sp: string, g: string) => {
-    tags.push(g);
-    return sp;
-  });
+  let title = raw.replace(
+    /(^|\s)#([\p{L}\p{N}_-]+)/gu,
+    (_, sp: string, g: string) => {
+      tags.push(g);
+      return sp;
+    },
+  );
   let due: string | null = null;
   const days: [RegExp, () => string][] = [
     [/\b(today|tonight)\b/i, () => today],
     [/\btomorrow\b/i, () => addDays(today, 1)],
     [/\bnext week\b/i, () => nextWeekday(today, 1)],
-    ...LONG_WEEKDAYS.map((w, i): [RegExp, () => string] => [new RegExp(`\\b${w}\\b`, "i"), () => nextWeekday(today, i)]),
+    ...LONG_WEEKDAYS.map((w, i): [RegExp, () => string] => [
+      new RegExp(`\\b${w}\\b`, "i"),
+      () => nextWeekday(today, i),
+    ]),
     // A short name like "sun" or "sat" is also a word, so it counts only
     // after "by", "on", or "due", or at the end: "Buy sun cream" keeps "sun".
     ...LONG_WEEKDAYS.map((w, i): [RegExp, () => string] => [
-      new RegExp(`(?:(?<=\\b(?:by|on|due) )${w.slice(0, 3)}\\b|\\b${w.slice(0, 3)}(?=[\\s.!]*$))`, "i"),
+      new RegExp(
+        `(?:(?<=\\b(?:by|on|due) )${w.slice(0, 3)}\\b|\\b${w.slice(0, 3)}(?=[\\s.!]*$))`,
+        "i",
+      ),
       () => nextWeekday(today, i),
     ]),
-    [/\b(\d{4}-\d{2}-\d{2})\b/, () => title.match(/\b(\d{4}-\d{2}-\d{2})\b/)![1]],
+    [
+      /\b(\d{4}-\d{2}-\d{2})\b/,
+      () => title.match(/\b(\d{4}-\d{2}-\d{2})\b/)![1],
+    ],
   ];
   for (const [re, day] of days) {
     // The day word must not run into "'s": "Review today's PR" has no due day.
-    const m = title.match(new RegExp(`\\b(?:by |on |due )?(?:${re.source})(?![\\w'’])`, "i"));
+    const m = title.match(
+      new RegExp(`\\b(?:by |on |due )?(?:${re.source})(?![\\w'’])`, "i"),
+    );
     if (m) {
       due = day();
       title = title.replace(m[0], " ");
@@ -415,13 +548,22 @@ export function parseTask(text: string, today: string): QuickTask | null {
   let priority: api.Priority | null = null;
   // Only a priority word at the end counts: "Review high-level design" and
   // "Fix low battery warning" keep their words.
-  const pm = title.match(/(?:^|,|\s)\s*(urgent|high priority|high|low priority|low)[,\s]*$/i);
+  const pm = title.match(
+    /(?:^|,|\s)\s*(urgent|high priority|high|low priority|low)[,\s]*$/i,
+  );
   if (pm) {
     const w = pm[1].toLowerCase();
-    priority = w.startsWith("urgent") ? "urgent" : w.startsWith("high") ? "high" : "low";
+    priority = w.startsWith("urgent")
+      ? "urgent"
+      : w.startsWith("high")
+        ? "high"
+        : "low";
     title = title.replace(pm[0], " ");
   }
-  title = title.replace(/\s{2,}/g, " ").replace(/[,\s]+$/, "").trim();
+  title = title
+    .replace(/\s{2,}/g, " ")
+    .replace(/[,\s]+$/, "")
+    .trim();
   title = title.charAt(0).toUpperCase() + title.slice(1);
   return { title: title || raw, due, priority, tags };
 }
@@ -464,9 +606,28 @@ export function dur(m: number): string {
 
 /** A planned item, lunch, or a meeting from the calendar. Item blocks have neither `lunch` nor `meeting`. */
 export type Block =
-  | { key: string; start: number; end: number; lunch?: false; meeting?: undefined; pinned?: boolean }
-  | { key: "lunch"; start: number; end: number; lunch: true; meeting?: undefined }
-  | { key: string; start: number; end: number; lunch?: false; meeting: api.CalEvent };
+  | {
+      key: string;
+      start: number;
+      end: number;
+      lunch?: false;
+      meeting?: undefined;
+      pinned?: boolean;
+    }
+  | {
+      key: "lunch";
+      start: number;
+      end: number;
+      lunch: true;
+      meeting?: undefined;
+    }
+  | {
+      key: string;
+      start: number;
+      end: number;
+      lunch?: false;
+      meeting: api.CalEvent;
+    };
 
 export const isItemBlock = (b: Block) => !b.lunch && !b.meeting;
 
@@ -475,7 +636,11 @@ export type Meeting = { start: number; end: number; event: api.CalEvent };
 
 /** The events of one day: `busy` for the schedule, `timed` (all timed
  * events, also the free and the declined ones) and `allDay` for the calendar. */
-export type DayEvents = { busy: Meeting[]; timed: Meeting[]; allDay: api.CalEvent[] };
+export type DayEvents = {
+  busy: Meeting[];
+  timed: Meeting[];
+  allDay: api.CalEvent[];
+};
 
 /** The events of `day` ("YYYY-MM-DD"), cut to that day, in one pass. The
  * minutes are clock times: a day when the clocks change has 23 or 25 hours,
@@ -528,13 +693,23 @@ export type Schedule = {
  * after it. `meetings`: the busy events of the day (eventsOn().busy). Only the
  * ones in the work day count. `pins`: the fixed start times, in minutes
  * after midnight, by key. An item with a fixed time starts at that time. */
-export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = [], pins: Record<string, number> = {}): Schedule {
+export function schedule(
+  order: Item[],
+  s: api.Settings,
+  meetings: Meeting[] = [],
+  pins: Record<string, number> = {},
+): Schedule {
   const [dayStart, dayEnd] = workDay(s);
   // A lunch time that AIfred cannot read gives no lunch, as in the backend.
   const lunchAt = timeOf(s.lunch_start);
-  const lunch = s.lunch_minutes > 0 && lunchAt !== null ? { start: lunchAt, end: lunchAt + s.lunch_minutes } : null;
+  const lunch =
+    s.lunch_minutes > 0 && lunchAt !== null
+      ? { start: lunchAt, end: lunchAt + s.lunch_minutes }
+      : null;
   const inDay = meetings.filter((m) => m.start < dayEnd && m.end > dayStart);
-  const pinned = order.filter((i) => pins[i.key] !== undefined).map((i) => ({ start: pins[i.key], end: pins[i.key] + i.minutes }));
+  const pinned = order
+    .filter((i) => pins[i.key] !== undefined)
+    .map((i) => ({ start: pins[i.key], end: pins[i.key] + i.minutes }));
   // Lunch and the meetings: time that is not free for work.
   const busy = [...(lunch ? [lunch] : []), ...inDay];
   const fixed = [...busy, ...pinned];
@@ -545,24 +720,49 @@ export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = [
     const pin = pins[i.key];
     if (pin !== undefined) {
       // A block ends at midnight at the latest: the day column ends there.
-      blocks.push({ key: i.key, start: pin, end: Math.min(DAY_END, pin + i.minutes), pinned: true });
+      blocks.push({
+        key: i.key,
+        start: pin,
+        end: Math.min(DAY_END, pin + i.minutes),
+        pinned: true,
+      });
       at[i.key] = pin;
       continue;
     }
     // Jump over each fixed block that the item would overlap, until it fits.
-    for (let hit = fixed.find((f) => f.start < cur + i.minutes && f.end > cur); hit; hit = fixed.find((f) => f.start < cur + i.minutes && f.end > cur)) {
+    for (
+      let hit = fixed.find((f) => f.start < cur + i.minutes && f.end > cur);
+      hit;
+      hit = fixed.find((f) => f.start < cur + i.minutes && f.end > cur)
+    ) {
       cur = Math.max(cur, hit.end);
     }
-    blocks.push({ key: i.key, start: Math.min(DAY_END, cur), end: Math.min(DAY_END, cur + i.minutes) });
+    blocks.push({
+      key: i.key,
+      start: Math.min(DAY_END, cur),
+      end: Math.min(DAY_END, cur + i.minutes),
+    });
     at[i.key] = cur;
     cur += i.minutes;
   }
   const all: Block[] = [...blocks];
   if (blocks.length) {
-    if (lunch) all.push({ key: "lunch", start: lunch.start, end: lunch.end, lunch: true });
+    if (lunch)
+      all.push({
+        key: "lunch",
+        start: lunch.start,
+        end: lunch.end,
+        lunch: true,
+      });
     // A meeting that started before the work day (for example an overnight
     // flight) shows from the work-day start, not from midnight.
-    for (const m of inDay) all.push({ key: `event:${m.event.id}`, start: Math.max(m.start, dayStart), end: m.end, meeting: m.event });
+    for (const m of inDay)
+      all.push({
+        key: `event:${m.event.id}`,
+        start: Math.max(m.start, dayStart),
+        end: m.end,
+        meeting: m.event,
+      });
   }
   all.sort((a, b) => a.start - b.start);
   const work = order.reduce((n, i) => n + i.minutes, 0);
@@ -572,7 +772,12 @@ export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = [
   // calendar::free_minutes in crates/aifred-core/src/calendar.rs gives the AI
   // the same number. A test in items.test.ts checks the same cases as its test.
   const takenSpans: { start: number; end: number }[] = [];
-  for (const f of busy.map((f) => ({ start: Math.max(f.start, dayStart), end: Math.min(f.end, dayEnd) })).sort((a, b) => a.start - b.start)) {
+  for (const f of busy
+    .map((f) => ({
+      start: Math.max(f.start, dayStart),
+      end: Math.min(f.end, dayEnd),
+    }))
+    .sort((a, b) => a.start - b.start)) {
     const last = takenSpans[takenSpans.length - 1];
     if (f.end <= f.start) continue;
     if (last && f.start <= last.end) last.end = Math.max(last.end, f.end);
@@ -589,7 +794,10 @@ export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = [
     const a = Math.max(pin, dayStart);
     const b = Math.min(pin + i.minutes, dayEnd);
     if (b <= a) return n;
-    const overlap = takenSpans.reduce((o, t) => o + Math.max(0, Math.min(t.end, b) - Math.max(t.start, a)), 0);
+    const overlap = takenSpans.reduce(
+      (o, t) => o + Math.max(0, Math.min(t.end, b) - Math.max(t.start, a)),
+      0,
+    );
     return n + b - a - overlap;
   }, 0);
   const free = dayEnd - dayStart - taken - inDayWork;
@@ -599,8 +807,12 @@ export function schedule(order: Item[], s: api.Settings, meetings: Meeting[] = [
 /** The side-by-side place of each block of a day, as in Google Calendar:
  * blocks that overlap share the width. `col` is the column of the block,
  * `cols` the number of columns in its group of overlapping blocks. */
-export function sideBySide(blocks: { start: number; end: number }[]): { col: number; cols: number }[] {
-  const order = blocks.map((b, n) => ({ ...b, n, end: Math.max(b.end, b.start + 1) })).sort((a, b) => a.start - b.start || b.end - a.end);
+export function sideBySide(
+  blocks: { start: number; end: number }[],
+): { col: number; cols: number }[] {
+  const order = blocks
+    .map((b, n) => ({ ...b, n, end: Math.max(b.end, b.start + 1) }))
+    .sort((a, b) => a.start - b.start || b.end - a.end);
   const out = blocks.map(() => ({ col: 0, cols: 1 }));
   let group: typeof order = [];
   let colEnds: number[] = [];

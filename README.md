@@ -105,7 +105,7 @@ AIfred's jobs are the tasks that AIfred does by itself. It does them while it ru
   - "Both": the two lists, your tasks first.
   The page keeps the last filter. "See all tasks" on the home page opens it.
 - On the Tasks page, you can pause, start, and delete a job. To change a job, ask in the chat.
-- The job "Update the brief when you finish a task" is not on the Tasks page. It is on the Settings page, under "Brief". You can pause it there.
+- The job "Update the brief when you finish a task" is not on the Tasks page. It is on the Settings page (General tab), under "Brief". You can pause it there.
 - The AI gets your tasks and AIfred's active and paused jobs in one list. Each entry says who does it: "you" or "aifred". So the AI knows what AIfred already checks. A paused job shows only its title and status, not its message. The brief and the day plan do not pick AIfred's jobs.
 - At most 20 jobs that are active or paused. A job can repeat at most once an hour.
 - If AIfred was not running at a job time (closed, or the computer was asleep):
@@ -188,7 +188,7 @@ aifred version                     # show the version
 
 The release program updates itself from the GitHub releases of this repository.
 
-1. 20 seconds after the window opens, and then every 6 hours, AIfred asks GitHub for a newer version. Pre-releases count. "Check now" on the Settings page asks at once.
+1. 20 seconds after the window opens, and then every 6 hours, AIfred asks GitHub for a newer version. Pre-releases count. "Check now" on the Settings page (About tab) asks at once.
 2. When it finds one, it downloads the file for your computer (for example `aifred-0.1.2-linux-x86_64`) next to the program, under a temporary name.
 3. It compares the file's SHA-256 sum with the sum from GitHub. Then it runs `<file> version` one time, to see that the file starts on your computer. Only then does it rename the file to `.aifred-update`. If a step fails, it removes the new file, keeps an earlier checked file, and shows the error on the Settings page. A download stops when no data comes for 60 seconds, or after 30 minutes.
 4. The sidebar shows "AIfred <version> is ready" and a "Restart now" button. The button puts the new file in place of the program, starts it, and closes this window. The chat, the tasks, and the window size stay.
@@ -201,6 +201,18 @@ The release program updates itself from the GitHub releases of this repository.
 - Development builds (`npx tauri dev`) do not update themselves.
 - `aifred version` shows the version.
 - A release must have its program file with the name `aifred-<version>-linux-x86_64`. Versions 0.1.1 and older cannot update themselves. Install the first version with updates by hand.
+
+## Settings page
+
+The Settings page has 5 tabs:
+
+- **General:** the reload time, your work day, and the brief. "Save" is on this tab. A change on this tab stays when you open another tab, until you save it.
+- **Connections:** ClickUp and Google.
+- **ClickUp statuses:** what each ClickUp status means in AIfred (see "ClickUp statuses").
+- **Activity:** AIfred's actions.
+- **About:** updates, and facts about this app.
+
+The arrow keys move between the tabs.
 
 ## Settings (environment variables)
 
@@ -227,11 +239,67 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 
 ## ClickUp list
 
-- Connect ClickUp on the Settings page. Paste your personal API token (ClickUp: Settings > Apps > API Token). AIfred checks the token with ClickUp, then saves it in `clickup-token` in the data folder. Only you can read that file.
+- Connect ClickUp on the Settings page (Connections tab). Paste your personal API token (ClickUp: Settings > Apps > API Token). AIfred checks the token with ClickUp, then saves it in `clickup-token` in the data folder. Only you can read that file.
 - The list shows the open ClickUp tasks assigned to you, in all your workspaces. Tasks in a "done" or "closed" status do not show. It uses the same database and timer as the GitHub list.
+- Each row shows AIfred's own status (see "Item status"). The ClickUp status name is in the tooltip and in the item panel.
 - Tick a ClickUp task to close it in ClickUp. AIfred moves the task to the "closed" status of its list, like the ClickUp "mark complete" button. An Undo puts the old status back.
 - This tick is the only change AIfred makes in ClickUp. The chat can only read ClickUp.
 - The token never goes into the tool settings file that Claude reads. The ClickUp tool server reads the token itself.
+
+## Item status
+
+Each item has AIfred's own status. It is the same for local tasks, GitHub items, and ClickUp tasks (`crates/aifred-core/src/status.rs`). A ClickUp status name can mean another thing in each list, so AIfred does not use the name as its status.
+
+| Status | Open or closed | Meaning |
+| --- | --- | --- |
+| To do | open | Nobody started the work. |
+| In progress | open | You started the work. |
+| Waiting | open | The work waits for another item or another person. |
+| Done | closed | The work is finished. |
+| Unfinished | closed | The team worked on it, but did not finish it in its time. Another task can continue it, for example the copy in the next quarter. With no such task, you accept it as it is. |
+| Cancelled | closed | You decided not to do it. |
+
+- Unfinished and Cancelled are not finished work. AIfred keeps no work time for them. No "task done" job starts. They are not in "finished today" or in the goal counts of the weekly review.
+- The status is only in AIfred. Only Done of a ClickUp task changes ClickUp: it is the same as the tick.
+- Change the status in the item panel. Each change has an Undo. The chat can also change it (`set_item_status`).
+- When two sources disagree, AIfred uses the first one in this list:
+  1. The status that you picked. A weekly review "drop" is Cancelled.
+  2. How the item closed in ClickUp or GitHub. After an item leaves the list, AIfred reads why, one time for each item, for up to 7 days. A GitHub issue closed as "not planned" or as a duplicate, and a pull request closed with no merge, are Cancelled.
+  3. Your override for the ClickUp status (see "ClickUp statuses").
+  4. Waiting: you gave the item away in the weekly review, or it has an open blocker.
+  5. In progress: the item has work time. It stays In progress after the timer stops.
+  6. The ClickUp status group: Not started is To do, Active is In progress, Done and Closed are Done. Else To do.
+- AIfred does not guess from the status name. Only the group and your overrides count.
+- A ClickUp task can be open in ClickUp and closed in AIfred. For example, with an override that makes "delayed" Unfinished, a rock in "delayed" is closed, so the brief does not rank it.
+
+### Continued in
+
+- An Unfinished item can link to the item that continues it. In the item panel, "Continued in" shows the link. "+ Link the task that continues it" finds an open item by its title.
+- With no link, the panel says "Accepted as it is".
+- The item that continues it shows "Continues" with the Unfinished item. The brief gets this as `continues`.
+- Each change has an Undo. The chat can set the link with `set_item_status` (`continued_in`).
+- The link counts only while the item is Unfinished.
+
+### ClickUp statuses
+
+Settings > ClickUp statuses follows the "group defaults plus overrides" pattern of status mapping screens.
+
+- **Defaults:** a fixed table. Each ClickUp status group gives one AIfred status:
+
+  | ClickUp group | AIfred status |
+  | --- | --- |
+  | Not started | To do |
+  | Active | In progress |
+  | Done | Done |
+  | Closed | Done |
+
+- **Overrides:** a table with one row for each override: Space, List, ClickUp status (with its group), AIfred status, and how many of your tasks it changes now.
+- "+ Add override" adds a row. Pick the space, then the list or "Any list in the space", then the ClickUp status, then the AIfred status. The AIfred status starts at the group default.
+- ClickUp keeps statuses on spaces, folders, and lists. A list can use the statuses of its space, or have its own. So for "Any list in the space", AIfred offers the statuses of the space and of each list in it. AIfred reads them from ClickUp when you pick the space (one call for the space, and one for each list).
+- An override for "Any list in the space" also covers the new lists in that space. For example, "delayed" in the "Company Wide" space also counts for the Rocks list of the next quarter.
+- An override for one list wins over one for its space.
+- In a saved row, change the AIfred status in place. Each change and each "Remove" has an Undo.
+- The overrides change only AIfred, not ClickUp.
 
 ## Subtasks
 
@@ -364,7 +432,7 @@ The Calendar page shows your Google Calendar events and your plan as blocks, as 
   2. Turn on the Google Calendar API and the Gmail API. For Docs suggestions, also turn on the Google Docs API. For Sheets comments, also turn on the Google Sheets API.
   3. Set up Google Auth Platform. Pick the audience "Internal" for a company Google Workspace. Else pick "External" and publish the app: in "Testing", Google ends the login every 7 days. Google then shows "Google hasn't verified this app" at the login. It is your own registration: click "Advanced" and continue.
   4. Create a client of the type "Desktop app".
-- Paste the client ID and the client secret on the Settings page, then click "Connect Google". Google's login page opens in the browser.
+- Paste the client ID and the client secret on the Settings page (Connections tab), then click "Connect Google". Google's login page opens in the browser.
 - AIfred keeps the registration and the login key in `google.json` in the data folder. Only you can read that file.
 - AIfred reads the next 7 days of the primary calendar. It cannot change the calendar. The Calendar page shows the events, the day plan goes around busy events, and the brief and the chats see the meetings.
 - One connection serves all Google features. When a new feature needs more access, Settings asks you to connect again (`crates/aifred-core/src/google.rs`). A login from before Gmail was added does not allow Gmail: connect again once.
@@ -394,7 +462,7 @@ AIfred can write a reply to an email that waits for your answer (`crates/aifred-
 - The AI call gets only this email (the subject, the sender, and Google's short preview) and your note. It gets no memory facts and no other items, and it has no tools. So the text of an email cannot make it collect your other data.
 - The reply shows with its address and subject. The address comes from the email (Reply-To, else From), not from the AI. Change the text, then click "Save as Gmail draft". "Copy text" copies it.
 - The save fails when a new message came in the thread after AIfred wrote the reply. Then write the reply again.
-- Each saved draft goes in the action log: under "Reply" in the item panel, and under "AIfred's actions" on the Settings page (`crates/aifred-core/src/actions.rs`).
+- Each saved draft goes in the action log: under "Reply" in the item panel, and under "AIfred's actions" on the Settings page (Activity tab, `crates/aifred-core/src/actions.rs`).
 - Undo deletes the draft in Gmail. When you changed the draft in Gmail, Undo does not delete it. When the draft is gone (you sent or deleted it), Undo deletes nothing, marks it, and tells you so. Undo works also after you turn Gmail or Gmail drafts off, until you connect Google again: a new login does not ask for drafts. A reply answers the newest message of a person: an out-of-office reply or a bounce does not count. When Gmail gives no clear answer to a save (for example a timeout), AIfred looks in the Gmail drafts of the thread. When it finds the draft with the same text, it logs it, so you do not get a second draft.
 
 ### Doc suggestions

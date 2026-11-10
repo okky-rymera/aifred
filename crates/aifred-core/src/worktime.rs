@@ -16,7 +16,7 @@ use std::path::Path;
 
 use anyhow::bail;
 use rusqlite::{Connection, OptionalExtension, Transaction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::db;
@@ -161,6 +161,16 @@ pub(crate) fn finish_in(tx: &Transaction, key: &str, now: u64) -> anyhow::Result
     if running_session(tx)?.is_some_and(|(k, _)| k == key) {
         end_running(tx, now)?;
     }
+    // Unfinished and Cancelled are not finished work (status.rs): the timer
+    // stops, and no real time is kept.
+    if crate::status::of_in(tx, key)?.is_some_and(|s| {
+        matches!(
+            s.status.as_str(),
+            crate::status::UNFINISHED | crate::status::CANCELLED
+        )
+    }) {
+        return Ok(None);
+    }
     let (secs, skipped) = ended_secs(tx, key)?;
     if secs == 0 && skipped == 0 {
         return Ok(None);
@@ -206,6 +216,50 @@ pub(crate) fn finish_in(tx: &Transaction, key: &str, now: u64) -> anyhow::Result
         guess: guess.map(|g| g.0),
         skipped,
     }))
+}
+
+/// The real time that AIfred kept for a finished item: one work_done row.
+/// status::Before carries it, so the undo of a status change puts it back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Kept {
+    pub key: String,
+    pub title: String,
+    pub place: String,
+    pub guess: Option<u32>,
+    pub guess_by: Option<String>,
+    pub minutes: u32,
+    pub finished: i64,
+}
+
+/// The real time that AIfred keeps for `key` now, or None.
+pub(crate) fn kept_in(c: &Connection, key: &str) -> anyhow::Result<Option<Kept>> {
+    Ok(c.query_row(
+        "SELECT key, title, place, guess, guess_by, minutes, finished FROM work_done WHERE key = ?1",
+        [key],
+        |r| {
+            Ok(Kept {
+                key: r.get(0)?,
+                title: r.get(1)?,
+                place: r.get(2)?,
+                guess: r.get(3)?,
+                guess_by: r.get(4)?,
+                minutes: r.get(5)?,
+                finished: r.get(6)?,
+            })
+        },
+    )
+    .optional()?)
+}
+
+/// Puts a kept real time back, as it was (the undo of a status change).
+pub(crate) fn keep_in(tx: &Transaction, k: &Kept) -> anyhow::Result<()> {
+    tx.execute(
+        "INSERT INTO work_done (key, title, place, guess, guess_by, minutes, finished)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (key) DO UPDATE SET title = ?2, place = ?3, guess = ?4, guess_by = ?5, minutes = ?6, finished = ?7",
+        rusqlite::params![k.key, k.title, k.place, k.guess, k.guess_by, k.minutes, k.finished],
+    )?;
+    Ok(())
 }
 
 /// The item is open again: its real time does not count until it is

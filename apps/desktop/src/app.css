@@ -160,6 +160,12 @@ body { background: var(--win); color: var(--ink); font-family: var(--f-body); fo
 .pill.high { background: var(--amber-soft); color: var(--amber-ink); border-color: transparent; }
 .pill.status { display: inline-flex; align-items: center; gap: 5px; }
 .pill.status i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+/* AIfred's own status (Status.tsx). */
+.pill.st-progress { color: var(--navy); border-color: var(--navy); }
+.pill.st-waiting { background: var(--amber-soft); color: var(--amber-ink); border-color: transparent; }
+.pill.st-done { background: var(--green-soft); color: var(--green); border-color: transparent; }
+.pill.st-unfinished { border-style: dashed; color: var(--amber-ink); border-color: var(--amber-ink); }
+.pill.st-cancelled { text-decoration: line-through; text-decoration-thickness: 1px; }
 .x { border: 1px solid var(--line); background: var(--raise); color: var(--muted); font-size: 12px; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
 .x:hover { color: var(--ink); background: var(--line); }
 .row-acts { display: none; gap: 4px; }

@@ -19,7 +19,7 @@ export const srcText = (i: Item) => `${SRC_NAME[i.src]}${i.ref ? ` · ${i.ref}` 
 
 /** Finds an open item by its title, and runs `pick` on it. `skip` are the
  * items that the search must not show. */
-function FindItem(props: { skip: Set<string>; label: string; act: string; actTitle: (i: Item) => string; pick: (i: Item) => Promise<boolean>; onDone: () => void }) {
+export function FindItem(props: { skip: Set<string>; label: string; act: string; actTitle: (i: Item) => string; pick: (i: Item) => Promise<boolean>; onDone: () => void }) {
   const { items } = useApp();
   const [q, setQ] = useState("");
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);

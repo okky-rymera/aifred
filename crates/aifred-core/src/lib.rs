@@ -36,6 +36,7 @@ pub mod settings;
 pub mod sheets;
 pub mod side;
 pub mod sort;
+pub mod status;
 pub mod steps;
 pub mod summaries;
 pub mod tasks;

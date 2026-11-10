@@ -8,6 +8,7 @@
 //! the file clickup-token in the data folder, readable only by the user.
 //! AIFRED_CLICKUP_TOKEN overrides the file.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
@@ -132,8 +133,27 @@ pub struct ClickupItem {
     /// The status color, like "#d3d3d3".
     #[serde(default)]
     pub status_color: String,
+    /// The group of the status in ClickUp: "open", "unstarted", "custom",
+    /// "done", or "closed". AIfred's own status comes from it (status.rs).
+    #[serde(default)]
+    pub status_type: String,
     /// The list that holds the task.
     pub list: String,
+    /// The ClickUp id of the list. A status rule can be for one list (status.rs).
+    #[serde(default)]
+    pub list_id: String,
+    /// The folder of the list, and its name. Both are "" when the list is
+    /// not in a folder (ClickUp then sends a hidden folder).
+    #[serde(default)]
+    pub folder_id: String,
+    #[serde(default)]
+    pub folder: String,
+    /// The space of the list, and its name. The name is "" when AIfred
+    /// could not read it.
+    #[serde(default)]
+    pub space_id: String,
+    #[serde(default)]
+    pub space: String,
     /// The workspace name.
     pub workspace: String,
     /// "urgent", "high", "normal", or "low".
@@ -169,6 +189,10 @@ struct RawTask {
     #[serde(default)]
     list: Option<RawNamed>,
     #[serde(default)]
+    folder: Option<RawFolder>,
+    #[serde(default)]
+    space: Option<RawId>,
+    #[serde(default)]
     priority: Option<RawPriority>,
     #[serde(default)]
     due_date: Option<String>,
@@ -190,6 +214,32 @@ struct RawStatus {
     color: String,
     #[serde(default, rename = "type")]
     kind: String,
+}
+
+/// The folder of a task. A list that is not in a folder has a hidden one.
+#[derive(Deserialize)]
+struct RawFolder {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    hidden: bool,
+}
+
+impl RawFolder {
+    /// The id and the name, or two "" for a hidden folder.
+    fn shown(self) -> (String, String) {
+        if self.hidden {
+            (String::new(), String::new())
+        } else {
+            (self.id, self.name)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RawId {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -230,22 +280,32 @@ fn parse_tasks(
         .tasks
         .into_iter()
         .filter(|t| is_open(&t.status.kind))
-        .map(|t| ClickupItem {
-            id: t.id,
-            custom_id: t.custom_id.filter(|c| !c.is_empty()),
-            title: t.name,
-            url: t.url,
-            status: t.status.status,
-            status_color: t.status.color,
-            list: t.list.map(|l| l.name).unwrap_or_default(),
-            workspace: workspace.to_string(),
-            priority: t.priority.map(|p| p.priority),
-            due: millis(t.due_date.as_deref()),
-            updated: millis(t.date_updated.as_deref()).unwrap_or_default(),
-            description: Some(details_text(
-                &description_text(t.text_content.as_deref(), t.description.as_deref()),
-                &field_values(&t.custom_fields, zone),
-            )),
+        .map(|t| {
+            let (list_id, list) = t.list.map(|l| (l.id, l.name)).unwrap_or_default();
+            let (folder_id, folder) = t.folder.map(RawFolder::shown).unwrap_or_default();
+            ClickupItem {
+                id: t.id,
+                custom_id: t.custom_id.filter(|c| !c.is_empty()),
+                title: t.name,
+                url: t.url,
+                status: t.status.status,
+                status_color: t.status.color,
+                status_type: t.status.kind,
+                list,
+                list_id,
+                folder_id,
+                folder,
+                space_id: t.space.map(|s| s.id).unwrap_or_default(),
+                space: String::new(),
+                workspace: workspace.to_string(),
+                priority: t.priority.map(|p| p.priority),
+                due: millis(t.due_date.as_deref()),
+                updated: millis(t.date_updated.as_deref()).unwrap_or_default(),
+                description: Some(details_text(
+                    &description_text(t.text_content.as_deref(), t.description.as_deref()),
+                    &field_values(&t.custom_fields, zone),
+                )),
+            }
         })
         .collect();
     Ok((items, last))
@@ -483,6 +543,80 @@ struct RawStatuses {
     statuses: Vec<RawStatus>,
 }
 
+/// A list or a folder in a space. `override_statuses` false: it uses the
+/// statuses of its folder or space. None: not known.
+#[derive(Deserialize)]
+struct RawPart {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    override_statuses: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct RawLists {
+    #[serde(default)]
+    lists: Vec<RawPart>,
+}
+
+#[derive(Deserialize)]
+struct RawFolders {
+    #[serde(default)]
+    folders: Vec<RawPart>,
+}
+
+/// One status of a ClickUp list or space, for the Settings page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CuStatus {
+    /// The name as ClickUp shows it.
+    pub name: String,
+    /// The group: "open", "unstarted" (both "Not started"), "custom"
+    /// ("Active"), "done", or "closed".
+    pub kind: String,
+    pub color: String,
+}
+
+impl From<RawStatus> for CuStatus {
+    fn from(s: RawStatus) -> Self {
+        Self {
+            name: s.status,
+            kind: s.kind,
+            color: s.color,
+        }
+    }
+}
+
+/// One ClickUp space, for the Settings page.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CuSpace {
+    pub id: String,
+    pub name: String,
+    pub workspace: String,
+}
+
+/// One list of a space, with its statuses.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CuList {
+    pub id: String,
+    pub name: String,
+    /// The folder name. "" for a list that is not in a folder.
+    pub folder: String,
+    pub statuses: Vec<CuStatus>,
+}
+
+/// The statuses of a space, and its lists with their own statuses. A list
+/// can use the statuses of its space or folder, or have its own ones.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SpaceStatuses {
+    pub statuses: Vec<CuStatus>,
+    pub lists: Vec<CuList>,
+}
+
+/// The most lists with their own statuses that the Settings page reads
+/// for one space. ClickUp allows about 100 calls a minute.
+const MAX_SPACE_LISTS: usize = 40;
+
 /// The status that "mark done" moves a task to: the "closed" status of its
 /// list. ClickUp's own "mark complete" button does the same. A list without
 /// one falls back to a "done" status.
@@ -558,6 +692,32 @@ struct RawUserInner {
 #[derive(Deserialize)]
 struct RawTeams {
     teams: Vec<RawNamed>,
+}
+
+#[derive(Deserialize)]
+struct RawSpaces {
+    spaces: Vec<RawNamed>,
+}
+
+#[derive(Deserialize)]
+struct RawTaskState {
+    status: RawStatus,
+    #[serde(default)]
+    list: Option<RawNamed>,
+    #[serde(default)]
+    folder: Option<RawFolder>,
+    #[serde(default)]
+    space: Option<RawId>,
+}
+
+/// The status of one task now (Client::task_state).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskState {
+    pub status: String,
+    pub status_type: String,
+    pub list_id: String,
+    pub folder_id: String,
+    pub space_id: String,
 }
 
 #[derive(Deserialize)]
@@ -658,6 +818,9 @@ impl Client {
         let mut cut = Vec::new();
         for team in teams.teams {
             check_task_id(&team.id)?;
+            // The space names, for the status rules (status.rs). A failed
+            // read leaves them empty: the list still loads.
+            let spaces = self.space_names(&team.id).await.unwrap_or_default();
             let mut done = false;
             for page in 0..MAX_PAGES {
                 let query = [
@@ -668,7 +831,10 @@ impl Client {
                     ("order_by", "updated".to_string()),
                 ];
                 let body = self.get(&format!("/team/{}/task", team.id), &query).await?;
-                let (items, last) = parse_tasks(&body, &team.name, zone)?;
+                let (mut items, last) = parse_tasks(&body, &team.name, zone)?;
+                for i in &mut items {
+                    i.space = spaces.get(&i.space_id).cloned().unwrap_or_default();
+                }
                 all.extend(items);
                 if last {
                     done = true;
@@ -680,6 +846,121 @@ impl Client {
             }
         }
         Ok(MyTasks { items: all, cut })
+    }
+
+    /// The names of the spaces of one workspace, by space id.
+    async fn space_names(&self, team: &str) -> anyhow::Result<HashMap<String, String>> {
+        let raw: RawSpaces = self
+            .get_json(&format!("/team/{team}/space?archived=false"))
+            .await?;
+        Ok(raw.spaces.into_iter().map(|s| (s.id, s.name)).collect())
+    }
+
+    /// The spaces of all workspaces of the user, for the Settings page.
+    pub async fn spaces(&self) -> anyhow::Result<Vec<CuSpace>> {
+        let teams: RawTeams = self.get_json("/team").await?;
+        let mut out = Vec::new();
+        for team in teams.teams {
+            check_task_id(&team.id)?;
+            let raw: RawSpaces = self
+                .get_json(&format!("/team/{}/space?archived=false", team.id))
+                .await?;
+            out.extend(raw.spaces.into_iter().map(|s| CuSpace {
+                id: s.id,
+                name: s.name,
+                workspace: team.name.clone(),
+            }));
+        }
+        Ok(out)
+    }
+
+    /// The statuses of one space, and the lists of the space (in folders
+    /// and not in folders) with their statuses.
+    pub async fn space_statuses(&self, space_id: &str) -> anyhow::Result<SpaceStatuses> {
+        check_task_id(space_id)?;
+        let space: RawStatuses = self.get_json(&format!("/space/{space_id}")).await?;
+        // Each list, its folder name, and true when it has its own statuses
+        // (or its folder has): only those lists need a call of their own.
+        let mut lists: Vec<(RawPart, String, bool)> = Vec::new();
+        let folders: RawFolders = self
+            .get_json(&format!("/space/{space_id}/folder?archived=false"))
+            .await?;
+        for f in folders.folders {
+            check_task_id(&f.id)?;
+            let l: RawLists = self
+                .get_json(&format!("/folder/{}/list?archived=false", f.id))
+                .await?;
+            let folder_own = f.override_statuses != Some(false);
+            lists.extend(l.lists.into_iter().map(|l| {
+                let own = folder_own || l.override_statuses != Some(false);
+                (l, f.name.clone(), own)
+            }));
+        }
+        let loose: RawLists = self
+            .get_json(&format!("/space/{space_id}/list?archived=false"))
+            .await?;
+        lists.extend(loose.lists.into_iter().map(|l| {
+            let own = l.override_statuses != Some(false);
+            (l, String::new(), own)
+        }));
+        let space_statuses: Vec<CuStatus> =
+            space.statuses.into_iter().map(CuStatus::from).collect();
+        // ClickUp allows about 100 calls a minute: read at most
+        // MAX_SPACE_LISTS lists, 5 at a time. A list that fails to load is
+        // left out, so the other lists still show.
+        let mut calls = 0;
+        lists.retain(|(_, _, own)| {
+            calls += usize::from(*own);
+            !*own || calls <= MAX_SPACE_LISTS
+        });
+        use futures_util::StreamExt;
+        let space_statuses = &space_statuses;
+        let lists = futures_util::stream::iter(lists)
+            .map(|(l, folder, own)| async move {
+                let statuses = if own {
+                    self.list_statuses_full(&l.id).await.ok()?
+                } else {
+                    space_statuses.clone()
+                };
+                Some(CuList {
+                    id: l.id,
+                    name: l.name,
+                    folder,
+                    statuses,
+                })
+            })
+            .buffered(5)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(SpaceStatuses {
+            statuses: space_statuses.clone(),
+            lists,
+        })
+    }
+
+    /// All statuses of one list, in their order, with the group and the color.
+    async fn list_statuses_full(&self, list_id: &str) -> anyhow::Result<Vec<CuStatus>> {
+        check_task_id(list_id)?;
+        let raw: RawStatuses = self.get_json(&format!("/list/{list_id}")).await?;
+        Ok(raw.statuses.into_iter().map(CuStatus::from).collect())
+    }
+
+    /// The status of one task now, with its list, folder, and space. AIfred
+    /// uses it for a task that left the list, to know why (status.rs).
+    pub async fn task_state(&self, id: &str) -> anyhow::Result<TaskState> {
+        check_task_id(id)?;
+        let t: RawTaskState = self.get_json(&format!("/task/{id}")).await?;
+        let (folder_id, _) = t.folder.map(RawFolder::shown).unwrap_or_default();
+        Ok(TaskState {
+            status: t.status.status,
+            status_type: t.status.kind,
+            list_id: t.list.map(|l| l.id).unwrap_or_default(),
+            folder_id,
+            space_id: t.space.map(|s| s.id).unwrap_or_default(),
+        })
     }
 
     /// One task and its last comments, as ClickUp sends them. For the chat tools.
@@ -1142,6 +1423,77 @@ pub(crate) mod tests {
         let w = cut_warning(&got.cut).unwrap();
         assert!(w.contains("more than 1000") && w.contains("Big"), "{w}");
         assert_eq!(cut_warning(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn a_space_gives_its_statuses_and_the_statuses_of_each_list() {
+        let (base, log) = fake_clickup(|_, path| match path {
+            "/api/v2/team" => (200, r#"{"teams":[{"id":"111","name":"Rymera"}]}"#.into()),
+            "/api/v2/team/111/space?archived=false" => (
+                200,
+                r#"{"spaces":[{"id":"s1","name":"Company Wide"}]}"#.into(),
+            ),
+            "/api/v2/space/s1" => (
+                200,
+                r##"{"statuses":[{"status":"Open","type":"open","color":"#ccc"},{"status":"Closed","type":"closed"}]}"##.into(),
+            ),
+            "/api/v2/space/s1/folder?archived=false" => {
+                (200, r#"{"folders":[{"id":"f1","name":"Processes"}]}"#.into())
+            }
+            "/api/v2/folder/f1/list?archived=false" => {
+                (200, r#"{"lists":[{"id":"l1","name":"Checklist"}]}"#.into())
+            }
+            "/api/v2/space/s1/list?archived=false" => (
+                200,
+                r#"{"lists":[{"id":"l2","name":"Rocks (Q4 2026)","override_statuses":true},{"id":"l3","name":"Broken"},{"id":"l4","name":"Ideas","override_statuses":false}]}"#.into(),
+            ),
+            "/api/v2/list/l1" => (200, r#"{"statuses":[{"status":"Open","type":"open"}]}"#.into()),
+            "/api/v2/list/l2" => (
+                200,
+                r##"{"statuses":[{"status":"planned","type":"open"},{"status":"delayed","type":"unstarted","color":"#f80"}]}"##.into(),
+            ),
+            _ => (500, r#"{"err":"boom"}"#.into()),
+        })
+        .await;
+        let c = Client::with_base("pk_test", &base);
+        let spaces = c.spaces().await.unwrap();
+        assert_eq!(
+            spaces,
+            [CuSpace {
+                id: "s1".into(),
+                name: "Company Wide".into(),
+                workspace: "Rymera".into()
+            }]
+        );
+        let s = c.space_statuses("s1").await.unwrap();
+        assert_eq!(s.statuses.len(), 2);
+        assert_eq!(s.statuses[0].kind, "open");
+        // The list that fails to load is left out: the others still show.
+        let names: Vec<(&str, &str)> = s
+            .lists
+            .iter()
+            .map(|l| (l.name.as_str(), l.folder.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Checklist", "Processes"),
+                ("Rocks (Q4 2026)", ""),
+                ("Ideas", "")
+            ]
+        );
+        // A list that uses the space statuses needs no call of its own.
+        assert_eq!(s.lists[2].statuses, s.statuses);
+        assert!(!log.lock().unwrap().iter().any(|c| c.contains("/list/l4")));
+        assert_eq!(
+            s.lists[1].statuses[1],
+            CuStatus {
+                name: "delayed".into(),
+                kind: "unstarted".into(),
+                color: "#f80".into()
+            }
+        );
+        assert!(c.space_statuses("../x").await.is_err(), "the id is checked");
     }
 
     #[tokio::test]

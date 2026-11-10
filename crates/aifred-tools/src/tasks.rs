@@ -254,6 +254,19 @@ struct IdArgs {
     id: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StatusArgs {
+    /// The item key from overview, like "task:t1", "github:owner/repo#12", or "clickup:86abc".
+    key: String,
+    /// AIfred's status: "todo", "progress", "waiting", "done", "unfinished", or "cancelled".
+    status: String,
+    /// Only for "unfinished": the key of the item that continues it, for
+    /// example the copy of the task in the next quarter. "" removes the link
+    /// (the user accepts the item as it is). Leave it out to keep the link.
+    #[serde(default)]
+    continued_in: Option<String>,
+}
+
 /// The day of the plan tools when the AI gives none: the day of the plan
 /// chat that started this server, else today.
 fn default_day() -> String {
@@ -838,6 +851,65 @@ impl TaskTools {
         let id = id.strip_prefix("task:").unwrap_or(id).trim();
         check_item(done_items().as_deref(), &format!("task:{id}"))?;
         json(&self.store().set_done(id, true).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Set AIfred's own status of one item: todo, progress (the user started it), waiting, done, unfinished (worked on but not finished in its time; `continued_in` names the item that continues it, else the user accepts it as it is), or cancelled (the user decided not to do it). It changes only AIfred, not ClickUp or GitHub. Use it only when the user's own words say the status. For done of a ClickUp task, use mark_task_done instead: it changes ClickUp. Unfinished and cancelled are not finished work; done of a GitHub item ends its work and keeps the real time. Say the change in one short line, so the user can ask you to undo it: the answer has `before` and `before_by` (who set it: you, rule, delegate, blocker, timer, or default), and `next_before`. The undo is this tool with the old values. A status that the item has from its rule, a blocker, or the timer anyway is not pinned: it goes on to follow them."
+    )]
+    async fn set_item_status(
+        &self,
+        Parameters(a): Parameters<StatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = a.key.trim();
+        let status = aifred_core::status::check(&a.status).map_err(fail)?;
+        // Done, Unfinished, and Cancelled close an item, like complete_task.
+        let bound = if aifred_core::status::is_closed(status) {
+            done_items()
+        } else {
+            chat_items()
+        };
+        check_item(bound.as_deref(), key)?;
+        let before = aifred_core::status::of(&self.dir, key).map_err(fail)?;
+        let now = aifred_core::files::now();
+        if let Some(n) = a.continued_in.as_deref().map(str::trim)
+            && !n.is_empty()
+        {
+            if status != aifred_core::status::UNFINISHED {
+                return Err(fail(anyhow::anyhow!(
+                    "continued_in is only for the status unfinished"
+                )));
+            }
+            check_item(chat_items().as_deref(), n)?;
+        }
+        // The link first: it checks the target. If the status then fails,
+        // the link goes back, so nothing changes.
+        let next_before = match a.continued_in.as_deref() {
+            Some(n) => Some(
+                aifred_core::status::set_next(
+                    &self.dir,
+                    key,
+                    Some(n).filter(|n| !n.trim().is_empty()),
+                    now,
+                )
+                .map_err(fail)?,
+            ),
+            None => None,
+        };
+        if let Err(e) = aifred_core::status::set(&self.dir, key, status, now) {
+            if let Some(old) = &next_before {
+                let _ = aifred_core::status::set_next(&self.dir, key, old.as_deref(), now);
+            }
+            return Err(fail(e));
+        }
+        let after = aifred_core::status::of(&self.dir, key).map_err(fail)?;
+        json(&serde_json::json!({
+            "key": key,
+            "status": after.as_ref().map(|s| s.status.clone()),
+            "continued_in": after.and_then(|s| s.next).map(|n| n.key),
+            "before": before.as_ref().map(|s| s.status.clone()),
+            "before_by": before.map(|s| s.by),
+            "next_before": next_before.flatten(),
+        }))
     }
 }
 

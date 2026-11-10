@@ -89,14 +89,15 @@ pub fn pending(dir: &Path, limit: usize) -> anyhow::Result<Vec<String>> {
 }
 
 fn pending_in(c: &Connection, limit: usize) -> anyhow::Result<Vec<String>> {
-    let mut q = c.prepare(
+    let mut q = c.prepare(&format!(
         "SELECT k FROM (
            SELECT 'task:' || id AS k, created AS t FROM user_task WHERE done = 0
            UNION ALL
-           SELECT source || ':' || item_id, first_seen FROM work_item WHERE in_list = 1
+           SELECT source || ':' || item_id, first_seen FROM work_item WHERE in_list = 1 AND status NOT IN {}
          ) WHERE k NOT IN (SELECT key FROM item_sort)
          ORDER BY t, k LIMIT ?1",
-    )?;
+        crate::status::CLOSED_SQL
+    ))?;
     let rows = q.query_map([limit as i64], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -105,8 +106,11 @@ fn pending_in(c: &Connection, limit: usize) -> anyhow::Result<Vec<String>> {
 pub fn open_count(dir: &Path) -> anyhow::Result<usize> {
     db::read(dir, |c| {
         let n: i64 = c.query_row(
-            "SELECT (SELECT COUNT(*) FROM user_task WHERE done = 0)
-                  + (SELECT COUNT(*) FROM work_item WHERE in_list = 1)",
+            &format!(
+                "SELECT (SELECT COUNT(*) FROM user_task WHERE done = 0)
+                      + (SELECT COUNT(*) FROM work_item WHERE in_list = 1 AND status NOT IN {})",
+                crate::status::CLOSED_SQL
+            ),
             [],
             |r| r.get(0),
         )?;
@@ -139,10 +143,11 @@ fn open_items(c: &Connection) -> anyhow::Result<Vec<Open>> {
             gh_links: Vec::new(),
         });
     }
-    let mut q = c.prepare(
+    let mut q = c.prepare(&format!(
         "SELECT source, item_id, title, details, data FROM work_item
-         WHERE in_list = 1 ORDER BY source, item_id",
-    )?;
+         WHERE in_list = 1 AND status NOT IN {} ORDER BY source, item_id",
+        crate::status::CLOSED_SQL
+    ))?;
     for r in q.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,

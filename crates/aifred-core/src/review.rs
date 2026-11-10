@@ -200,20 +200,45 @@ fn last_change(c: &Connection, key: &str) -> anyhow::Result<Option<u64>> {
 /// A key counts again when the item changed after the pick: for example,
 /// the user opened the task again, or the GitHub item has new activity.
 fn hidden_in(c: &Connection) -> anyhow::Result<HashSet<String>> {
-    let mut q = c.prepare(
+    Ok(picks_in_force(c)?.into_keys().collect())
+}
+
+/// The "delegate" and "drop" picks that are in force, with their time: the
+/// newest pick of each key, when the item did not change after it. AIfred's
+/// status uses them (status.rs): a drop is Cancelled, a delegate is Waiting.
+pub(crate) fn picks_in_force(c: &Connection) -> anyhow::Result<HashMap<String, (String, u64)>> {
+    let mut q = c.prepare_cached(
         "SELECT p.key, p.pick, p.ts FROM review_pick p
-         WHERE p.id = (SELECT MAX(id) FROM review_pick WHERE key = p.key)",
+         WHERE p.id = (SELECT MAX(id) FROM review_pick WHERE key = p.key)
+           AND p.pick IN ('delegate', 'drop')",
     )?;
     let rows: Vec<(String, String, u64)> = q
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<Result<_, _>>()?;
-    let mut out = HashSet::new();
+    let mut out = HashMap::new();
     for (key, pick, ts) in rows {
-        if (pick == DELEGATE || pick == DROP) && last_change(c, &key)?.is_none_or(|t| t <= ts) {
-            out.insert(key);
+        if last_change(c, &key)?.is_none_or(|t| t <= ts) {
+            out.insert(key, (pick, ts));
         }
     }
     Ok(out)
+}
+
+/// picks_in_force() for one key: its newest pick, when that is "delegate"
+/// or "drop" and the item did not change after it.
+pub(crate) fn pick_in_force(c: &Connection, key: &str) -> anyhow::Result<Option<(String, u64)>> {
+    let row: Option<(String, u64)> = c
+        .prepare_cached(
+            "SELECT pick, ts FROM review_pick
+             WHERE key = ?1 AND pick IN ('delegate', 'drop')
+               AND id = (SELECT MAX(id) FROM review_pick WHERE key = ?1)",
+        )?
+        .query_row([key], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    Ok(match row {
+        Some((pick, ts)) if last_change(c, key)?.is_none_or(|t| t <= ts) => Some((pick, ts)),
+        _ => None,
+    })
 }
 
 fn day_check_in(c: &Connection, day: &str) -> anyhow::Result<DayCheck> {
@@ -230,7 +255,9 @@ fn day_check_in(c: &Connection, day: &str) -> anyhow::Result<DayCheck> {
     let mut done = Vec::new();
     let mut seen = HashSet::new();
     let mut q = c.prepare(
-        "SELECT id FROM user_task WHERE done = 1 AND done_at >= ?1 AND done_at < ?2 ORDER BY done_at",
+        // Unfinished and Cancelled tasks are closed, but not finished (status.rs).
+        "SELECT id FROM user_task WHERE done = 1 AND COALESCE(closed_as, 'done') = 'done'
+           AND done_at >= ?1 AND done_at < ?2 ORDER BY done_at",
     )?;
     let ids: Vec<String> = q
         .query_map([start, end], |r| r.get(0))?
@@ -339,11 +366,14 @@ fn remove_from_plan(tx: &Transaction, day: &str, key: &str) -> anyhow::Result<()
 /// finished work: no "task done" jobs start, and AIfred keeps no real time.
 /// Its last change does not move, so a later change by the user shows
 /// (hidden_in).
-fn close_task(tx: &Transaction, id: &str, now: u64) -> anyhow::Result<()> {
+/// A dropped task is Cancelled (status.rs). A task that the user gave
+/// away keeps closed_as NULL: the "waiting for" list has it now.
+fn close_task(tx: &Transaction, id: &str, pick: &str, now: u64) -> anyhow::Result<()> {
     crate::worktime::stop_in(tx, &format!("task:{id}"), now)?;
+    let closed_as = (pick == DROP).then_some(crate::status::CANCELLED);
     tx.execute(
-        "UPDATE task SET done = 1, done_at = ?1 WHERE doer = 'you' AND id = ?2 AND done = 0",
-        rusqlite::params![now as i64, id],
+        "UPDATE task SET done = 1, done_at = ?1, closed_as = ?3 WHERE doer = 'you' AND id = ?2 AND done = 0",
+        rusqlite::params![now as i64, id, closed_as],
     )?;
     Ok(())
 }
@@ -463,10 +493,11 @@ fn stale_in(c: &Connection, today: &str, now: u64) -> anyhow::Result<Vec<StaleIt
     for (id, changed) in tasks {
         push(c, format!("task:{id}"), changed)?;
     }
-    let mut q = c.prepare(
+    let mut q = c.prepare(&format!(
         "SELECT source, item_id, data, first_seen FROM work_item
-         WHERE in_list = 1 AND source IN ('github', 'clickup')",
-    )?;
+         WHERE in_list = 1 AND status NOT IN {} AND source IN ('github', 'clickup')",
+        crate::status::CLOSED_SQL
+    ))?;
     let items: Vec<(String, String, String, u64)> = q
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<Result<_, _>>()?;
@@ -486,7 +517,9 @@ fn goals_week_in(c: &Connection, now: u64) -> anyhow::Result<Vec<GoalWeek>> {
     // A task that the user gave away or dropped is closed, but not finished.
     let hidden = hidden_in(c)?;
     let mut finished: HashSet<String> = HashSet::new();
-    let mut q = c.prepare("SELECT id FROM user_task WHERE done = 1 AND done_at >= ?1")?;
+    let mut q = c.prepare(
+        "SELECT id FROM user_task WHERE done = 1 AND COALESCE(closed_as, 'done') = 'done' AND done_at >= ?1",
+    )?;
     for r in q.query_map([from], |r| r.get::<_, String>(0))? {
         finished.insert(format!("task:{}", r?));
     }
@@ -680,14 +713,14 @@ pub fn pick(
                 )?;
                 undo.waiting = Some(w.id);
                 if source == "task" {
-                    close_task(tx, id, now)?;
+                    close_task(tx, id, pick, now)?;
                     undo.closed = true;
                 }
                 note
             }
             _ => {
                 if source == "task" {
-                    close_task(tx, id, now)?;
+                    close_task(tx, id, pick, now)?;
                     undo.closed = true;
                 }
                 String::new()
@@ -697,6 +730,8 @@ pub fn pick(
             "INSERT INTO review_pick (key, pick, title, place, note, undo, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![key, pick, title, place, note, serde_json::to_string(&undo)?, now as i64],
         )?;
+        // A drop is Cancelled now, also for a GitHub or ClickUp item.
+        crate::status::refresh_in(tx)?;
         Ok(Pick {
             id: tx.last_insert_rowid(),
             key: key.into(),
@@ -732,7 +767,7 @@ pub fn undo_pick(dir: &Path, id: i64, now: u64) -> anyhow::Result<()> {
             // The pick did not finish the task (close_task), so there is no
             // real time and no job to take back.
             tx.execute(
-                "UPDATE task SET done = 0, done_at = NULL WHERE doer = 'you' AND id = ?1 AND done = 1",
+                "UPDATE task SET done = 0, done_at = NULL, closed_as = NULL WHERE doer = 'you' AND id = ?1 AND done = 1",
                 [t],
             )?;
         }
@@ -752,6 +787,7 @@ pub fn undo_pick(dir: &Path, id: i64, now: u64) -> anyhow::Result<()> {
             tx.execute("DELETE FROM waiting WHERE id = ?1", [w])?;
         }
         tx.execute("DELETE FROM review_pick WHERE id = ?1", [id])?;
+        crate::status::refresh_in(tx)?;
         Ok(())
     })
 }
@@ -1073,19 +1109,17 @@ mod tests {
         let gh = pick(&d, "github:acme/shop#1", DROP, "", today, now).unwrap();
         db::read(&d, |cn| {
             assert!(!crate::items::is_open(cn, &e)?, "a dropped task closes");
-            assert!(
-                crate::items::is_open(cn, "github:acme/shop#1")?,
-                "GitHub does not change"
-            );
-            // The closed task is not in the overview, so only GitHub is here.
-            let ai = for_ai(cn, now)?;
-            assert_eq!(ai.len(), 1);
+            // GitHub does not change, but in AIfred a drop is Cancelled (status.rs).
+            assert!(!crate::items::is_open(cn, "github:acme/shop#1")?);
             assert_eq!(
-                (ai[0]["key"].as_str(), ai[0]["pick"].as_str()),
-                (Some("github:acme/shop#1"), Some("drop"))
+                crate::status::of_in(cn, "github:acme/shop#1")?
+                    .unwrap()
+                    .status,
+                crate::status::CANCELLED
             );
-            // The drop is in force after RECENT_DAYS days too.
-            assert_eq!(for_ai(cn, now + 40 * 86_400)?.len(), 1);
+            // Both are closed in AIfred, so they are not in the overview,
+            // and the AI needs no pick for them.
+            assert!(for_ai(cn, now)?.is_empty());
             Ok(())
         })
         .unwrap();

@@ -401,6 +401,21 @@ pub fn open_blockers_in(c: &Connection) -> anyhow::Result<BTreeMap<String, Vec<S
     Ok(out)
 }
 
+/// True when `key` is in open_blockers_in(): it is open and waits for at
+/// least one open item. For the status of one item (status.rs).
+pub(crate) fn is_blocked_in(c: &Connection, key: &str) -> anyhow::Result<bool> {
+    let sql = format!(
+        "SELECT 1 FROM item_blocker WHERE removed = 0 AND key = ?1 AND {} AND {} LIMIT 1",
+        known_sql("key", true),
+        known_sql("blocker", true)
+    );
+    let found = c
+        .prepare_cached(&sql)?
+        .query_row([key], |_| Ok(()))
+        .optional()?;
+    Ok(found.is_some())
+}
+
 /// Takes away all rows of an item that is gone. A deleted task uses it
 /// (tasks.rs remove).
 pub(crate) fn remove_item_in(tx: &Transaction, key: &str) -> anyhow::Result<()> {

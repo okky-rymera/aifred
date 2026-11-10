@@ -95,10 +95,18 @@ export type AppCtx = {
   openMain: () => void;
   sendMain: (text: string, files: api.FileRef[]) => Promise<boolean>;
   planChat: ChatState;
-  sendPlan: (text: string, files?: api.FileRef[], day?: string) => Promise<boolean>;
+  sendPlan: (
+    text: string,
+    files?: api.FileRef[],
+    day?: string,
+  ) => Promise<boolean>;
   /** The chat of an item, by its key, or of a mission, by missionChatKey(). */
   itemChat: (key: string) => ChatState;
-  askItem: (key: string, text: string, files: api.FileRef[]) => Promise<boolean>;
+  askItem: (
+    key: string,
+    text: string,
+    files: api.FileRef[],
+  ) => Promise<boolean>;
   /** Loads the old messages of an item or mission chat, one time. */
   loadItemChat: (key: string) => void;
 
@@ -108,6 +116,12 @@ export type AppCtx = {
 
   /** True when the item closed. */
   toggleDone: (i: Item) => Promise<boolean>;
+  /** Sets AIfred's own status of an item, with an undo. True when it worked. */
+  setStatus: (i: Item, s: api.Status) => Promise<boolean>;
+  /** Opens a GitHub or ClickUp item that is closed only in AIfred again, with an undo. */
+  openAgain: (i: Item) => Promise<boolean>;
+  /** Links an Unfinished item to the item that continues it. null: accepted as it is. */
+  setStatusNext: (i: Item, next: Item | null) => Promise<boolean>;
   /** The item that you work on now, or null. */
   work: api.Running | null;
   /** Starts work on an item. The work on another item stops. */
@@ -142,7 +156,10 @@ export type AppCtx = {
   /** Saves a new order of the plan of `day` (default today). `toast` says what changed, with an undo. */
   savePlan: (keys: string[], toast?: string, day?: string) => void;
   /** Adds an item to the plan of `day` (default today), at the place `index`, with the fixed time `at`. */
-  addToPlan: (key: string, opts?: { index?: number; day?: string; at?: number }) => void;
+  addToPlan: (
+    key: string,
+    opts?: { index?: number; day?: string; at?: number },
+  ) => void;
   removeFromPlan: (key: string, day?: string) => void;
   /** Fixes the start time of a plan item, in minutes after midnight. null: no fixed time. */
   setPlanTime: (key: string, at: number | null, day: string) => void;
@@ -197,11 +214,18 @@ export function openQuestions(
   clickupState: ListState,
 ): string[] {
   const failed = (k: string) => {
-    const state = k.startsWith("github:") ? githubState : k.startsWith("clickup:") ? clickupState : "ok";
+    const state = k.startsWith("github:")
+      ? githubState
+      : k.startsWith("clickup:")
+        ? clickupState
+        : "ok";
     return !["loading", "ok", "off"].includes(state);
   };
   if (brief?.day !== today) return [];
-  return (brief.ask ?? []).filter((k) => !skipped.includes(k) && (byKey.has(k) ? !byKey.get(k)!.done : failed(k)));
+  return (brief.ask ?? []).filter(
+    (k) =>
+      !skipped.includes(k) && (byKey.has(k) ? !byKey.get(k)!.done : failed(k)),
+  );
 }
 
 export const Ctx = createContext<AppCtx>(null!);

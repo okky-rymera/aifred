@@ -5,13 +5,31 @@ import { listen } from "@tauri-apps/api/event";
 /** A file that the user sent or keeps on a task (uploads.rs). */
 export type FileRef = { id: string; name: string; size: number };
 
-export type Turn = { ts: number; role: "user" | "assistant"; text: string; backend: string; files?: FileRef[] };
+export type Turn = {
+  ts: number;
+  role: "user" | "assistant";
+  text: string;
+  backend: string;
+  files?: FileRef[];
+};
 
 /** One message of a side chat: the plan chat or the chat of one item (side.rs). */
-export type SideTurn = { id: number; ts: number; role: "user" | "assistant"; text: string; files: FileRef[]; info?: string };
+export type SideTurn = {
+  id: number;
+  ts: number;
+  role: "user" | "assistant";
+  text: string;
+  files: FileRef[];
+  info?: string;
+};
 
 export type ProgressEvent =
-  | { kind: "tool_call"; server: string; tool: string; input: Record<string, unknown> }
+  | {
+      kind: "tool_call";
+      server: string;
+      tool: string;
+      input: Record<string, unknown>;
+    }
   | { kind: "notice"; message: string };
 
 export type Answer = {
@@ -28,13 +46,26 @@ export type Answer = {
 };
 
 /** The models that the chat box offers. null is the default model. */
-export const CHAT_MODELS: { id: string | null; label: string; hint: string }[] = [
-  { id: null, label: "Default", hint: "The Claude Code default model, or AIFRED_MODEL" },
-  { id: "fable", label: "Fable", hint: "The most careful model. The slowest." },
-  { id: "opus", label: "Opus", hint: "Very careful. Slow." },
-  { id: "sonnet", label: "Sonnet", hint: "Careful and faster" },
-  { id: "haiku", label: "Haiku", hint: "The fastest. Good for short questions." },
-];
+export const CHAT_MODELS: { id: string | null; label: string; hint: string }[] =
+  [
+    {
+      id: null,
+      label: "Default",
+      hint: "The Claude Code default model, or AIFRED_MODEL",
+    },
+    {
+      id: "fable",
+      label: "Fable",
+      hint: "The most careful model. The slowest.",
+    },
+    { id: "opus", label: "Opus", hint: "Very careful. Slow." },
+    { id: "sonnet", label: "Sonnet", hint: "Careful and faster" },
+    {
+      id: "haiku",
+      label: "Haiku",
+      hint: "The fastest. Good for short questions.",
+    },
+  ];
 
 export type Info = {
   data_dir: string;
@@ -80,6 +111,8 @@ export type Task = {
   tags: string[];
   checklist: ChecklistItem[];
   files: FileRef[];
+  /** How a done task closed (status.rs). Not set: finished work, or not done. */
+  closed_as?: "unfinished" | "cancelled";
 };
 
 /** The fields to set. A field that is left out stays as it is. For due,
@@ -140,8 +173,16 @@ export type ClickupItem = {
   status: string;
   /** The status color, like "#4194f6". */
   status_color: string;
+  /** The ClickUp group of the status: "open", "unstarted", "custom", "done", or "closed". */
+  status_type?: string;
   /** The list that holds the task. */
   list: string;
+  list_id?: string;
+  /** The folder and the space of the list. "" when AIfred does not know them. */
+  folder_id?: string;
+  folder?: string;
+  space_id?: string;
+  space?: string;
   workspace: string;
   priority?: "urgent" | "high" | "normal" | "low";
   /** Unix milliseconds. */
@@ -188,9 +229,19 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 /** One item of a day plan. `key` names the item (items.rs). */
-export type PlanItem = { key: string; why?: string; goal?: number; /** A fixed start time, in minutes after midnight. */ at?: number };
+export type PlanItem = {
+  key: string;
+  why?: string;
+  goal?: number;
+  /** A fixed start time, in minutes after midnight. */ at?: number;
+};
 /** `mode` "review": a review put items in a day with no plan. You did not pick yet how to plan the day. */
-export type DayPlan = { day: string; mode: "ai" | "self" | "review"; items: PlanItem[]; updated: number };
+export type DayPlan = {
+  day: string;
+  mode: "ai" | "self" | "review";
+  items: PlanItem[];
+  updated: number;
+};
 export type Estimate = { minutes: number; by: "you" | "aifred" };
 /** The text that AIfred can draft for a step later: an email, text in a Google Doc, or a change in a Google Sheet. */
 export type DraftKind = "email" | "doc" | "sheet";
@@ -228,7 +279,15 @@ export type Brief = {
 };
 
 /** One move of AIfred: `key` is now a subtask of `main`, for the reason `why`. */
-export type Moved = { id: number; ts: number; key: string; title: string; main: string; main_title: string; why: string };
+export type Moved = {
+  id: number;
+  ts: number;
+  key: string;
+  title: string;
+  main: string;
+  main_title: string;
+  why: string;
+};
 
 /** One item of a mission. `open` is false when the item is done or closed. */
 export type MissionItem = {
@@ -239,7 +298,13 @@ export type MissionItem = {
   by: "you" | "aifred";
 };
 /** How far a mission is: (steps_done + items_closed) / (steps + items). */
-export type MissionProgress = { steps_done: number; steps: number; items_closed: number; items: number; percent: number };
+export type MissionProgress = {
+  steps_done: number;
+  steps: number;
+  items_closed: number;
+  items: number;
+  percent: number;
+};
 /** One unit of work that the brief made from one or more items. The first
  * item is the item of the next action: the mission shows its reason, its
  * next action, and its goal. */
@@ -256,18 +321,130 @@ export type Mission = {
 };
 
 /** One of the user's goals (goals.rs). */
-export type Goal = { id: number; text: string; created: number; updated: number };
+export type Goal = {
+  id: number;
+  text: string;
+  created: number;
+  updated: number;
+};
 /** `stale`: the user has not changed or checked the goals for 30 days. */
 export type Goals = { goals: Goal[]; checked: number; stale: boolean };
 /** At most this many goals (goals.rs). */
 export const MAX_GOALS = 5;
 export const goals = () => invoke<Goals>("goals");
 export const addGoal = (text: string) => invoke<Goals>("add_goal", { text });
-export const editGoal = (id: number, text: string) => invoke<Goals>("edit_goal", { id, text });
+export const editGoal = (id: number, text: string) =>
+  invoke<Goals>("edit_goal", { id, text });
 export const removeGoal = (id: number) => invoke<Goals>("remove_goal", { id });
 /** The user says that the goals are still right. */
 export const confirmGoals = () => invoke<Goals>("confirm_goals");
-export type ItemMeta = { key: string; first_seen: number; new: boolean; summary?: string };
+/** AIfred's own status of an item (status.rs). The same for all sources. */
+export type Status =
+  "todo" | "progress" | "waiting" | "done" | "unfinished" | "cancelled";
+export const STATUSES: Status[] = [
+  "todo",
+  "progress",
+  "waiting",
+  "done",
+  "unfinished",
+  "cancelled",
+];
+export const STATUS_NAME: Record<Status, string> = {
+  todo: "To do",
+  progress: "In progress",
+  waiting: "Waiting",
+  done: "Done",
+  unfinished: "Unfinished",
+  cancelled: "Cancelled",
+};
+/** What each status means, for the tooltips. */
+export const STATUS_HINT: Record<Status, string> = {
+  todo: "Nobody started the work.",
+  progress: "You started the work.",
+  waiting: "The work waits for another item or another person.",
+  done: "The work is finished.",
+  unfinished:
+    "Worked on, but not finished in its time. Another task can continue it, or you accept it as it is. Not counted as finished.",
+  cancelled: "You decided not to do it. Not counted as finished.",
+};
+export const isClosed = (s: Status) =>
+  s === "done" || s === "unfinished" || s === "cancelled";
+/** An item that a status links to, with its title when AIfred knows it. */
+export type Linked = { key: string; title?: string };
+/** Who or what set a status: "you", "source" (how it closed there), "rule", "delegate", "blocker", "timer", or "default". */
+export type ItemStatus = {
+  status: Status;
+  by: string;
+  source?: string;
+  /** Unfinished: the item that continues it. None: accepted as it is. */
+  next?: Linked;
+  /** The Unfinished items that this item continues. */
+  continues?: Linked[];
+};
+/** The real time that AIfred kept for an item before a status change (worktime.rs Kept). */
+export type WorkKept = {
+  key: string;
+  title: string;
+  place: string;
+  guess: number | null;
+  guess_by: string | null;
+  minutes: number;
+  finished: number;
+};
+/** What setItemStatus changed, for the undo. Give it back to restoreItemStatus. */
+export type StatusBefore = {
+  key: string;
+  picked: [string, number] | null;
+  task: [boolean, string | null, number | null] | null;
+  work?: WorkKept | null;
+};
+export type RuleScope = "list" | "folder" | "space" | "all";
+/** The ClickUp status groups. "open" and "unstarted" are both "Not started". */
+export const CU_GROUP: Record<string, string> = {
+  open: "Not started",
+  unstarted: "Not started",
+  custom: "Active",
+  done: "Done",
+  closed: "Closed",
+};
+/** The AIfred status of a ClickUp status group with no override. The same as status::default_for in Rust. */
+export const groupDefault = (kind: string): Status =>
+  kind === "custom" || kind === "active"
+    ? "progress"
+    : kind === "done" || kind === "closed"
+      ? "done"
+      : "todo";
+/** Your rule for a ClickUp status: "this status in this list (or in all lists of this space) is this AIfred status". */
+export type StatusRule = {
+  id?: number;
+  name: string;
+  scope: RuleScope;
+  scope_id: string;
+  scope_name: string;
+  space_id: string;
+  space_name: string;
+  /** The ClickUp group of the status (CU_GROUP). */
+  kind: string;
+  status: Status;
+};
+export type CuStatus = { name: string; kind: string; color: string };
+export type CuSpace = { id: string; name: string; workspace: string };
+export type CuList = {
+  id: string;
+  name: string;
+  folder: string;
+  statuses: CuStatus[];
+};
+/** The statuses of a space, and its lists with their own statuses. */
+export type SpaceStatuses = { statuses: CuStatus[]; lists: CuList[] };
+
+export type ItemMeta = {
+  key: string;
+  first_seen: number;
+  new: boolean;
+  summary?: string;
+  status?: ItemStatus;
+};
 export type ItemDetails = {
   key: string;
   details: string;
@@ -280,10 +457,19 @@ export type ItemDetails = {
 export type ModelPick = string | undefined;
 
 /** A question in the main conversation. `files`: ids from uploadFile. */
-export function ask(prompt: string, onEvent: (e: ProgressEvent) => void, opts: { model?: ModelPick; files?: string[] } = {}): Promise<Answer> {
+export function ask(
+  prompt: string,
+  onEvent: (e: ProgressEvent) => void,
+  opts: { model?: ModelPick; files?: string[] } = {},
+): Promise<Answer> {
   const channel = new Channel<ProgressEvent>();
   channel.onmessage = onEvent;
-  return invoke<Answer>("ask", { prompt, onEvent: channel, model: opts.model, files: opts.files ?? [] });
+  return invoke<Answer>("ask", {
+    prompt,
+    onEvent: channel,
+    model: opts.model,
+    files: opts.files ?? [],
+  });
 }
 
 /** A question in a side chat: "plan:YYYY-MM-DD" or "item:<key>". */
@@ -295,47 +481,113 @@ export function askSide(
 ): Promise<Answer> {
   const channel = new Channel<ProgressEvent>();
   channel.onmessage = onEvent;
-  return invoke<Answer>("ask_side", { thread, prompt, onEvent: channel, model: opts.model, files: opts.files ?? [] });
+  return invoke<Answer>("ask_side", {
+    thread,
+    prompt,
+    onEvent: channel,
+    model: opts.model,
+    files: opts.files ?? [],
+  });
 }
 
-export const sideHistory = (thread: string) => invoke<SideTurn[]>("side_history", { thread });
-export const clearSide = (thread: string) => invoke<void>("clear_side", { thread });
+export const sideHistory = (thread: string) =>
+  invoke<SideTurn[]>("side_history", { thread });
+export const clearSide = (thread: string) =>
+  invoke<void>("clear_side", { thread });
 
 /** Saves one file. The bytes go as the body, so a large file needs no JSON. */
 export async function uploadFile(file: File): Promise<FileRef> {
   const bytes = new Uint8Array(await file.arrayBuffer());
-  return invoke<FileRef>("upload_file", bytes, { headers: { "x-file-name": encodeURIComponent(file.name) } });
+  return invoke<FileRef>("upload_file", bytes, {
+    headers: { "x-file-name": encodeURIComponent(file.name) },
+  });
 }
 export const openFile = (id: string) => invoke<void>("open_file", { id });
 
-export const dayPlan = (day: string) => invoke<DayPlan | null>("day_plan", { day });
-export const setDayPlan = (day: string, mode: DayPlan["mode"], items: PlanItem[]) => invoke<DayPlan>("set_day_plan", { day, mode, items });
+export const dayPlan = (day: string) =>
+  invoke<DayPlan | null>("day_plan", { day });
+export const setDayPlan = (
+  day: string,
+  mode: DayPlan["mode"],
+  items: PlanItem[],
+) => invoke<DayPlan>("set_day_plan", { day, mode, items });
 /** The plans of the days from `from` to `to`, both included. A day with no plan is not in the list. */
-export const dayPlans = (from: string, to: string) => invoke<DayPlan[]>("day_plans", { from, to });
+export const dayPlans = (from: string, to: string) =>
+  invoke<DayPlan[]>("day_plans", { from, to });
 /** Moves one item to the plan of another day. Returns the plan of `from`, then the plan of `to`. */
-export const movePlanItem = (from: string, to: string, key: string, at: number | null, index: number | null) =>
-  invoke<[DayPlan | null, DayPlan]>("move_plan_item", { from, to, key, at, index });
-export const clearDayPlan = (day: string) => invoke<void>("clear_day_plan", { day });
+export const movePlanItem = (
+  from: string,
+  to: string,
+  key: string,
+  at: number | null,
+  index: number | null,
+) =>
+  invoke<[DayPlan | null, DayPlan]>("move_plan_item", {
+    from,
+    to,
+    key,
+    at,
+    index,
+  });
+export const clearDayPlan = (day: string) =>
+  invoke<void>("clear_day_plan", { day });
 export const estimates = () => invoke<Record<string, Estimate>>("estimates");
 /** Your own time guess. null removes it. */
-export const setEstimate = (key: string, minutes: number | null) => invoke<void>("set_estimate", { key, minutes });
+export const setEstimate = (key: string, minutes: number | null) =>
+  invoke<void>("set_estimate", { key, minutes });
 export const brief = (day: string) => invoke<Brief | null>("brief", { day });
 /** One AI call. */
 /** `release` true: the brief of `day` stops holding its missions for the questions. */
-export const writeBrief = (day: string, release = false) => invoke<Brief>("write_brief", { day, release });
+export const writeBrief = (day: string, release = false) =>
+  invoke<Brief>("write_brief", { day, release });
 export const itemMeta = () => invoke<ItemMeta[]>("item_meta");
+/** Sets AIfred's own status of an item. It changes only AIfred. Done of a ClickUp task goes through clickupMarkDone. */
+export const setItemStatus = (key: string, status: Status) =>
+  invoke<StatusBefore>("set_item_status", { key, status });
+export const restoreItemStatus = (before: StatusBefore) =>
+  invoke<void>("restore_item_status", { before });
+/** Opens a GitHub or ClickUp item that is closed only in AIfred again: your pick goes away, and the item gets To do only when a rule still closes it. */
+export const openItemAgain = (key: string) =>
+  invoke<StatusBefore>("open_item_again", { key });
+export const statusRules = () => invoke<StatusRule[]>("status_rules");
+/** Returns all rules and the rule from before (null: there was none), for the undo. */
+export const setStatusRule = (rule: StatusRule) =>
+  invoke<[StatusRule[], StatusRule | null]>("set_status_rule", { rule });
+export const deleteStatusRule = (rule: StatusRule) =>
+  invoke<StatusRule[]>("delete_status_rule", { rule });
+/** How many of your ClickUp tasks each rule changes now, by rule id. */
+export const statusRuleUse = () =>
+  invoke<Record<string, number>>("status_rule_use");
+/** Links an Unfinished item to the item that continues it. null removes the link. Returns the link from before. */
+export const setStatusNext = (key: string, next: string | null) =>
+  invoke<string | null>("set_status_next", { key, next });
+export const clickupSpaces = () => invoke<CuSpace[]>("clickup_spaces");
+/** One ClickUp call for the space, and one for each list in it. */
+export const clickupSpaceStatuses = (spaceId: string) =>
+  invoke<SpaceStatuses>("clickup_space_statuses", { spaceId });
 
 /** "not_today": the item does not need you today. "wrong_priority": the brief ranked it too high. */
 export type CorrectionKind = "not_today" | "wrong_priority";
-export type Correction = { id: number; key: string; kind: CorrectionKind; day: string; title: string; place: string; ts: number };
+export type Correction = {
+  id: number;
+  key: string;
+  kind: CorrectionKind;
+  day: string;
+  title: string;
+  place: string;
+  ts: number;
+};
 /** `learned`: the memory fact that AIfred saved from this and earlier corrections. */
 export type Corrected = { correction: Correction; learned?: Fact };
 /** Ticks step `index` of a mission, or takes the tick away. The items do not change. */
-export const setMissionStep = (id: number, index: number, done: boolean) => invoke<Mission>("set_mission_step", { id, index, done });
+export const setMissionStep = (id: number, index: number, done: boolean) =>
+  invoke<Mission>("set_mission_step", { id, index, done });
 /** The mission is done. Close the items that you picked with their own commands. */
-export const finishMission = (id: number) => invoke<null>("finish_mission", { id });
+export const finishMission = (id: number) =>
+  invoke<null>("finish_mission", { id });
 /** The undo of finishMission: the mission is open again, with its checklist. */
-export const reopenMission = (id: number) => invoke<null>("reopen_mission", { id });
+export const reopenMission = (id: number) =>
+  invoke<null>("reopen_mission", { id });
 /** Where an item was before you added it to a mission or took it out (missions.rs). */
 export type MissionBefore = {
   key: string;
@@ -345,53 +597,114 @@ export type MissionBefore = {
 };
 export type MissionChanged = { mission: Mission; before: MissionBefore };
 /** Adds an open item to a mission. It leaves its other mission. The brief does not take it away. */
-export const addMissionItem = (id: number, key: string) => invoke<MissionChanged>("add_mission_item", { id, key });
+export const addMissionItem = (id: number, key: string) =>
+  invoke<MissionChanged>("add_mission_item", { id, key });
 /** Takes an item out of a mission. The brief does not put it back. The last open item cannot go out. */
-export const removeMissionItem = (id: number, key: string) => invoke<MissionChanged>("remove_mission_item", { id, key });
+export const removeMissionItem = (id: number, key: string) =>
+  invoke<MissionChanged>("remove_mission_item", { id, key });
 /** The undo of addMissionItem and removeMissionItem. */
-export const restoreMissionItem = (before: MissionBefore) => invoke<null>("restore_mission_item", { before });
+export const restoreMissionItem = (before: MissionBefore) =>
+  invoke<null>("restore_mission_item", { before });
 /** A correction of each open item of the mission, all saved or none. A mission with no open item is an error. */
-export const correctMission = (id: number, kind: CorrectionKind, day: string) => invoke<Corrected[]>("correct_mission", { id, kind, day });
+export const correctMission = (id: number, kind: CorrectionKind, day: string) =>
+  invoke<Corrected[]>("correct_mission", { id, kind, day });
 /** Your correction of the brief of `day` (learn.rs). The brief stops showing a reason for the item that day. */
-export const correctBrief = (key: string, kind: CorrectionKind, day: string) => invoke<Corrected>("correct_brief", { key, kind, day });
+export const correctBrief = (key: string, kind: CorrectionKind, day: string) =>
+  invoke<Corrected>("correct_brief", { key, kind, day });
 /** Removes a correction. A fact that it made is forgotten. */
-export const undoCorrection = (id: number) => invoke<void>("undo_correction", { id });
+export const undoCorrection = (id: number) =>
+  invoke<void>("undo_correction", { id });
 
 /** The item that you work on now (worktime.rs). `before`: seconds from earlier sessions of the item. */
-export type Running = { key: string; title: string; started: number; before: number };
+export type Running = {
+  key: string;
+  title: string;
+  started: number;
+  before: number;
+};
 /** An item in the end-of-day check (review.rs). `minutes`: the real time of a finished item. */
-export type DayItem = { key: string; title: string; place: string; minutes?: number };
+export type DayItem = {
+  key: string;
+  title: string;
+  place: string;
+  minutes?: number;
+};
 /** The end-of-day check of one day. `left`: still open, from the plan and the tasks due that day. */
-export type DayCheck = { day: string; done: DayItem[]; left: DayItem[]; finished: boolean; moved: string[] };
+export type DayCheck = {
+  day: string;
+  done: DayItem[];
+  left: DayItem[];
+  finished: boolean;
+  moved: string[];
+};
 /** An open item with no change for 3 weeks. `last`: Unix seconds. */
-export type StaleItem = { key: string; title: string; place: string; last: number; days: number };
+export type StaleItem = {
+  key: string;
+  title: string;
+  place: string;
+  last: number;
+  days: number;
+};
 /** A goal and the finished items that served it in the last 7 days. */
 export type GoalWeek = { id: number; text: string; done: number };
-export type WeekReview = { due: boolean; last: string | null; items: StaleItem[]; more: number; goals: GoalWeek[]; goals_stale: boolean };
+export type WeekReview = {
+  due: boolean;
+  last: string | null;
+  items: StaleItem[];
+  more: number;
+  goals: GoalWeek[];
+  goals_stale: boolean;
+};
 export type PickKind = "do" | "plan" | "delegate" | "drop";
 /** A pick in the weekly review. `note`: the day for "plan", the person for "delegate". */
-export type ReviewPick = { id: number; key: string; pick: PickKind; title: string; place: string; note: string; ts: number };
+export type ReviewPick = {
+  id: number;
+  key: string;
+  pick: PickKind;
+  title: string;
+  place: string;
+  note: string;
+  ts: number;
+};
 /** The weekly review comes this many days after the last one (review.rs). */
 export const WEEK_DAYS = 7;
 export const dayCheck = (day: string) => invoke<DayCheck>("day_check", { day });
 /** The items in `moved` go into the plan of the next day. */
-export const finishDay = (day: string, moved: string[]) => invoke<DayCheck>("finish_day", { day, moved });
-export const weekReview = (today: string) => invoke<WeekReview>("week_review", { today });
-export const finishWeekReview = (today: string) => invoke<WeekReview>("finish_week_review", { today });
-export const reviewPick = (key: string, pick: PickKind, note: string, today: string) => invoke<ReviewPick>("review_pick", { key, pick, note, today });
-export const undoReviewPick = (id: number) => invoke<void>("undo_review_pick", { id });
+export const finishDay = (day: string, moved: string[]) =>
+  invoke<DayCheck>("finish_day", { day, moved });
+export const weekReview = (today: string) =>
+  invoke<WeekReview>("week_review", { today });
+export const finishWeekReview = (today: string) =>
+  invoke<WeekReview>("finish_week_review", { today });
+export const reviewPick = (
+  key: string,
+  pick: PickKind,
+  note: string,
+  today: string,
+) => invoke<ReviewPick>("review_pick", { key, pick, note, today });
+export const undoReviewPick = (id: number) =>
+  invoke<void>("undo_review_pick", { id });
 
 /** A finished item: the real time next to the time guess, in minutes.
  * `minutes` 0: only forgotten timers. `skipped`: the timers of more than 10 hours, which do not count. */
-export type WorkDone = { key: string; title: string; minutes: number; guess: number | null; skipped: number };
+export type WorkDone = {
+  key: string;
+  title: string;
+  minutes: number;
+  guess: number | null;
+  skipped: number;
+};
 export const workRunning = () => invoke<Running | null>("work_running");
 /** Starts work on an item. The work on another item stops. */
-export const startWork = (key: string) => invoke<Running>("start_work", { key });
+export const startWork = (key: string) =>
+  invoke<Running>("start_work", { key });
 export const stopWork = () => invoke<void>("stop_work");
 /** The item is finished. null: it has no work time. */
-export const finishWork = (key: string) => invoke<WorkDone | null>("finish_work", { key });
+export const finishWork = (key: string) =>
+  invoke<WorkDone | null>("finish_work", { key });
 /** The item is open again: its real time does not count. */
-export const unfinishWork = (key: string) => invoke<void>("unfinish_work", { key });
+export const unfinishWork = (key: string) =>
+  invoke<void>("unfinish_work", { key });
 
 /** When a job runs. Times are local, "YYYY-MM-DDTHH:MM". */
 export type Trigger =
@@ -441,44 +754,97 @@ export const jobs = (all: boolean) => invoke<Job[]>("jobs", { all });
 export const briefJob = () => invoke<Job>("brief_job");
 /** Newest first. id null: the runs of all jobs. */
 /** `brief` false: the runs of the brief job (action "brief") are left out. */
-export const jobRuns = (id: string | null, limit: number, skipped: boolean, brief: boolean) =>
-  invoke<JobRun[]>("job_runs", { id, limit, skipped, brief });
-export const setJobStatus = (id: string, status: "active" | "paused") => invoke<Job>("set_job_status", { id, status });
+export const jobRuns = (
+  id: string | null,
+  limit: number,
+  skipped: boolean,
+  brief: boolean,
+) => invoke<JobRun[]>("job_runs", { id, limit, skipped, brief });
+export const setJobStatus = (id: string, status: "active" | "paused") =>
+  invoke<Job>("set_job_status", { id, status });
 export const deleteJob = (id: string) => invoke<void>("delete_job", { id });
-export const itemDetails = (key: string) => invoke<ItemDetails>("item_details", { key });
+export const itemDetails = (key: string) =>
+  invoke<ItemDetails>("item_details", { key });
 
 /** AIfred's short notes about one item, from your answers or from AIfred's own look-up (context.rs). */
 /** `by`: "lookup" when AIfred wrote the notes from the item text before the brief. */
-export type ItemContext = { key: string; text: string; by: "you" | "aifred" | "lookup"; updated: number };
+export type ItemContext = {
+  key: string;
+  text: string;
+  by: "you" | "aifred" | "lookup";
+  updated: number;
+};
 /** Loads AIfred's notes about one item. null: the item has no notes. */
-export const itemContext = (key: string) => invoke<ItemContext | null>("item_context", { key });
+export const itemContext = (key: string) =>
+  invoke<ItemContext | null>("item_context", { key });
 /** Saves your notes. "" clears them. It gives the notes from before, for the Undo. */
-export const setItemContext = (key: string, text: string) => invoke<ItemContext | null>("set_item_context", { key, text });
-export const restoreItemContext = (key: string, before: ItemContext | null) => invoke<null>("restore_item_context", { key, before });
+export const setItemContext = (key: string, text: string) =>
+  invoke<ItemContext | null>("set_item_context", { key, text });
+export const restoreItemContext = (key: string, before: ItemContext | null) =>
+  invoke<null>("restore_item_context", { key, before });
 /** AIfred does not ask about the item again. `undo` true asks again. */
-export const skipContextQuestion = (key: string, undo = false) => invoke<null>("skip_context_question", { key, undo });
+export const skipContextQuestion = (key: string, undo = false) =>
+  invoke<null>("skip_context_question", { key, undo });
 /** One step that AIfred suggests for an item. `draft`: AIfred can draft its text later. */
 export type Step = { text: string; draft?: DraftKind };
 /** AIfred splits an item into steps (steps.rs). One AI call. It saves nothing. */
-export const suggestSteps = (key: string) => invoke<Step[]>("suggest_steps", { key });
+export const suggestSteps = (key: string) =>
+  invoke<Step[]>("suggest_steps", { key });
 /** What addSteps did. `created`: AIfred made a new task under the item. */
 export type AddedSteps = { task: Task; added: number; created: boolean };
 /** Puts the steps on the open task of the item's group, or on a new task under the item. */
-export const addSteps = (key: string, steps: string[]) => invoke<AddedSteps>("add_steps", { key, steps });
+export const addSteps = (key: string, steps: string[]) =>
+  invoke<AddedSteps>("add_steps", { key, steps });
 /** A reply to an email that AIfred wrote (drafts.rs), for you to check. `to` comes from the email, not from the AI.
  * `can_save`: false until you turn on Gmail drafts in Settings and connect Google again. */
-export type ReplyDraft = { key: string; to: string; to_name: string; subject: string; body: string; last_message: string; can_save: boolean };
+export type ReplyDraft = {
+  key: string;
+  to: string;
+  to_name: string;
+  subject: string;
+  body: string;
+  last_message: string;
+  can_save: boolean;
+};
 /** AIfred writes a reply to an email item. One AI call with no tools. It saves nothing. */
-export const writeReply = (key: string, note: string) => invoke<ReplyDraft>("write_reply", { key, note });
+export const writeReply = (key: string, note: string) =>
+  invoke<ReplyDraft>("write_reply", { key, note });
 /** One action of AIfred in another app (actions.rs). `undone_at`: Undo ran. `note`: why Undo did not remove the change. */
-export type Action = { id: number; at: number; app: "gmail" | "docs" | "sheets"; kind: "draft" | "suggestion" | "comment"; item: string; title: string; after: string; url: string; undone_at: number | null; note: string };
+export type Action = {
+  id: number;
+  at: number;
+  app: "gmail" | "docs" | "sheets";
+  kind: "draft" | "suggestion" | "comment";
+  item: string;
+  title: string;
+  after: string;
+  url: string;
+  undone_at: number | null;
+  note: string;
+};
 /** Saves the reply that you checked as a draft in its Gmail thread. It never sends. */
-export const saveReplyDraft = (d: ReplyDraft) => invoke<Action>("save_reply_draft", { key: d.key, to: d.to, lastMessage: d.last_message, body: d.body });
+export const saveReplyDraft = (d: ReplyDraft) =>
+  invoke<Action>("save_reply_draft", {
+    key: d.key,
+    to: d.to,
+    lastMessage: d.last_message,
+    body: d.body,
+  });
 /** One change in a Google Doc: `find` is text in the Doc, `replace` its new text. */
 export type DocEdit = { find: string; replace: string; why: string };
 /** Changes to a Google Doc that AIfred wrote (docs.rs), for you to check. `revision`: the save fails when the Doc changed.
  * `tab`: the tab of the Doc with the changes (empty: a Doc with no tabs). */
-export type DocProposal = { key: string; doc: string; tab: string; title: string; url: string; revision: string; can_edit: boolean; edits: DocEdit[]; message: string };
+export type DocProposal = {
+  key: string;
+  doc: string;
+  tab: string;
+  title: string;
+  url: string;
+  revision: string;
+  can_edit: boolean;
+  edits: DocEdit[];
+  message: string;
+};
 /** The first Google Doc link and the first Google Sheet link of an item: in its description, or in another item of the same work. */
 export type WorkLinks = { doc: string | null; sheet: string | null };
 // The Doc part and the Sheet part ask at the same time: they share one call.
@@ -487,7 +853,9 @@ const asking = new Map<string, Promise<WorkLinks>>();
 const workLinks = (key: string) => {
   let p = asking.get(key);
   if (!p) {
-    p = invoke<WorkLinks>("work_links", { key }).finally(() => asking.delete(key));
+    p = invoke<WorkLinks>("work_links", { key }).finally(() =>
+      asking.delete(key),
+    );
     asking.set(key, p);
   }
   return p;
@@ -495,21 +863,48 @@ const workLinks = (key: string) => {
 /** The first Google Doc link in the item's description, or in another item of the same work. */
 export const docLink = (key: string) => workLinks(key).then((l) => l.doc);
 /** Reads the Doc and suggests changes in one AI call. It saves nothing. */
-export const suggestDocChanges = (key: string, link: string, note: string) => invoke<DocProposal>("suggest_doc_changes", { key, link, note });
+export const suggestDocChanges = (key: string, link: string, note: string) =>
+  invoke<DocProposal>("suggest_doc_changes", { key, link, note });
 /** Saves the changes that you checked as suggestions in the Doc. It never edits the Doc directly. */
-export const saveDocSuggestions = (p: DocProposal, edits: DocEdit[]) => invoke<Action>("save_doc_suggestions", { key: p.key, doc: p.doc, tab: p.tab, revision: p.revision, edits });
+export const saveDocSuggestions = (p: DocProposal, edits: DocEdit[]) =>
+  invoke<Action>("save_doc_suggestions", {
+    key: p.key,
+    doc: p.doc,
+    tab: p.tab,
+    revision: p.revision,
+    edits,
+  });
 /** One comment on a cell of a Google Sheet. `value`: the value of the cell when AIfred read it. */
 export type SheetComment = { cell: string; text: string; value: string };
 /** Comments on a Google Sheet that AIfred wrote (sheets.rs), for you to check. `gid`: the tab. `check`: a hash of the tab as AIfred read it; the save fails when the tab changed. */
-export type SheetProposal = { key: string; sheet: string; gid: number; tab: string; title: string; url: string; comments: SheetComment[]; message: string; check: string };
+export type SheetProposal = {
+  key: string;
+  sheet: string;
+  gid: number;
+  tab: string;
+  title: string;
+  url: string;
+  comments: SheetComment[];
+  message: string;
+  check: string;
+};
 /** The first Google Sheet link in the item's description, or in another item of the same work. */
 export const sheetLink = (key: string) => workLinks(key).then((l) => l.sheet);
 /** Reads the Sheet and suggests comments in one AI call. It saves nothing. */
-export const suggestSheetComments = (key: string, link: string, note: string) => invoke<SheetProposal>("suggest_sheet_comments", { key, link, note });
+export const suggestSheetComments = (key: string, link: string, note: string) =>
+  invoke<SheetProposal>("suggest_sheet_comments", { key, link, note });
 /** Saves the comments that you checked on the cells of the Sheet. It never changes a cell. */
-export const saveSheetComments = (p: SheetProposal, comments: SheetComment[]) => invoke<Action>("save_sheet_comments", { key: p.key, sheet: p.sheet, gid: p.gid, check: p.check, comments });
+export const saveSheetComments = (p: SheetProposal, comments: SheetComment[]) =>
+  invoke<Action>("save_sheet_comments", {
+    key: p.key,
+    sheet: p.sheet,
+    gid: p.gid,
+    check: p.check,
+    comments,
+  });
 /** AIfred's actions, newest first. With `item`: only the actions of that item. */
-export const actions = (item?: string) => invoke<Action[]>("actions", { item: item ?? null });
+export const actions = (item?: string) =>
+  invoke<Action[]>("actions", { item: item ?? null });
 /** Undoes an action: deletes its Gmail draft, when nobody changed it in Gmail, its Doc suggestions that are still open, or its Sheet comments that nobody resolved or answered. */
 export const undoAction = (id: number) => invoke<Action>("undo_action", { id });
 
@@ -517,23 +912,30 @@ export const history = () => invoke<Turn[]>("history");
 /** All facts: the ones in use, then the forgotten ones. */
 export const memoryFacts = () => invoke<Fact[]>("memory_facts");
 export const addFact = (text: string) => invoke<Fact>("add_fact", { text });
-export const editFact = (id: number, text: string) => invoke<Fact>("edit_fact", { id, text });
-export const setFactCore = (id: number, core: boolean) => invoke<Fact>("set_fact_core", { id, core });
-export const setFactTags = (id: number, tags: string[]) => invoke<Fact>("set_fact_tags", { id, tags });
+export const editFact = (id: number, text: string) =>
+  invoke<Fact>("edit_fact", { id, text });
+export const setFactCore = (id: number, core: boolean) =>
+  invoke<Fact>("set_fact_core", { id, core });
+export const setFactTags = (id: number, tags: string[]) =>
+  invoke<Fact>("set_fact_tags", { id, tags });
 export const forgetFact = (id: number) => invoke<Fact>("forget_fact", { id });
 export const restoreFact = (id: number) => invoke<Fact>("restore_fact", { id });
 /** Deletes a forgotten fact for good. false: deleted, but the database file is not cleaned yet. */
-export const deleteFact = (id: number) => invoke<boolean>("delete_fact", { id });
+export const deleteFact = (id: number) =>
+  invoke<boolean>("delete_fact", { id });
 export const newConversation = () => invoke<void>("new_conversation");
 export const tasks = () => invoke<Task[]>("tasks");
 /** notes: the optional description. */
-export const addTask = (title: string, notes = "") => invoke<Task>("add_task", { task: { title, notes } });
+export const addTask = (title: string, notes = "") =>
+  invoke<Task>("add_task", { task: { title, notes } });
 /** Adds a task with all the fields in `fields`. The title is necessary. */
-export const createTask = (fields: TaskChanges & { title: string }) => invoke<Task>("add_task", { task: fields });
+export const createTask = (fields: TaskChanges & { title: string }) =>
+  invoke<Task>("add_task", { task: fields });
 /** `work`: the real time that AIfred kept when the task is done now. null: no work time, or the task is open again. */
 export type TaskDone = { task: Task; work: WorkDone | null };
 /** The backend ends the work of a task that is done, and keeps its real time (tasks.rs). */
-export const setTaskDone = (id: string, done: boolean) => invoke<TaskDone>("set_task_done", { id, done });
+export const setTaskDone = (id: string, done: boolean) =>
+  invoke<TaskDone>("set_task_done", { id, done });
 export const deleteTask = (id: string) => invoke<void>("delete_task", { id });
 /** One event of the user's Google Calendar (calendar.rs). Times in Unix seconds. */
 export type CalEvent = {
@@ -550,9 +952,14 @@ export type CalEvent = {
   url: string;
   description: string;
 };
-export type CalendarList = { fetched_at: number; events: CalEvent[]; warning?: string };
+export type CalendarList = {
+  fetched_at: number;
+  events: CalEvent[];
+  warning?: string;
+};
 /** null: Google is not connected, so there is no calendar. */
-export const calendarEvents = (force: boolean) => invoke<CalendarList | null>("calendar_events", { force });
+export const calendarEvents = (force: boolean) =>
+  invoke<CalendarList | null>("calendar_events", { force });
 /** One email thread (gmail.rs). Times in Unix seconds. */
 export type Mail = {
   id: string;
@@ -578,13 +985,20 @@ export type Mail = {
   messages: number;
   url: string;
 };
-export type MailList = { fetched_at: number; reply: Mail[]; sent: Mail[]; warning?: string };
+export type MailList = {
+  fetched_at: number;
+  reply: Mail[];
+  sent: Mail[];
+  warning?: string;
+};
 /** null: Gmail is not connected, or the Google login does not allow it. */
-export const gmailThreads = (force: boolean) => invoke<MailList | null>("gmail_threads", { force });
+export const gmailThreads = (force: boolean) =>
+  invoke<MailList | null>("gmail_threads", { force });
 /** The saved emails at any age. It never downloads. */
 export const gmailSaved = () => invoke<MailList | null>("gmail_saved");
 /** Hides an email until a new message comes in it. hide false: show it again (Undo). */
-export const hideEmail = (id: string, hide: boolean) => invoke<void>("hide_email", { id, hide });
+export const hideEmail = (id: string, hide: boolean) =>
+  invoke<void>("hide_email", { id, hide });
 /** One item of the "waiting for" list (waiting.rs). Days are "YYYY-MM-DD". */
 export type Waiting = {
   id: number;
@@ -602,49 +1016,90 @@ export type Waiting = {
   created: number;
   updated: number;
 };
-export type NewWaiting = { what?: string; who?: string; since?: string; follow_up?: string; thread?: string };
+export type NewWaiting = {
+  what?: string;
+  who?: string;
+  since?: string;
+  follow_up?: string;
+  thread?: string;
+};
 /** Only the fields that are set change. follow_up "": no follow-up day. */
-export type WaitingChanges = { what?: string; who?: string; follow_up?: string; done?: boolean };
+export type WaitingChanges = {
+  what?: string;
+  who?: string;
+  follow_up?: string;
+  done?: boolean;
+};
 /** One item under its parent item, in AIfred only (links.rs). `by`: who placed
  * it, "you" or "aifred". `why`: AIfred's reason, empty when you placed it. */
-export type ItemLink = { key: string; main: string; by?: "you" | "aifred"; why?: string };
+export type ItemLink = {
+  key: string;
+  main: string;
+  by?: "you" | "aifred";
+  why?: string;
+};
 export type Links = { links: ItemLink[] };
 export const itemLinks = () => invoke<Links>("item_links");
 /** How things were before a move by the user (links.rs Before): the old
  * link of the item, and the sort marks of the item and its parents. The
  * Undo sends it back. */
-export type LinkBefore = { key: string; link: ItemLink | null; marks: { key: string; fixed: boolean | null }[] };
+export type LinkBefore = {
+  key: string;
+  link: ItemLink | null;
+  marks: { key: string; fixed: boolean | null }[];
+};
 /** The links after a move by the user, and how things were before it. */
 export type LinkChanged = Links & { before: LinkBefore };
 /** Puts `key` under `main` as a subtask, with its own subtasks. */
-export const linkItems = (main: string, key: string) => invoke<LinkChanged>("link_items", { main, key });
+export const linkItems = (main: string, key: string) =>
+  invoke<LinkChanged>("link_items", { main, key });
 /** The Undo of a move by the user: the item and the sort marks go back to how they were. */
-export const restoreLink = (before: LinkBefore) => invoke<Links>("restore_link", { before });
+export const restoreLink = (before: LinkBefore) =>
+  invoke<Links>("restore_link", { before });
 /** Moves `key` out from under its parent, with its own subtasks. */
-export const unlinkItem = (key: string) => invoke<LinkChanged>("unlink_item", { key });
+export const unlinkItem = (key: string) =>
+  invoke<LinkChanged>("unlink_item", { key });
 /** Undoes AIfred's moves (sort.rs): each item goes back to where it was. AIfred does not move these items again. */
-export const undoMoves = (ids: number[]) => invoke<Links>("undo_moves", { ids });
+export const undoMoves = (ids: number[]) =>
+  invoke<Links>("undo_moves", { ids });
 
 /** One item that waits until another item is finished, in AIfred only
  * (blockers.rs). `by`: who set it ("chat": the AI, because you asked in a chat). `why`: AIfred's reason. */
-export type ItemBlocker = { key: string; blocker: string; by: "you" | "chat" | "aifred"; why: string };
+export type ItemBlocker = {
+  key: string;
+  blocker: string;
+  by: "you" | "chat" | "aifred";
+  why: string;
+};
 export type Blockers = { blockers: ItemBlocker[] };
 export const itemBlockers = () => invoke<Blockers>("item_blockers");
 /** How the link was before a change, for its Undo (blockers.rs Before). `at` and `gone`: how the change left the link. */
-export type BlockerBefore = { key: string; blocker: string; row: { by: string; why: string; removed: boolean } | null; at: number; gone: boolean };
+export type BlockerBefore = {
+  key: string;
+  blocker: string;
+  row: { by: string; why: string; removed: boolean } | null;
+  at: number;
+  gone: boolean;
+};
 export type BlockerChanged = Blockers & { before: BlockerBefore };
 /** Says that `key` waits for `blocker`. */
-export const addBlocker = (key: string, blocker: string) => invoke<BlockerChanged>("add_blocker", { key, blocker });
+export const addBlocker = (key: string, blocker: string) =>
+  invoke<BlockerChanged>("add_blocker", { key, blocker });
 /** Takes away the link. AIfred does not add it again by itself. */
-export const removeBlocker = (key: string, blocker: string) => invoke<BlockerChanged>("remove_blocker", { key, blocker });
+export const removeBlocker = (key: string, blocker: string) =>
+  invoke<BlockerChanged>("remove_blocker", { key, blocker });
 /** The Undo of addBlocker or removeBlocker. */
-export const restoreBlocker = (before: BlockerBefore) => invoke<Blockers>("restore_blocker", { before });
+export const restoreBlocker = (before: BlockerBefore) =>
+  invoke<Blockers>("restore_blocker", { before });
 
 /** The open items, then the items that closed in the last 3 days. */
 export const waitingItems = () => invoke<Waiting[]>("waiting_items");
-export const addWaiting = (item: NewWaiting) => invoke<Waiting>("add_waiting", { item });
-export const updateWaiting = (id: number, changes: WaitingChanges) => invoke<Waiting>("update_waiting", { id, changes });
-export const deleteWaiting = (id: number) => invoke<void>("delete_waiting", { id });
+export const addWaiting = (item: NewWaiting) =>
+  invoke<Waiting>("add_waiting", { item });
+export const updateWaiting = (id: number, changes: WaitingChanges) =>
+  invoke<Waiting>("update_waiting", { id, changes });
+export const deleteWaiting = (id: number) =>
+  invoke<void>("delete_waiting", { id });
 /** The Google connection (google.rs). `features`: each feature, and true when the login allows it. */
 export type GoogleStatus = {
   client_id: string;
@@ -658,43 +1113,60 @@ export type GoogleStatus = {
   off: string[];
 };
 /** Turns an optional Google feature (Gmail, Gmail drafts) on or off. */
-export const setGoogleFeature = (name: string, on: boolean) => invoke<GoogleStatus>("set_google_feature", { name, on });
+export const setGoogleFeature = (name: string, on: boolean) =>
+  invoke<GoogleStatus>("set_google_feature", { name, on });
 export const googleStatus = () => invoke<GoogleStatus>("google_status");
-export const setGoogleClient = (clientId: string, clientSecret: string) => invoke<GoogleStatus>("set_google_client", { clientId, clientSecret });
+export const setGoogleClient = (clientId: string, clientSecret: string) =>
+  invoke<GoogleStatus>("set_google_client", { clientId, clientSecret });
 /** Opens Google's login page and waits until the user is back. */
 export const connectGoogle = () => invoke<GoogleStatus>("connect_google");
 export const disconnectGoogle = () => invoke<GoogleStatus>("disconnect_google");
 /** force: ask GitHub now, and do not use the saved list. */
-export const githubItems = (force: boolean) => invoke<GithubList>("github_items", { force });
+export const githubItems = (force: boolean) =>
+  invoke<GithubList>("github_items", { force });
 /** force: ask ClickUp now, and do not use the saved list. */
-export const clickupItems = (force: boolean) => invoke<ClickupList>("clickup_items", { force });
+export const clickupItems = (force: boolean) =>
+  invoke<ClickupList>("clickup_items", { force });
 /** Closes the task in ClickUp. Returns the status it had before, for the undo. */
-export const clickupMarkDone = (id: string) => invoke<string>("clickup_mark_done", { id });
-export const clickupUndoDone = (id: string, status: string) => invoke<void>("clickup_undo_done", { id, status });
-export const clickupTokenStatus = () => invoke<ClickupTokenStatus>("clickup_token_status");
+export const clickupMarkDone = (id: string) =>
+  invoke<string>("clickup_mark_done", { id });
+export const clickupUndoDone = (id: string, status: string) =>
+  invoke<void>("clickup_undo_done", { id, status });
+export const clickupTokenStatus = () =>
+  invoke<ClickupTokenStatus>("clickup_token_status");
 /** Checks the token with ClickUp and saves it. Returns your ClickUp user name. */
-export const setClickupToken = (token: string) => invoke<string>("set_clickup_token", { token });
+export const setClickupToken = (token: string) =>
+  invoke<string>("set_clickup_token", { token });
 export const removeClickupToken = () => invoke<void>("remove_clickup_token");
 /** The model you picked last in the chat box. null: the default model. */
 export const chatModel = () => invoke<string | null>("chat_model");
-export const setChatModel = (model: string | null) => invoke<void>("set_chat_model", { model });
+export const setChatModel = (model: string | null) =>
+  invoke<void>("set_chat_model", { model });
 /** Changes the given fields of a local task. */
-export const editTask = (id: string, changes: TaskChanges) => invoke<Task>("edit_task", { id, changes });
+export const editTask = (id: string, changes: TaskChanges) =>
+  invoke<Task>("edit_task", { id, changes });
 /** Ticks or un-ticks one step. Only this step changes. `text` is the step's
  * text: the tick fails when the checklist changed after the list loaded. */
-export const setTaskStep = (id: string, index: number, text: string, done: boolean) =>
-  invoke<Task>("set_task_step", { id, index, text, done });
+export const setTaskStep = (
+  id: string,
+  index: number,
+  text: string,
+  done: boolean,
+) => invoke<Task>("set_task_step", { id, index, text, done });
 /** The Undo of addSteps: takes out the steps with these texts that are not done, in one save. */
-export const removeTaskSteps = (id: string, steps: string[]) => invoke<Task>("remove_task_steps", { id, steps });
+export const removeTaskSteps = (id: string, steps: string[]) =>
+  invoke<Task>("remove_task_steps", { id, steps });
 export const getSettings = () => invoke<Settings>("get_settings");
-export const setSettings = (settings: Settings) => invoke<void>("set_settings", { settings });
+export const setSettings = (settings: Settings) =>
+  invoke<void>("set_settings", { settings });
 export const info = () => invoke<Info>("info");
 
 /** What the app knows about updates (main.rs). */
 export type UpdateStatus = {
   /** The version of this program. */
   current: string;
-  state: "off" | "idle" | "checking" | "none" | "downloading" | "ready" | "error";
+  state:
+    "off" | "idle" | "checking" | "none" | "downloading" | "ready" | "error";
   /** The new version, when one is found. */
   latest: string | null;
   /** The release page of the new version. */
@@ -752,7 +1224,8 @@ export function describe(e: ProgressEvent): string {
 /** The event that AIfred sends when its scheduler adds a task (a repeating task). */
 export const TASKS_CHANGED = "tasks-changed";
 /** Calls `f` each time AIfred adds a task by itself. Returns the stop function. */
-export const onTasksChanged = (f: () => void) => listen(TASKS_CHANGED, () => f());
+export const onTasksChanged = (f: () => void) =>
+  listen(TASKS_CHANGED, () => f());
 /** The event that AIfred sends when its sort moved new items into subtasks (sort.rs). */
 export const ITEMS_SORTED = "items-sorted";
 /** Calls `f` each time AIfred's sort moved items. Returns the stop function. */

@@ -33,7 +33,8 @@ pub fn split(key: &str) -> anyhow::Result<(&str, &str)> {
 }
 
 /// True when the key names an open item: a local task that is not done, or
-/// a GitHub or ClickUp item in the last download.
+/// a GitHub or ClickUp item in the last download that is not closed in
+/// AIfred (status.rs: for example, a task with a rule for Unfinished).
 pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
     let (source, id) = split(key)?;
     let found = if source == "task" {
@@ -45,7 +46,11 @@ pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
         .optional()?
     } else {
         c.query_row(
-            "SELECT 1 FROM work_item WHERE source = ?1 AND item_id = ?2 AND in_list = 1",
+            &format!(
+                "SELECT 1 FROM work_item WHERE source = ?1 AND item_id = ?2 AND in_list = 1
+                 AND status NOT IN {}",
+                crate::status::CLOSED_SQL
+            ),
             [source, id],
             |_| Ok(()),
         )
@@ -60,9 +65,15 @@ pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
 /// Change it together with split(), is_open() and title_place().
 pub(crate) fn known_sql(col: &str, open: bool) -> String {
     let (done, in_list) = if open {
-        (" AND done = 0", " AND in_list = 1")
+        (
+            " AND done = 0".to_string(),
+            format!(
+                " AND in_list = 1 AND status NOT IN {}",
+                crate::status::CLOSED_SQL
+            ),
+        )
     } else {
-        ("", "")
+        (String::new(), String::new())
     };
     let others = SOURCES[1..]
         .iter()
@@ -147,6 +158,9 @@ pub struct ItemMeta {
     /// The short summary of the description, when there is one (summaries.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// AIfred's own status (status.rs). A GitHub or ClickUp item in the
+    /// last download can be closed in AIfred, for example Unfinished.
+    pub status: crate::status::ItemStatus,
 }
 
 /// An item is new for one day after AIfred first saw it.
@@ -155,9 +169,20 @@ const NEW_SECS: u64 = 24 * 3600;
 /// with the first download, and then all items are new.
 const FIRST_DOWNLOAD_SECS: u64 = 600;
 
-/// The meta of all open items.
+/// The meta of all open local tasks, the Unfinished local tasks, and all
+/// items of the last downloads.
 pub fn meta(dir: &Path, now: u64) -> anyhow::Result<Vec<ItemMeta>> {
     db::read(dir, |c| {
+        let mut statuses = crate::status::all_in(c)?;
+        let mut status = |key: &str| {
+            statuses.remove(key).unwrap_or_else(|| {
+                crate::status::ItemStatus::new(
+                    crate::status::TODO,
+                    crate::status::by::DEFAULT,
+                    None,
+                )
+            })
+        };
         let mut out = Vec::new();
         let mut q =
             c.prepare("SELECT id, created, summary, notes FROM user_task WHERE done = 0")?;
@@ -172,12 +197,33 @@ pub fn meta(dir: &Path, now: u64) -> anyhow::Result<Vec<ItemMeta>> {
             let (id, created, summary, notes) = r?;
             // A short description is its own summary. The panel shows it as the description.
             let summary = summary.filter(|_| notes.chars().count() > crate::summaries::SHORT_CHARS);
+            let key = format!("task:{id}");
             out.push(ItemMeta {
-                key: format!("task:{id}"),
+                status: status(&key),
+                key,
                 first_seen: created,
                 new: false,
                 summary,
             });
+        }
+        // A closed Unfinished task: only for its "continued in" link.
+        let mut q = c.prepare(
+            "SELECT id, created FROM user_task WHERE done = 1 AND closed_as = 'unfinished'",
+        )?;
+        let closed: Vec<(String, u64)> = q
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        for (id, created) in closed {
+            let key = format!("task:{id}");
+            if let Some(st) = crate::status::of_in(c, &key)? {
+                out.push(ItemMeta {
+                    status: st,
+                    key,
+                    first_seen: created,
+                    new: false,
+                    summary: None,
+                });
+            }
         }
         let mut q = c.prepare(
             "SELECT w.source, w.item_id, w.first_seen, w.summary, w.details, o.oldest
@@ -202,8 +248,10 @@ pub fn meta(dir: &Path, now: u64) -> anyhow::Result<Vec<ItemMeta>> {
                 && first_seen > oldest + FIRST_DOWNLOAD_SECS;
             let summary =
                 summary.filter(|_| details.chars().count() > crate::summaries::SHORT_CHARS);
+            let key = format!("{source}:{id}");
             out.push(ItemMeta {
-                key: format!("{source}:{id}"),
+                status: status(&key),
+                key,
                 first_seen,
                 new,
                 summary,
