@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 33;
+const VERSION: i64 = 34;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -928,6 +928,23 @@ CREATE TRIGGER memory_vec_update AFTER UPDATE OF text ON memory WHEN old.text IS
 END;
 ";
 
+/// Blockers (blockers.rs): a row says that `key` waits for `blocker`. An
+/// item can wait for many items. `removed` 1: the link was taken away, and
+/// `placed_by` says who took it away. When it was the user, the AI does
+/// not add it again. The row stays as that mark.
+const SCHEMA_34: &str = "
+CREATE TABLE item_blocker (
+  key       TEXT NOT NULL,              -- the item that waits
+  blocker   TEXT NOT NULL,              -- the item that must finish first
+  ts        INTEGER NOT NULL,
+  placed_by TEXT NOT NULL,              -- 'you', 'chat' or 'aifred'
+  why       TEXT NOT NULL DEFAULT '',   -- AIfred's reason
+  removed   INTEGER NOT NULL DEFAULT 0, -- 1: taken away, by placed_by
+  PRIMARY KEY (key, blocker)
+);
+CREATE INDEX item_blocker_by_blocker ON item_blocker(blocker);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -1097,6 +1114,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 33 {
         tx.execute_batch(SCHEMA_33)?;
+    }
+    if version < 34 {
+        tx.execute_batch(SCHEMA_34)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

@@ -66,6 +66,12 @@ export type AppCtx = {
   linkItems: (main: string, key: string) => Promise<boolean>;
   /** Moves an item out from under its parent, with an undo. */
   unlinkItem: (key: string) => Promise<boolean>;
+  /** The items that wait for other items (blockers.rs). */
+  blockers: api.Blockers;
+  /** Says that `key` waits for `blocker`, with an undo. */
+  addBlocker: (key: string, blocker: string) => Promise<boolean>;
+  /** Takes away the link "`key` waits for `blocker`", with an undo. */
+  removeBlocker: (key: string, blocker: string) => Promise<boolean>;
   /** Undoes AIfred's moves from the brief: the items go back to where they were. */
   undoMoves: (moves: api.Moved[]) => Promise<boolean>;
   trackEmail: (m: api.Mail, followUp?: string) => Promise<boolean>;

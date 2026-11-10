@@ -445,6 +445,7 @@ impl TaskStore {
             }
             crate::worktime::forget_in(tx, &format!("task:{id}"))?;
             crate::links::remove_in(tx, &format!("task:{id}"), now())?;
+            crate::blockers::remove_item_in(tx, &format!("task:{id}"))?;
             crate::missions::forget_in(tx, &format!("task:{id}"))?;
             Ok(())
         })

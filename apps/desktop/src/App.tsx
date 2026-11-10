@@ -125,6 +125,7 @@ export default function App() {
   const [meta, setMeta] = useState<api.ItemMeta[]>([]);
   const [est, setEst] = useState<Record<string, api.Estimate>>({});
   const [links, setLinks] = useState<api.Links>({ links: [] });
+  const [blockers, setBlockers] = useState<api.Blockers>({ blockers: [] });
   const [brief, setBrief] = useState<api.Brief | null>(null);
   const [talk, setTalk] = useState<Talk | null>(null);
   const [skipped, setSkipped] = useState<string[]>([]);
@@ -217,6 +218,8 @@ export default function App() {
   const appRef = useRef<HTMLDivElement>(null);
   const githubLoad = useRef(0);
   const clickupLoad = useRef(0);
+  /** True after a load while ClickUp was connected. A disconnect then reloads the links and blockers. */
+  const clickupWasOn = useRef(false);
   const briefTried = useRef(new Set<string>());
   const now = useRef({ sel, side, mission: selMission });
   now.current = { sel, side, mission: selMission };
@@ -237,6 +240,7 @@ export default function App() {
     api.itemMeta().then(setMeta).catch(() => {});
     api.estimates().then(setEst).catch(() => {});
     api.itemLinks().then(setLinks).catch(() => {});
+    api.itemBlockers().then(setBlockers).catch(() => {});
   }, []);
 
   /** Loads can overlap (reload, then a tick). Only the answer to the newest load may change the screen. */
@@ -331,8 +335,13 @@ export default function App() {
       if (!connected) {
         setClickup({ items: [], fetched_at: 0 });
         setClickupState("off");
+        // After a disconnect, the backend took away the links and blockers of
+        // the ClickUp items. When ClickUp was not connected, nothing changed.
+        if (clickupWasOn.current) loadMeta();
+        clickupWasOn.current = false;
         return;
       }
+      clickupWasOn.current = true;
       setClickupState("loading");
       api
         .clickupItems(force)
@@ -486,6 +495,8 @@ export default function App() {
   // new trees, and the brief with its note about the moves, at once.
   const afterSort = useCallback(() => {
     api.itemLinks().then(setLinks).catch(() => {});
+    // The sort also takes away the blockers of gone items (links.rs drop_gone_in).
+    api.itemBlockers().then(setBlockers).catch(() => {});
     loadTodayBrief();
   }, [loadTodayBrief]);
   useItemsSorted(afterSort);
@@ -948,7 +959,10 @@ export default function App() {
     (key: string, steps: string[]) =>
       run(api.addSteps(key, steps), (a) => {
         const t = a.task;
-        const loadLinks = () => api.itemLinks().then(setLinks).catch(() => {});
+        const loadLinks = () => {
+          api.itemLinks().then(setLinks).catch(() => {});
+          api.itemBlockers().then(setBlockers).catch(() => {});
+        };
         if (a.created) {
           setTasks((all) => [...all, t]);
           loadLinks();
@@ -990,8 +1004,9 @@ export default function App() {
         setWork((w) => (w?.key === i.key ? null : w));
         setTasks((all) => all.filter((x) => x.id !== t.id));
         if (now.current.sel === i.key) setSel(null);
-        // The backend takes the task out of its group too (tasks.rs).
+        // The backend takes the task out of its group and its blockers too (tasks.rs).
         api.itemLinks().then(setLinks).catch(() => {});
+        api.itemBlockers().then(setBlockers).catch(() => {});
         toast(`Deleted: ${t.title}`);
       });
     },
@@ -1248,8 +1263,10 @@ export default function App() {
     loadPlans();
     // AIfred can add items to a mission or take them out (missions.rs).
     loadTodayBrief();
-    // AIfred can put an item under another item (move_item).
+    // AIfred can put an item under another item (move_item), and say that
+    // an item waits for another item (set_blocker).
     api.itemLinks().then(setLinks).catch(() => {});
+    api.itemBlockers().then(setBlockers).catch(() => {});
   }, [loadTasks, loadMeta, loadPlans, loadTodayBrief]);
 
   /** Runs one question in a chat and puts the messages in `set`. */
@@ -1774,6 +1791,28 @@ export default function App() {
     [run, toast, titleOf],
   );
 
+  // ---------- Blockers (blockers.rs) ----------
+
+  /** Says that `key` waits for `blocker`, with an undo. */
+  const addBlocker = useCallback(
+    (key: string, blocker: string) =>
+      run(api.addBlocker(key, blocker), (c) => {
+        setBlockers({ blockers: c.blockers });
+        toast(`${titleOf(key)} now waits for ${titleOf(blocker)}`, () => run(api.restoreBlocker(c.before), setBlockers));
+      }),
+    [run, toast, titleOf],
+  );
+
+  /** Takes away the link, with an undo. AIfred does not add it again. */
+  const removeBlocker = useCallback(
+    (key: string, blocker: string) =>
+      run(api.removeBlocker(key, blocker), (c) => {
+        setBlockers({ blockers: c.blockers });
+        toast(`${titleOf(key)} does not wait for ${titleOf(blocker)} now`, () => run(api.restoreBlocker(c.before), setBlockers));
+      }),
+    [run, toast, titleOf],
+  );
+
   /** Undoes AIfred's moves from the brief. The lines go away from the brief. */
   const undoMoves = useCallback(
     (moves: api.Moved[]) => {
@@ -1847,6 +1886,9 @@ export default function App() {
     links,
     linkItems,
     unlinkItem,
+    blockers,
+    addBlocker,
+    removeBlocker,
     undoMoves,
     trackEmail,
     hideSent,

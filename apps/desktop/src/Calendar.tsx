@@ -17,6 +17,7 @@ import { GoalTag } from "./Goals";
 import { DEFAULT_MINUTES, WEEK, addDays, byPlan, dayName, dur, fmtTime, isItemBlock, shortDay, sideBySide, timeOf, workDay, type Item } from "./items";
 import type * as api from "./api";
 import { Check, DueChip, PriPill, SrcLine } from "./Home";
+import { BlockedMark, useOpenBlockers } from "./Links";
 
 /** Pixels for one minute of the calendar: the day view has room for the
  * time, the reason, and the buttons of a 30-minute block. */
@@ -348,6 +349,7 @@ function ItemBlock({ i, day, start, end, pinned, full }: { i: Item; day: string;
     }
   };
   const why = p?.why ?? (day === today ? i.why : undefined);
+  const blockedBy = useOpenBlockers(i.key);
   // The goal that AIfred gave in the plan, else the goal from the brief.
   const goal = goalText(p?.goal) ?? (p?.why ? undefined : i.goal);
   return (
@@ -362,6 +364,7 @@ function ItemBlock({ i, day, start, end, pinned, full }: { i: Item; day: string;
           {full && <span className={`src ${i.src}`}>{i.ref || "Mine"}</span>}
           {full && <PriPill p={i.priority} />}
           {full && mission && mission.title !== i.title && <span className="cb-mission">Mission: {mission.title}</span>}
+          {!i.done && blockedBy.length > 0 && <span className="cb-blocked">Blocked by {blockedBy.map((b) => b.title).join(", ")}</span>}
         </span>
         {full && why && !i.done && (
           <span className="why">
@@ -569,6 +572,7 @@ function Grid({ days }: { days: string[] }) {
                   <span className="t-title">{i.title}</span>
                   <SrcLine item={i} extra={<><DueChip day={i.due} /><PriPill p={i.priority} /></>} />
                 </div>
+                <BlockedMark item={i} />
                 <button className="btn" onClick={() => addToPlan(i.key, { day: addDay(i) })} title={`Add to ${dayName(addDay(i), today)}`}>
                   Add · {dur(i.minutes || DEFAULT_MINUTES)}
                 </button>

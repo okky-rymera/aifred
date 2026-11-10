@@ -276,8 +276,9 @@ pub(crate) fn link_in(
     why: &str,
     now: u64,
 ) -> anyhow::Result<()> {
-    // A link to an item that is gone must not count toward MAX_GROUP.
-    drop_gone_in(tx, now)?;
+    // A link to an item that is gone must not count toward MAX_GROUP. The
+    // blockers do not matter here (drop_gone_in does them too).
+    drop_gone_links_in(tx, now)?;
     place_in(tx, main, key, by, why, now)?;
     // The user built this part of the tree: the AI sort must move neither
     // the item nor its new parent.
@@ -366,7 +367,8 @@ pub fn unlink_in(tx: &Transaction, key: &str, now: u64) -> anyhow::Result<()> {
 
 /// Takes an item that is gone out of its tree. Its subtasks move up to its
 /// parent, or are top items when it had none. A deleted task uses it
-/// (tasks.rs), and so does drop_gone_in().
+/// (tasks.rs), and so does drop_gone_in(). Its blockers stay: the caller
+/// takes them away (blockers.rs).
 pub fn remove_in(tx: &Transaction, key: &str, now: u64) -> anyhow::Result<()> {
     match parent_in(tx, key)? {
         Some(p) => tx.execute(
@@ -379,10 +381,17 @@ pub fn remove_in(tx: &Transaction, key: &str, now: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Takes each item that AIfred does not know now out of its tree. Use it
+/// Takes each item that AIfred does not know now out of its tree, and
+/// takes away its blockers (blockers.rs). Use it
 /// after a delete of work items, for example when the user disconnects
 /// ClickUp or Gmail (clickup_list.rs, gmail.rs).
 pub fn drop_gone_in(tx: &Transaction, now: u64) -> anyhow::Result<()> {
+    drop_gone_links_in(tx, now)?;
+    crate::blockers::drop_gone_in(tx)
+}
+
+/// drop_gone_in() for the subtask links only.
+fn drop_gone_links_in(tx: &Transaction, now: u64) -> anyhow::Result<()> {
     let mut keys = BTreeSet::new();
     for l in all(tx)? {
         keys.insert(l.key);

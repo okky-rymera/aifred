@@ -27,6 +27,10 @@
 //! `missions` lists the open missions (missions.rs), so the brief can keep
 //! a mission when its work stays the same.
 //!
+//! Each open item that waits for open items (blockers.rs) has
+//! `blocked_by`: the keys of those items. The brief ranks it lower and
+//! names its blockers first.
+//!
 //! Each item with a task context (context.rs) has `context`: AIfred's short
 //! notes about it, from the user's answers or from AIfred's own look-up
 //! (then also `context_from: "lookup"`).
@@ -77,6 +81,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
     db::read(dir, |c| {
         let parents = crate::links::parents_for_ai(c)?;
         let notes = crate::context::map_in(c)?;
+        let blocked = crate::blockers::open_blockers_in(c)?;
         let mut q = c.prepare(
             "SELECT id, title, notes, summary, created, due, start, priority, tags, checklist FROM user_task WHERE done = 0 ORDER BY created DESC",
         )?;
@@ -107,7 +112,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             })?
             .collect::<Result<_, _>>()?;
         tasks.extend(aifred_tasks(c)?);
-        add_parent_and_notes(&mut tasks, &parents, &notes);
+        add_parent_and_notes(&mut tasks, &parents, &notes, &blocked);
 
         let mut github: Vec<Value> = rows(c, "github", None)?
             .into_iter()
@@ -125,7 +130,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 Ok(v)
             })
             .collect::<anyhow::Result<_>>()?;
-        add_parent_and_notes(&mut github, &parents, &notes);
+        add_parent_and_notes(&mut github, &parents, &notes, &blocked);
 
         let goals: Vec<Value> = crate::goals::list_in(c)?
             .into_iter()
@@ -160,7 +165,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                 .collect::<anyhow::Result<_>>()?,
             None => Vec::new(),
         };
-        add_parent_and_notes(&mut mail, &parents, &notes);
+        add_parent_and_notes(&mut mail, &parents, &notes, &blocked);
         if let Some(email) = crate::gmail::for_ai(c, gmail_account.as_deref(), mail)? {
             out["email"] = email;
         }
@@ -222,7 +227,7 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
                     v
                 })
                 .collect();
-            add_parent_and_notes(&mut tasks, &parents, &notes);
+            add_parent_and_notes(&mut tasks, &parents, &notes, &blocked);
             out["clickup"] =
                 json!({ "fetched_at": fetched_at(c, "clickup", Some(account))?, "tasks": tasks });
         }
@@ -239,14 +244,22 @@ fn add_parent_and_notes(
     items: &mut [Value],
     parents: &std::collections::HashMap<String, String>,
     notes: &std::collections::HashMap<String, (String, String)>,
+    blocked: &std::collections::BTreeMap<String, Vec<String>>,
 ) {
     for v in items {
         let Some(k) = v["key"].as_str() else {
             continue;
         };
-        let (p, n) = (parents.get(k).cloned(), notes.get(k).cloned());
+        let (p, n, b) = (
+            parents.get(k).cloned(),
+            notes.get(k).cloned(),
+            blocked.get(k).cloned(),
+        );
         if let Some(p) = p {
             v["parent"] = p.into();
+        }
+        if let Some(b) = b {
+            v["blocked_by"] = b.into();
         }
         if let Some((text, by)) = n {
             v["context"] = text.into();

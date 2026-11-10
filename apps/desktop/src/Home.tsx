@@ -8,7 +8,7 @@ import { Composer, ICON, Md } from "./Chat";
 import { useApp } from "./ctx";
 import { GoalTag, GoalsCard } from "./Goals";
 import { DayCheckCard, WeekReviewCard } from "./Review";
-import { srcText } from "./Links";
+import { BlockedMark, srcText } from "./Links";
 import { WaitingCard } from "./Waiting";
 import { HelpCard, useAsking, useHasQuestions } from "./Context";
 import { NextStep, stepTaskKey } from "./Steps";
@@ -206,6 +206,7 @@ function Row(props: { item: Item; why?: boolean; hideToday?: boolean; noActs?: b
           <span className="t-title">{i.title}</span>
           <SrcLine item={i} extra={sub && <span>{sub}</span>} />
         </div>
+        <BlockedMark item={i} />
         {i.linked?.length ? (
           tree ? (
             <SubTree item={i} />
@@ -731,6 +732,7 @@ function MissionCard({ m }: { m: api.Mission }) {
             </button>
           </div>
         )}
+        {lead && <BlockedMark item={lead} />}
         {lead?.why && (
           <div className="why-line">
             <span className="why">

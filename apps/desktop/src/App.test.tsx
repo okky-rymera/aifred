@@ -394,6 +394,117 @@ describe("subtasks", () => {
     await waitFor(() => expect(fake.links).toMatchObject([{ key: "github:acme/shop#12", main: "clickup:86a" }]));
   });
 
+  it("adds a blocker from the item panel, marks the row, and undoes a remove", async () => {
+    const fake = await startApp({ ...lists(), tasks: [task("Deploy the tax fix", { id: "t1" })] });
+    await openItem("Deploy the tax fix");
+    await userEvent.click(within(details()).getByRole("button", { name: "+ Add a blocker" }));
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Find an item that must finish first" }), "tax");
+    // The search does not show the item itself.
+    expect(within(details()).queryByRole("button", { name: "Blocked by: Deploy the tax fix" })).not.toBeInTheDocument();
+    await userEvent.click(within(details()).getByRole("button", { name: "Blocked by: DEV-42: round the tax" }));
+    expect(fake.blockers).toMatchObject([{ key: "task:t1", blocker: "github:acme/shop#12", by: "you" }]);
+    expect(await screen.findByText("Deploy the tax fix now waits for DEV-42: round the tax")).toBeInTheDocument();
+    // The row in the list shows the open blocker.
+    const row = document.getElementById("row-task:t1")!;
+    // The mark opens the blocker. Its panel shows what waits for it.
+    await userEvent.click(within(row).getByRole("button", { name: "Open blocker: DEV-42: round the tax" }));
+    const blocks = await within(details()).findByRole("list", { name: "Blocks" });
+    await userEvent.click(within(blocks).getByRole("button", { name: "Does not block: Deploy the tax fix" }));
+    await waitFor(() => expect(fake.blockers).toMatchObject([{ removed: true }]));
+    expect(within(row).queryByRole("button", { name: /Open blocker/ })).not.toBeInTheDocument();
+    // The undo puts the link back.
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(fake.blockers).toEqual([{ key: "task:t1", blocker: "github:acme/shop#12", by: "you", why: "", removed: false, at: expect.any(Number) }]));
+  });
+
+  it("the blocker search does not show items that wait for the item, also through other items", async () => {
+    await startApp({
+      ...lists(),
+      tasks: [task("Deploy the tax fix", { id: "t1" }), task("Write tax notes", { id: "t2" })],
+      // Deploy waits for DEV-42, and the notes wait for Deploy.
+      blockers: [
+        { key: "task:t1", blocker: "github:acme/shop#12", by: "you", why: "" },
+        { key: "task:t2", blocker: "task:t1", by: "you", why: "" },
+      ],
+    });
+    await openItem("DEV-42: round the tax");
+    await userEvent.click(within(details()).getByRole("button", { name: "+ Add a blocker" }));
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Find an item that must finish first" }), "tax");
+    expect(within(details()).getByText("No open item matches.")).toBeInTheDocument();
+  });
+
+  it("the blocker search shows an item whose old link goes through a finished item", async () => {
+    await startApp({
+      ...lists(),
+      tasks: [task("Deploy the tax fix", { id: "t1", done: true }), task("Write tax notes", { id: "t2" })],
+      // The finished Deploy waited for DEV-42, and the notes wait for Deploy. That old link is asleep.
+      blockers: [
+        { key: "task:t1", blocker: "github:acme/shop#12", by: "you", why: "" },
+        { key: "task:t2", blocker: "task:t1", by: "you", why: "" },
+      ],
+    });
+    await openItem("DEV-42: round the tax");
+    await userEvent.click(within(details()).getByRole("button", { name: "+ Add a blocker" }));
+    await userEvent.type(within(details()).getByRole("textbox", { name: "Find an item that must finish first" }), "notes");
+    expect(within(details()).getByText("Write tax notes")).toBeInTheDocument();
+  });
+
+  it("a link that AIfred set because you asked in a chat says so in the panel", async () => {
+    await startApp({ ...lists(), tasks: [task("Deploy the tax fix", { id: "t1" })], blockers: [{ key: "task:t1", blocker: "github:acme/shop#12", by: "chat", why: "" }] });
+    await openItem("Deploy the tax fix");
+    const list = await within(details()).findByRole("list", { name: "Blocked by" });
+    expect(list).toHaveTextContent("Set by AIfred in a chat");
+  });
+
+  it("a blocker that is not in the list shows in the panel, but not in the count", async () => {
+    await startApp({ ...lists(), tasks: [task("Deploy the tax fix", { id: "t1" })], blockers: [{ key: "task:t1", blocker: "github:acme/shop#99", by: "you", why: "" }] });
+    await openItem("Deploy the tax fix");
+    const list = await within(details()).findByRole("list", { name: "Blocked by" });
+    expect(within(list).getByText("Not in your list now")).toBeInTheDocument();
+    // The count is the same as the row mark: no open blocker.
+    expect(within(details()).getByText("Blocked by", { selector: ".d-sec" }).querySelector(".c")).toBeNull();
+    expect(within(document.getElementById("row-task:t1")!).queryByRole("button", { name: /Open blocker/ })).not.toBeInTheDocument();
+  });
+
+  it("a ClickUp disconnect loads the blockers again", async () => {
+    const fake = await startApp({
+      ...lists(),
+      clickupToken: "pk_test",
+      tasks: [task("Deploy the tax fix", { id: "t1" })],
+      blockers: [{ key: "task:t1", blocker: "clickup:86a", by: "you", why: "" }],
+    });
+    const loads = () => fake.calls.filter((c) => c.cmd === "item_blockers").length;
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const before = loads();
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(loads()).toBeGreaterThan(before));
+  });
+
+  it("a finished blocker does not mark the row, and AIfred's reason shows in the panel", async () => {
+    await startApp({
+      ...lists(),
+      tasks: [task("Deploy", { id: "t1" }), task("Write notes", { id: "t2", done: true })],
+      blockers: [
+        { key: "task:t1", blocker: "task:t2", by: "you", why: "" },
+        { key: "task:t1", blocker: "github:acme/shop#12", by: "aifred", why: "The PR has the fix." },
+      ],
+    });
+    const row = await waitFor(() => document.getElementById("row-task:t1")!);
+    await waitFor(() => expect(within(row).getByRole("button", { name: "Open blocker: DEV-42: round the tax" })).toBeInTheDocument());
+    expect(within(row).queryByRole("button", { name: "Open blocker: Write notes" })).not.toBeInTheDocument();
+    await openItem("Deploy");
+    const list = await within(details()).findByRole("list", { name: "Blocked by" });
+    expect(list).toHaveTextContent("finished");
+    expect(list).toHaveTextContent("AIfred: The PR has the fix.");
+  });
+
+  it("a blocker fails like the real app: an item cannot wait for itself or for an item that waits for it", async () => {
+    const fake = await startApp({ ...lists(), tasks: [task("Deploy", { id: "t1" })] });
+    await expect(invoke("add_blocker", { key: "task:t1", blocker: "task:t1" })).rejects.toBe("an item cannot wait for itself");
+    fake.blockers = [{ key: "github:acme/shop#12", blocker: "task:t1", by: "you", why: "" }];
+    await expect(invoke("add_blocker", { key: "task:t1", blocker: "github:acme/shop#12" })).rejects.toBe("github:acme/shop#12 already waits for task:t1. Two items cannot wait for each other");
+  });
+
   it("the brief says what AIfred sorted, and Undo puts the item back", async () => {
     const move = { id: 1, ts: 2, key: "github:acme/shop#12", title: "DEV-42: round the tax", main: "clickup:86a", main_title: "Checkout totals", why: "The pull request names DEV-42." };
     const fake = await startApp({

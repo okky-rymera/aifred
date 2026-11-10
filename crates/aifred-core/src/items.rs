@@ -16,10 +16,14 @@ use serde::Serialize;
 use crate::db;
 use crate::summaries::for_item;
 
+/// The sources of item keys. "task" is a row of `user_task`. The other
+/// sources are rows of `work_item`.
+const SOURCES: [&str; 4] = ["task", "github", "clickup", "gmail"];
+
 /// The source and the id of a key. An unknown source is an error.
 pub fn split(key: &str) -> anyhow::Result<(&str, &str)> {
     match key.split_once(':') {
-        Some((s @ ("task" | "github" | "clickup" | "gmail"), id)) if !id.is_empty() => Ok((s, id)),
+        Some((s, id)) if SOURCES.contains(&s) && !id.is_empty() => Ok((s, id)),
         _ => {
             bail!(
                 "\"{key}\" is not an item key. A key is task:<id>, github:<id>, clickup:<id>, or gmail:<id>"
@@ -48,6 +52,33 @@ pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
         .optional()?
     };
     Ok(found.is_some())
+}
+
+/// SQL that is true when the item key in column `col` names an item that
+/// AIfred knows, as title_place() is Some. With `open`, the item must also
+/// be open, as is_open(). It checks all rows in one query (blockers.rs).
+/// Change it together with split(), is_open() and title_place().
+pub(crate) fn known_sql(col: &str, open: bool) -> String {
+    let (done, in_list) = if open {
+        (" AND done = 0", " AND in_list = 1")
+    } else {
+        ("", "")
+    };
+    let others = SOURCES[1..]
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "(CASE WHEN substr({col}, 1, 5) = 'task:' AND length({col}) > 5
+           THEN EXISTS (SELECT 1 FROM user_task WHERE id = substr({col}, 6){done})
+           WHEN substr({col}, 1, instr({col}, ':') - 1) IN ({others})
+             AND length({col}) > instr({col}, ':')
+           THEN EXISTS (SELECT 1 FROM work_item
+             WHERE source = substr({col}, 1, instr({col}, ':') - 1)
+               AND item_id = substr({col}, instr({col}, ':') + 1){in_list})
+           ELSE 0 END)"
+    )
 }
 
 /// The title of an item and where it is from, for example "GitHub
@@ -314,6 +345,67 @@ mod tests {
         for bad in ["t1", "jira:5", "task:", ":x"] {
             assert!(split(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_sql_check_agrees_with_title_place_and_is_open() {
+        let d = std::env::temp_dir().join(format!("aifred-items-sql-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let s = TaskStore::new(&d);
+        let open = s.add("Open", "", "you").unwrap();
+        let done = s.add("Done", "", "you").unwrap();
+        s.set_done(&done.id, true).unwrap();
+        db::write(&d, |tx| {
+            for (source, id, in_list) in [
+                ("github", "a/b#1", 1),
+                ("github", "a/b#2", 0),
+                ("clickup", "c1", 1),
+                ("gmail", "m1", 0),
+            ] {
+                tx.execute(
+                    "INSERT INTO work_item (source, item_id, title, place, url, details, data, in_list, pos, first_seen, last_seen)
+                     VALUES (?1, ?2, 'T', '', '', '', '{}', ?3, 0, 0, 0)",
+                    rusqlite::params![source, id, in_list],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let keys = [
+            format!("task:{}", open.id),
+            format!("task:{}", done.id),
+            "task:none".into(),
+            "github:a/b#1".into(),
+            "github:a/b#2".into(),
+            "github:a/b#9".into(),
+            "clickup:c1".into(),
+            "gmail:m1".into(),
+            "clickup:a/b#1".into(),
+        ];
+        db::read(&d, |c| {
+            for k in &keys {
+                for open in [false, true] {
+                    let sql = format!("SELECT {}", known_sql("?1", open));
+                    let got: bool = c.query_row(&sql, [k], |r| r.get(0))?;
+                    let want = if open {
+                        is_open(c, k)?
+                    } else {
+                        title_place(c, k)?.is_some()
+                    };
+                    assert_eq!(got, want, "{k} open={open}");
+                }
+            }
+            // A key that split() does not take is never known.
+            for bad in ["t1", "jira:5", "task:", "github:", ":x"] {
+                let sql = format!("SELECT {}", known_sql("?1", false));
+                let got: bool = c.query_row(&sql, [bad], |r| r.get(0))?;
+                assert!(!got, "{bad}");
+            }
+            Ok(())
+        })
+        .unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

@@ -9,7 +9,8 @@
 //! The goal tools change the user's goals (goals.rs) in the same database.
 //!
 //! The move tool puts an item under another item as a subtask (links.rs),
-//! in AIfred only.
+//! in AIfred only. The blocker tools say that an item waits for another
+//! item (blockers.rs), in AIfred only.
 //!
 //! The context tool saves AIfred's short notes about one item (context.rs),
 //! from the user's own answers and the plain facts that it looked up.
@@ -204,6 +205,26 @@ struct MoveArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct SetBlockerArgs {
+    /// The item key of the item that must wait, from overview. For example task:t123.
+    key: String,
+    /// The item key of the item that must be finished first. For example github:acme/shop#7.
+    blocker: String,
+    /// True when the user asked for this link. False when you set it by yourself from a plain fact.
+    user_asked: bool,
+    /// When user_asked is false: why the item waits, at most 15 words. Example: "The PR needs the new API from #12."
+    why: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RemoveBlockerArgs {
+    /// The item key of the item that waits.
+    key: String,
+    /// The item key of the item that it must not wait for any more.
+    blocker: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct MissionItemArgs {
     /// The mission id, from `missions` in overview.
     mission: i64,
@@ -343,12 +364,26 @@ impl TaskTools {
         let s = settings::load_or_default(&self.dir);
         let guesses = plan::estimates(&self.dir)?;
         let p = plan::get(&self.dir, day)?;
+        // The open blockers (blockers.rs). No read when the plan is empty.
+        let blocked = match &p {
+            Some(p) if !p.items.is_empty() => {
+                aifred_core::db::read(&self.dir, aifred_core::blockers::open_blockers_in)?
+            }
+            _ => Default::default(),
+        };
         let items: Vec<serde_json::Value> = p
             .as_ref()
             .map(|p| &p.items[..])
             .unwrap_or_default()
             .iter()
-            .map(|i| serde_json::json!({ "key": i.key, "why": i.why, "goal": i.goal, "minutes": guesses.get(&i.key).map(|g| g.minutes), "at": i.at.map(plan::time_text) }))
+            .map(|i| {
+                let mut v = serde_json::json!({ "key": i.key, "why": i.why, "goal": i.goal, "minutes": guesses.get(&i.key).map(|g| g.minutes), "at": i.at.map(plan::time_text) });
+                // The open items that this item waits for (blockers.rs).
+                if let Some(b) = blocked.get(&i.key) {
+                    v["blocked_by"] = b.clone().into();
+                }
+                v
+            })
             .collect();
         // An item with a fixed time is work only in the part of the work day
         // that lunch and the meetings do not take: work_minutes takes those
@@ -686,6 +721,51 @@ impl TaskTools {
     }
 
     #[tool(
+        description = "Say that an item must wait until another item is finished: `key` waits for `blocker`. Any item can wait or block: a task, a GitHub item, a ClickUp task, or an email. An item can wait for many items. This is in AIfred only: GitHub and ClickUp do not change. The user can still finish the waiting item. Two items cannot wait for each other. With user_asked false, give a why: the user sees it and can take the link away. With user_asked true, the user sees that the link came from a chat. When the user took a link away in the app, you cannot add it again, also not with user_asked true: tell the user to add it in the item panel. The answer is all the links: key waits for blocker."
+    )]
+    async fn set_blocker(
+        &self,
+        Parameters(a): Parameters<SetBlockerArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // The item that waits must be an item of the chat. The blocker can
+        // be any item: the user can say "this waits for X".
+        check_item(chat_items().as_deref(), &a.key)?;
+        // "chat": the user's link, marked "chat" so the user sees that it
+        // came from a chat. It cannot add back a link that the user took
+        // away in the app (blockers.rs add).
+        let (by, why) = if a.user_asked {
+            ("chat", String::new())
+        } else {
+            let why = a.why.unwrap_or_default();
+            if why.trim().is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "Give a why when user_asked is false.",
+                    None,
+                ));
+            }
+            ("aifred", why)
+        };
+        let c = aifred_core::blockers::add(&self.dir, &a.key, &a.blocker, by, &why, now())
+            .map_err(fail)?;
+        json(&c.blockers)
+    }
+
+    #[tool(
+        description = "Say that an item does not wait for another item any more. Use it only when the user asks. The answer is all the links: key waits for blocker."
+    )]
+    async fn remove_blocker(
+        &self,
+        Parameters(a): Parameters<RemoveBlockerArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        check_item(chat_items().as_deref(), &a.key)?;
+        // "aifred": the AI took it away. It is no mark of the user, so the
+        // AI can add the link again later (blockers.rs remove).
+        let c = aifred_core::blockers::remove(&self.dir, &a.key, &a.blocker, "aifred", now())
+            .map_err(fail)?;
+        json(&c.blockers)
+    }
+
+    #[tool(
         description = "Add an open item to one of today's missions. The item leaves its other mission. The brief does not take it away from this mission. Use it only when the user asks. The answer is the mission with its items."
     )]
     async fn add_to_mission(
@@ -891,6 +971,77 @@ mod tests {
             .await
             .is_err()
         );
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_blocker_and_remove_blocker() {
+        let t = tools("blocker");
+        let a = t.store().add("Deploy", "", "you").unwrap();
+        let b = t.store().add("Review", "", "you").unwrap();
+        let (ka, kb) = (format!("task:{}", a.id), format!("task:{}", b.id));
+        let set = |user_asked: bool, why: Option<&str>| SetBlockerArgs {
+            key: ka.clone(),
+            blocker: kb.clone(),
+            user_asked,
+            why: why.map(str::to_string),
+        };
+        // The AI must give a reason when it sets a link by itself.
+        assert!(t.set_blocker(Parameters(set(false, None))).await.is_err());
+        let l = body(
+            t.set_blocker(Parameters(set(false, Some("Deploy needs the review."))))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(l["blockers"][0]["blocker"], kb.as_str());
+        assert_eq!(l["blockers"][0]["by"], "aifred");
+        let o = overview::build(&t.dir, None).unwrap();
+        let deploy = o["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["key"] == ka.as_str())
+            .unwrap();
+        assert_eq!(deploy["blocked_by"][0], kb.as_str());
+        let l = body(
+            t.remove_blocker(Parameters(RemoveBlockerArgs {
+                key: ka.clone(),
+                blocker: kb.clone(),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert!(l["blockers"].as_array().unwrap().is_empty());
+        // The AI took it away, not the user: the AI can add it again.
+        let l = body(
+            t.set_blocker(Parameters(set(false, Some("again"))))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(l["blockers"][0]["by"], "aifred");
+        // The user took it away in the app: the AI cannot add it again,
+        // also not when it says that the user asked.
+        aifred_core::blockers::remove(&t.dir, &ka, &kb, "you", now()).unwrap();
+        assert!(
+            t.set_blocker(Parameters(set(false, Some("x"))))
+                .await
+                .is_err()
+        );
+        assert!(t.set_blocker(Parameters(set(true, None))).await.is_err());
+        // A new link that the user asked for in the chat shows that it came
+        // from a chat.
+        let c = t.store().add("Notes", "", "you").unwrap();
+        let l = body(
+            t.set_blocker(Parameters(SetBlockerArgs {
+                key: ka.clone(),
+                blocker: format!("task:{}", c.id),
+                user_asked: true,
+                why: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(l["blockers"][0]["by"], "chat");
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 

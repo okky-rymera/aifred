@@ -8,7 +8,7 @@ import { useApp } from "./ctx";
 import { SRC_NAME, dayOfSecs, dueInfo, fmtTime, shortDay, type Item } from "./items";
 import { Minutes } from "./Calendar";
 import { PriPill } from "./Home";
-import { SameWork } from "./Links";
+import { BlockedBy, SameWork } from "./Links";
 import { NextStep, SuggestSteps } from "./Steps";
 import { DocSuggest } from "./Docs";
 import { SheetComments } from "./Sheets";
@@ -315,6 +315,7 @@ export function Detail(props: { item: Item; hidden?: boolean; tabs?: React.React
         <ItemContextSection key={i.key} itemKey={i.key} version={chat.busy ? -1 : chat.msgs.length} />
         <Links item={i} />
         <SameWork item={i} />
+        <BlockedBy item={i} />
         {i.task && <Steps item={i} />}
         {!i.task && !i.done && <div className="d-sec">Steps</div>}
         <SuggestSteps item={i} />

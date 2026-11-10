@@ -3,6 +3,7 @@
 pub mod actions;
 pub mod assistant;
 pub mod backend;
+pub mod blockers;
 pub mod brief;
 pub mod calendar;
 pub mod clickup;

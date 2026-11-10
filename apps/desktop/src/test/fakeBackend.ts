@@ -5,6 +5,8 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { DEFAULT_SETTINGS } from "../api";
 import { MAX_GROUP, groupOf, linkGroups, parentOf } from "../items";
 import type {
+  BlockerBefore,
+  ItemBlocker,
   Action,
   DocEdit,
   SheetComment,
@@ -209,6 +211,8 @@ export type Fake = {
   goalDone: Record<number, number>;
   /** The items under another item, like links.rs. */
   links: ItemLink[];
+  /** The items that wait for other items, like blockers.rs. `removed`: taken away, and `by` says who took it away. */
+  blockers: (ItemBlocker & { removed?: boolean; at?: number })[];
   /** The items that the user took out of a mission, as "id:key" (mission_out). */
   missionOut: string[];
   /** AIfred's notes about items, by key (context.rs). */
@@ -411,6 +415,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     picks: [],
     goalDone: {},
     links: [],
+    blockers: [],
     contexts: {},
     contextSkip: [],
     missionOut: [],
@@ -433,6 +438,20 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
     const parent = parentOf(fake.links, key);
     fake.links = fake.links.filter((l) => l.key !== key).flatMap((l) => (l.main !== key ? [l] : parent ? [{ ...l, main: parent }] : []));
   };
+
+  /** The blockers that count, like blockers::get. */
+  const blockersNow = () =>
+    structuredClone({
+      blockers: fake.blockers
+        .filter((b) => !b.removed)
+        .map(({ key, blocker, by, why }) => ({ key, blocker, by, why }))
+        .sort((a, b) => a.key.localeCompare(b.key) || a.blocker.localeCompare(b.blocker)),
+    });
+  const blockerRow = (key: string, blocker: string) => fake.blockers.find((b) => b.key === key && b.blocker === blocker);
+  /** True when `from` waits for `to`, also through other items. Like blockers.rs, only links to open items count. */
+  const waitsFor = (from: string, to: string, open: (k: string) => boolean, seen = new Set<string>()): boolean =>
+    from === to ||
+    (!seen.has(from) && (seen.add(from), fake.blockers.some((b) => !b.removed && b.key === from && open(b.blocker) && waitsFor(b.blocker, to, open, seen))));
 
   mockIPC(async (cmd, payload) => {
     const args = (payload ?? {}) as Record<string, any>;
@@ -821,6 +840,7 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         fake.sessions = fake.sessions.filter((x) => x.key !== `task:${args.id}`);
         // Like tasks.rs: a deleted task leaves its tree. Its subtasks move up.
         removeLinks(`task:${args.id}`);
+        fake.blockers = fake.blockers.filter((b) => b.key !== `task:${args.id}` && b.blocker !== `task:${args.id}`);
         return null;
       case "google_status":
         return structuredClone(fake.google);
@@ -1075,6 +1095,45 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         }
         return linksNow();
       }
+      case "item_blockers":
+        return blockersNow();
+      case "add_blocker": {
+        // Like blockers::add for the user.
+        const { key, blocker } = args as { key: string; blocker: string };
+        if (key === blocker) throw "an item cannot wait for itself";
+        for (const k of [key, blocker]) if (!titlePlace(k)) throw `AIfred does not know the item ${k}`;
+        if (waitsFor(blocker, key, isOpen)) throw `${blocker} already waits for ${key}. Two items cannot wait for each other`;
+        const old = blockerRow(key, blocker);
+        // Like blockers::check_room_in: only open blockers count.
+        if ((!old || old.removed) && isOpen(blocker) && fake.blockers.filter((b) => b.key === key && !b.removed && isOpen(b.blocker)).length >= 10)
+          throw "an item can wait for at most 10 open items";
+        const at = nowSecs();
+        const before = { key, blocker, row: old ? { by: old.by, why: old.why, removed: !!old.removed } : null, at, gone: false };
+        fake.blockers = [...fake.blockers.filter((b) => b !== old), { key, blocker, by: "you", why: "", at }];
+        return { ...blockersNow(), before };
+      }
+      case "remove_blocker": {
+        const { key, blocker } = args as { key: string; blocker: string };
+        const old = blockerRow(key, blocker);
+        if (!old || old.removed) throw `${key} does not wait for ${blocker}`;
+        const at = nowSecs();
+        const before = { key, blocker, row: { by: old.by, why: old.why, removed: false }, at, gone: true };
+        Object.assign(old, { removed: true, by: "you", at });
+        return { ...blockersNow(), before };
+      }
+      case "restore_blocker": {
+        const { key, blocker, row, at, gone } = args.before as BlockerBefore;
+        // Like blockers::restore: the Undo works only while the row is as the change left it.
+        const cur = blockerRow(key, blocker);
+        if (at && !(cur && cur.at === at && !!cur.removed === gone)) throw "the link changed after this change, so the Undo cannot work now";
+        if (!row) {
+          fake.blockers = fake.blockers.filter((b) => !(b.key === key && b.blocker === blocker && !b.removed));
+          return blockersNow();
+        }
+        fake.blockers = fake.blockers.filter((b) => !(b.key === key && b.blocker === blocker));
+        fake.blockers.push({ key, blocker, by: row.by as ItemBlocker["by"], why: row.why, removed: row.removed, at: nowSecs() });
+        return blockersNow();
+      }
       case "waiting_items":
         return structuredClone(fake.waiting);
       case "add_waiting": {
@@ -1147,6 +1206,8 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
         return "okky";
       case "remove_clickup_token":
         fake.clickupToken = "";
+        // Like links::drop_gone_in: the blockers of ClickUp items go away.
+        fake.blockers = fake.blockers.filter((b) => !b.key.startsWith("clickup:") && !b.blocker.startsWith("clickup:"));
         return null;
       case "clickup_items": {
         if (!fake.clickupToken) throw "ClickUp is not connected. Add a token on the Settings page.";

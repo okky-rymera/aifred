@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use aifred_core::assistant::AskOptions;
 use aifred_core::backend::{Event, claude::ClaudeBackend};
+use aifred_core::blockers;
 use aifred_core::brief::Brief;
 use aifred_core::calendar::{self, CalendarList};
 use aifred_core::clickup::{self, TokenStatus};
@@ -1026,6 +1027,49 @@ async fn unlink_item(app: State<'_, App>, key: String) -> CmdResult<links::Chang
     blocking(&app, move |a| links::unlink_undoable(&a.dir, &key, now())).await
 }
 
+/// Blockers (blockers.rs): each item that waits for another item.
+#[tauri::command]
+async fn item_blockers(app: State<'_, App>) -> CmdResult<blockers::Blockers> {
+    blocking(&app, |a| blockers::get(&a.dir)).await
+}
+
+/// Says that `key` waits for `blocker`. The user set it. The answer also
+/// has how things were before, for the Undo (restore_blocker).
+#[tauri::command]
+async fn add_blocker(
+    app: State<'_, App>,
+    key: String,
+    blocker: String,
+) -> CmdResult<blockers::Changed> {
+    blocking(&app, move |a| {
+        blockers::add(&a.dir, &key, &blocker, "you", "", now())
+    })
+    .await
+}
+
+/// Takes away the link "`key` waits for `blocker`". The AI does not add it
+/// again. The answer also has how things were before, for the Undo.
+#[tauri::command]
+async fn remove_blocker(
+    app: State<'_, App>,
+    key: String,
+    blocker: String,
+) -> CmdResult<blockers::Changed> {
+    blocking(&app, move |a| {
+        blockers::remove(&a.dir, &key, &blocker, "you", now())
+    })
+    .await
+}
+
+/// The Undo of add_blocker or remove_blocker.
+#[tauri::command]
+async fn restore_blocker(
+    app: State<'_, App>,
+    before: blockers::Before,
+) -> CmdResult<blockers::Blockers> {
+    blocking(&app, move |a| blockers::restore(&a.dir, &before, now())).await
+}
+
 /// Undoes AIfred's moves of items (sort.rs): each item goes back to where
 /// it was before. AIfred does not move these items again.
 #[tauri::command]
@@ -1835,6 +1879,10 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         link_items,
         restore_link,
         unlink_item,
+        item_blockers,
+        add_blocker,
+        remove_blocker,
+        restore_blocker,
         undo_moves,
         google_status,
         set_google_client,
@@ -2621,6 +2669,36 @@ mod tests {
         );
         call(&win, "delete_waiting", json!({ "id": id })).unwrap();
         assert_eq!(call(&win, "waiting_items", json!({})).unwrap(), json!([]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn blocker_commands_give_the_new_blockers() {
+        let (_app, win, dir) = window("blockers");
+        assert_eq!(
+            call(&win, "item_blockers", json!({})).unwrap(),
+            json!({ "blockers": [] })
+        );
+        let a = call(&win, "add_task", json!({ "task": { "title": "Deploy" } })).unwrap();
+        let b = call(&win, "add_task", json!({ "task": { "title": "Review" } })).unwrap();
+        let (ka, kb) = (
+            format!("task:{}", a["id"].as_str().unwrap()),
+            format!("task:{}", b["id"].as_str().unwrap()),
+        );
+        let c = call(&win, "add_blocker", json!({ "key": ka, "blocker": kb })).unwrap();
+        assert_eq!(
+            c["blockers"],
+            json!([{ "key": ka, "blocker": kb, "by": "you", "why": "" }])
+        );
+        let c = call(&win, "remove_blocker", json!({ "key": ka, "blocker": kb })).unwrap();
+        assert_eq!(c["blockers"], json!([]));
+        // The Undo puts the link back.
+        let l = call(&win, "restore_blocker", json!({ "before": c["before"] })).unwrap();
+        assert_eq!(l["blockers"][0]["blocker"], json!(kb));
+        assert!(
+            call(&win, "add_blocker", json!({ "key": kb, "blocker": ka })).is_err(),
+            "two items cannot wait for each other"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

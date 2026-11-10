@@ -270,6 +270,24 @@ When new items come in, AIfred puts them into trees by itself. It does not ask f
 
 The brief and the chat see the trees: each subtask has a `parent` in the overview. When the parent is closed, the next open item above it is the parent.
 
+## Blockers
+
+An item can wait until other items are finished. For example, "Deploy the fix" waits for "Review PR #12". Blockers exist only in AIfred. ClickUp and GitHub do not change (`crates/aifred-core/src/blockers.rs`).
+
+- Any item can wait or block: a task, a GitHub item, a ClickUp task, or an email.
+- An item can wait for at most 10 open items. Finished blockers, and blockers that are not in your list now, do not count. Many items can wait for one item.
+- To add a blocker, open the item that waits and click "+ Add a blocker" under "Blocked by". Type words of the other item's title.
+- The item panel shows what the item waits for under "Blocked by", and what waits for it under "This item blocks". "Remove" takes a link away. Each change has an Undo.
+- A row that waits for an open item shows "Blocked by" and the names of the open blockers. Click a name to open it. A mission shows the same line for its first open item. A block in the Calendar shows "Blocked by" with the names.
+- When a blocker is finished, it does not block any more. The link stays, so it blocks again when the item opens again.
+- You can still finish a blocked item. The link only informs.
+- An item cannot wait for itself. Two open items cannot wait for each other, also not through other items. Links to finished items do not count for this check. So when a finished item opens again, two items can wait for each other. Both links show in the item panel, and you can remove one.
+- When an item is deleted, or its source is disconnected, its links go away.
+
+In the chat, say for example "the deploy task waits for PR #12". AIfred sets the link, and the panel shows "Set by AIfred in a chat". AIfred can also set a link by itself when a plain fact shows the order, for example an issue that says it depends on another issue. Then the panel shows "AIfred:" and the reason. When you remove a link in the item panel, AIfred never adds it again, also not when the chat says that you asked. Only the item panel can add it again. When AIfred removes a link (for example when you ask in the chat), AIfred can add it again later.
+
+The brief and the chat see the links: each open item that waits for open items has `blocked_by` in the overview. The day plan tool gives `blocked_by` for each planned item too. The brief and the day plan put a blocked item after its open blockers. A blocked item stays in the brief and the day plan. A link does not make an item more urgent or more important.
+
 ## Missions
 
 A mission is the next small piece of work: usually one open item, sometimes two small items that you do together. For a tree of subtasks, the mission is the next open subtask, not the full tree (`crates/aifred-core/src/missions.rs`).

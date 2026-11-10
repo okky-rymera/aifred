@@ -619,6 +619,21 @@ export const unlinkItem = (key: string) => invoke<LinkChanged>("unlink_item", { 
 /** Undoes AIfred's moves (sort.rs): each item goes back to where it was. AIfred does not move these items again. */
 export const undoMoves = (ids: number[]) => invoke<Links>("undo_moves", { ids });
 
+/** One item that waits until another item is finished, in AIfred only
+ * (blockers.rs). `by`: who set it ("chat": the AI, because you asked in a chat). `why`: AIfred's reason. */
+export type ItemBlocker = { key: string; blocker: string; by: "you" | "chat" | "aifred"; why: string };
+export type Blockers = { blockers: ItemBlocker[] };
+export const itemBlockers = () => invoke<Blockers>("item_blockers");
+/** How the link was before a change, for its Undo (blockers.rs Before). `at` and `gone`: how the change left the link. */
+export type BlockerBefore = { key: string; blocker: string; row: { by: string; why: string; removed: boolean } | null; at: number; gone: boolean };
+export type BlockerChanged = Blockers & { before: BlockerBefore };
+/** Says that `key` waits for `blocker`. */
+export const addBlocker = (key: string, blocker: string) => invoke<BlockerChanged>("add_blocker", { key, blocker });
+/** Takes away the link. AIfred does not add it again by itself. */
+export const removeBlocker = (key: string, blocker: string) => invoke<BlockerChanged>("remove_blocker", { key, blocker });
+/** The Undo of addBlocker or removeBlocker. */
+export const restoreBlocker = (before: BlockerBefore) => invoke<Blockers>("restore_blocker", { before });
+
 /** The open items, then the items that closed in the last 3 days. */
 export const waitingItems = () => invoke<Waiting[]>("waiting_items");
 export const addWaiting = (item: NewWaiting) => invoke<Waiting>("add_waiting", { item });
