@@ -180,7 +180,7 @@ impl GithubTools {
     }
 
     #[tool(
-        description = "Search the user's GitHub issues and pull requests (assigned, authored, or review requested) by words in the title, the repository, and the description, best match first. It searches the list that AIfred saved, and downloads a new list first when it is too old. Each result says if it is still in the user's list (in_list) and when AIfred last saw it (last_seen, Unix seconds)."
+        description = "Search the user's GitHub issues and pull requests (assigned, authored, or review requested) by words in the title, the repository, and the description, best match first. It searches the list that AIfred saved, and downloads a new list first when it is too old. Each result says if it is still in the user's list (in_list) and when AIfred last saw it (last_seen, Unix seconds). A result can have `related`: the items linked to it (parent, subtask, same mission, closes, closed by), each with its key, title, place, and why. Read them to see the work around a result."
     )]
     async fn search_my_items(
         &self,

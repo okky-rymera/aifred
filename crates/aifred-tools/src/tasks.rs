@@ -436,18 +436,28 @@ impl TaskTools {
     }
 
     #[tool(
-        description = "Search the user's local to-do tasks by words in the title and notes, best match first. A task matches when it has any of the words, also other forms of a word (\"invoices\" finds \"invoice\")."
+        description = "Search the user's local to-do tasks by words in the title and notes, best match first. A task matches when it has any of the words, also other forms of a word (\"invoices\" finds \"invoice\"). A result can have `related`: the items linked to it (parent, subtask, same mission, closes, closed by), each with its key, title, place, and why. Read them to see the work around a result."
     )]
     async fn search_tasks(
         &self,
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        json(
-            &self
-                .store()
-                .search(&a.query, a.include_done.unwrap_or(false), a.limit)
-                .map_err(fail)?,
-        )
+        let found = self
+            .store()
+            .search(&a.query, a.include_done.unwrap_or(false), a.limit)
+            .map_err(fail)?;
+        let keys: Vec<String> = found.iter().map(|t| format!("task:{}", t.id)).collect();
+        let related = aifred_core::related::of_keys(&self.dir, &keys);
+        // Each task as before, plus `related` when it has linked items.
+        let mut out = Vec::new();
+        for (t, r) in found.into_iter().zip(related) {
+            let mut v = serde_json::to_value(t).map_err(|e| fail(e.into()))?;
+            if !r.is_empty() {
+                v["related"] = serde_json::json!(r);
+            }
+            out.push(v);
+        }
+        json(&out)
     }
 
     #[tool(

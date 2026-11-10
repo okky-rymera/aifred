@@ -1317,14 +1317,20 @@ pub struct WorkHit {
     pub in_list: bool,
     /// When AIfred last saw the item in a download, in Unix seconds.
     pub last_seen: u64,
+    /// The items linked to it (related.rs).
+    pub related: Vec<crate::related::Related>,
 }
 
 impl WorkHit {
-    /// The item as the chat tools send it: its fields, plus in_list and last_seen.
+    /// The item as the chat tools send it: its fields, plus in_list,
+    /// last_seen, and the linked items when there are some.
     pub fn into_json(self) -> serde_json::Value {
         let mut v = self.item;
         v["in_list"] = self.in_list.into();
         v["last_seen"] = self.last_seen.into();
+        if !self.related.is_empty() {
+            v["related"] = serde_json::json!(self.related);
+        }
         v
     }
 }
@@ -1412,15 +1418,17 @@ pub(crate) fn search_work(
             limit,
         )?;
         let mut get =
-            c.prepare("SELECT data, in_list, last_seen FROM work_item WHERE rowid = ?1")?;
+            c.prepare("SELECT item_id, data, in_list, last_seen FROM work_item WHERE rowid = ?1")?;
+        let mut linker = crate::related::Linker::new(c);
         ids.iter()
             .map(|id| {
-                let (data, in_list, last_seen): (String, bool, u64) =
-                    get.query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                let (item_id, data, in_list, last_seen): (String, String, bool, u64) =
+                    get.query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
                 Ok(WorkHit {
                     item: serde_json::from_str(&data)?,
                     in_list,
                     last_seen,
+                    related: linker.of(&format!("{source}:{item_id}")),
                 })
             })
             .collect()

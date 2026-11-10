@@ -29,6 +29,7 @@ pub mod missions;
 pub mod overview;
 pub mod plan;
 pub mod program;
+pub mod related;
 pub mod review;
 pub mod settings;
 pub mod sheets;
