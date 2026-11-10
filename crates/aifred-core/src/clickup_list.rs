@@ -14,7 +14,8 @@ const SOURCE: &str = "clickup";
 
 /// Change this when the saved list must not be used after an update.
 /// 1: tasks in a "done" status are left out. Older lists can have them.
-const VERSION: u32 = 1;
+/// 2: the saved text has the custom fields. Older lists do not have them.
+const VERSION: u32 = 2;
 
 /// How long the notes of note_closed stay, in seconds. The undo works only
 /// on the day of the close: 2 days is enough for a day that ends late.
@@ -452,6 +453,33 @@ pub(crate) mod tests {
             2,
             "the list name is searched"
         );
+        // A saved field is a search word, and the field sign is not.
+        s.save_details(
+            "a",
+            &crate::clickup::details_text(
+                "",
+                &[crate::clickup::FieldValue {
+                    name: "Client".into(),
+                    value: "Acme".into(),
+                    saved: true,
+                }],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            ids(s.search("acct", "acme", false, None).unwrap()),
+            vec!["a"]
+        );
+        let mark = crate::clickup::FIELD_MARK.trim();
+        let tokens: i64 = db::read(&d, |c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM work_item_fts WHERE work_item_fts MATCH ?1",
+                [format!("\"{mark}\"")],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+        assert_eq!(tokens, 0, "search does not index the field sign");
         assert!(
             s.search("other", "invoice", false, None)
                 .unwrap()

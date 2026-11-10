@@ -219,9 +219,20 @@ pub struct ItemDetails {
     pub key: String,
     /// The description, as GitHub or ClickUp gave it. Empty when AIfred has none.
     pub details: String,
+    /// The custom fields of a ClickUp task, which AIfred saves before the
+    /// description (clickup::details_text). The panel shows them apart.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Field>,
     /// The short summary, when the description is long.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+}
+
+/// One custom field of a ClickUp task.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Field {
+    pub name: String,
+    pub value: String,
 }
 
 pub fn details(dir: &Path, key: &str) -> anyhow::Result<ItemDetails> {
@@ -245,10 +256,22 @@ pub fn details(dir: &Path, key: &str) -> anyhow::Result<ItemDetails> {
         let Some((details, summary)) = row else {
             bail!("no item {key}")
         };
-        let summary = for_item(summary, &details).filter(|s| s != &details);
+        let (fields, description) = if source == "clickup" {
+            let (fields, rest) = crate::clickup::split_fields(&details);
+            let fields = fields
+                .into_iter()
+                .map(|(name, value)| Field { name, value })
+                .collect();
+            (fields, rest.to_string())
+        } else {
+            (Vec::new(), details)
+        };
+        // Of the description only: a short one with no AI summary must not show the fields.
+        let summary = for_item(summary, &description).filter(|s| s != &description);
         Ok(ItemDetails {
             key: key.into(),
-            details,
+            details: description,
+            fields,
             summary,
         })
     })
@@ -438,6 +461,59 @@ mod tests {
             "{ctx}"
         );
         assert!(details(&d, "github:none#1").is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_panel_gets_the_fields_of_a_clickup_task_apart_from_the_description() {
+        let d = std::env::temp_dir().join(format!("aifred-items-fields-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let field = |name: &str, value: &str| crate::clickup::FieldValue {
+            name: name.into(),
+            value: value.into(),
+            saved: true,
+        };
+        let text = crate::clickup::details_text(
+            "Fix the cart.",
+            &[
+                field("Project", "Coupons"),
+                field("Spec", "https://example.com/s"),
+            ],
+        );
+        let mut item: crate::clickup::ClickupItem = serde_json::from_value(serde_json::json!({
+            "id": "86abc", "title": "Cart", "url": "u", "status": "to do",
+            "list": "Sprint", "workspace": "W", "updated": 1
+        }))
+        .unwrap();
+        // The description is not in the JSON of an item (serde skip).
+        item.description = Some(text);
+        let tasks = crate::clickup::MyTasks {
+            items: vec![item],
+            cut: vec![],
+        };
+        crate::clickup_list::ClickupStore::new(&d)
+            .save("acct", tasks, crate::files::now())
+            .unwrap();
+        let det = details(&d, "clickup:86abc").unwrap();
+        assert_eq!(
+            det.details, "Fix the cart.",
+            "the description has no field lines"
+        );
+        assert_eq!(
+            det.fields,
+            [
+                Field {
+                    name: "Project".into(),
+                    value: "Coupons".into()
+                },
+                Field {
+                    name: "Spec".into(),
+                    value: "https://example.com/s".into()
+                },
+            ]
+        );
+        assert_eq!(det.summary, None, "a short description is its own summary");
         std::fs::remove_dir_all(&d).unwrap();
     }
 

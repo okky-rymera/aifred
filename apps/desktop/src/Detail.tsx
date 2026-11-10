@@ -1,7 +1,7 @@
 // The details of one item, on the right side (or the full window when the
 // window is narrow). Your own tasks can be changed here. GitHub and ClickUp
 // items show what AIfred knows, with a link to open them there.
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { Composer, Files, Md, Messages } from "./Chat";
 import { useApp } from "./ctx";
@@ -149,8 +149,26 @@ function Description({ item }: { item: Item }) {
       </>
     );
   }
+  const fields = extra?.fields ?? [];
   return (
     <>
+      {fields.length > 0 && (
+        <>
+          <div className="d-sec">
+            Fields · from {SRC_NAME[item.src]} <span className="c">{fields.length}</span>
+          </div>
+          <dl className="fields" style={{ marginTop: -8 }}>
+            {fields.map((f, i) => (
+              <Fragment key={i}>
+                <dt>{f.name}</dt>
+                <dd className="ro" style={{ overflowWrap: "anywhere" }}>
+                  {f.value}
+                </dd>
+              </Fragment>
+            ))}
+          </dl>
+        </>
+      )}
       <div className="d-sec">Description · from {SRC_NAME[item.src]}</div>
       <div className="desc">
         {error ? (

@@ -268,7 +268,13 @@ export const removeGoal = (id: number) => invoke<Goals>("remove_goal", { id });
 /** The user says that the goals are still right. */
 export const confirmGoals = () => invoke<Goals>("confirm_goals");
 export type ItemMeta = { key: string; first_seen: number; new: boolean; summary?: string };
-export type ItemDetails = { key: string; details: string; summary?: string };
+export type ItemDetails = {
+  key: string;
+  details: string;
+  /** The custom fields of a ClickUp task that have a value. */
+  fields?: { name: string; value: string }[];
+  summary?: string;
+};
 
 /** The model of one message: a model id, "default", or undefined for the last pick. */
 export type ModelPick = string | undefined;

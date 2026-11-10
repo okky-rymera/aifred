@@ -1462,11 +1462,17 @@ impl<B: Backend> Assistant<B> {
                 let Ok(d) = crate::items::details(dir, &key) else {
                     continue;
                 };
+                // A ClickUp task can have the link in a custom field.
+                let mut text = d.details;
+                for f in &d.fields {
+                    text.push('\n');
+                    text.push_str(&f.value);
+                }
                 if found.doc.is_none() {
-                    found.doc = crate::docs::find_link(&d.details);
+                    found.doc = crate::docs::find_link(&text);
                 }
                 if found.sheet.is_none() {
-                    found.sheet = crate::sheets::find_link(&d.details);
+                    found.sheet = crate::sheets::find_link(&text);
                 }
                 if found.doc.is_some() && found.sheet.is_some() {
                     break;

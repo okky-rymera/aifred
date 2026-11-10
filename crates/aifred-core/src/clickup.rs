@@ -178,6 +178,9 @@ struct RawTask {
     text_content: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    /// The custom fields of the list, with the task's values.
+    #[serde(default)]
+    custom_fields: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -214,7 +217,12 @@ fn is_open(kind: &str) -> bool {
 }
 
 /// Turns one page of tasks into items. Also returns true if this was the last page.
-fn parse_tasks(json: &[u8], workspace: &str) -> anyhow::Result<(Vec<ClickupItem>, bool)> {
+/// Dates in custom fields are days in the timezone `zone`.
+fn parse_tasks(
+    json: &[u8],
+    workspace: &str,
+    zone: chrono_tz::Tz,
+) -> anyhow::Result<(Vec<ClickupItem>, bool)> {
     let raw: RawTasks =
         serde_json::from_slice(json).context("ClickUp sent a task list we cannot read")?;
     let last = raw.last_page.unwrap_or(raw.tasks.len() < PAGE_SIZE);
@@ -234,9 +242,9 @@ fn parse_tasks(json: &[u8], workspace: &str) -> anyhow::Result<(Vec<ClickupItem>
             priority: t.priority.map(|p| p.priority),
             due: millis(t.due_date.as_deref()),
             updated: millis(t.date_updated.as_deref()).unwrap_or_default(),
-            description: Some(description_text(
-                t.text_content.as_deref(),
-                t.description.as_deref(),
+            description: Some(details_text(
+                &description_text(t.text_content.as_deref(), t.description.as_deref()),
+                &field_values(&t.custom_fields, zone),
             )),
         })
         .collect();
@@ -253,6 +261,221 @@ pub fn description_text(text_content: Option<&str>, description: Option<&str>) -
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// The most characters of one custom field value. A long text field (for
+/// example a pasted report) must not fill the saved text.
+pub const MAX_FIELD_CHARS: usize = 300;
+/// The most characters of all custom field values of one task together.
+/// A value that does not fit is left out, and shorter fields after it can still fit.
+pub const MAX_FIELDS_CHARS: usize = 1500;
+
+/// The start of each field line in the saved text. Search does not index
+/// this sign, so it adds no search word. The task panel uses it to show the
+/// fields apart from the description (split_fields).
+pub const FIELD_MARK: &str = "\u{25B8} ";
+
+/// The timezone for dates when the ClickUp account has none. A fixed zone,
+/// not the computer's zone, so the saved text does not change with the computer.
+pub const DEFAULT_ZONE: chrono_tz::Tz = chrono_tz::UTC;
+
+/// Field types that ClickUp calculates. Their value can change when nobody
+/// edits the task, and each change makes a new summary, so AIfred leaves them out.
+const CALCULATED_TYPES: &[&str] = &["formula", "automatic_progress", "rollup"];
+
+/// Field types whose text is the name of an other task. That name changes when
+/// someone renames the other task, so it is not in the saved text (see FieldValue::saved).
+const LINKED_TASK_TYPES: &[&str] = &["tasks", "list_relationship"];
+
+/// One custom field of a task that has a value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldValue {
+    pub name: String,
+    /// The value as one line of text.
+    pub value: String,
+    /// False when the value can change when nobody edits this task (the
+    /// name of a linked task). Such a value goes in the tool output, but not
+    /// in the saved text, because each change of the saved text makes a new summary.
+    pub saved: bool,
+}
+
+/// The ClickUp account timezone (for example "Australia/Sydney"), or
+/// DEFAULT_ZONE when there is none or it is not a known zone.
+pub fn zone(name: Option<&str>) -> chrono_tz::Tz {
+    name.and_then(|n| n.trim().parse().ok())
+        .unwrap_or(DEFAULT_ZONE)
+}
+
+/// The text that AIfred saves for search and the summary: the saved custom
+/// fields, one on each line after FIELD_MARK, then the description. The
+/// fields come first, because the summary input is cut at the end. The list
+/// download and the task_details tool both use it, so the saved text does
+/// not change between them.
+pub fn details_text(description: &str, fields: &[FieldValue]) -> String {
+    let lines: Vec<String> = fields
+        .iter()
+        .filter(|f| f.saved)
+        .map(|f| format!("{FIELD_MARK}{}: {}", f.name, f.value))
+        .collect();
+    if lines.is_empty() {
+        return description.to_string();
+    }
+    let mut text = lines.join("\n");
+    if !description.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(description);
+    }
+    text
+}
+
+/// The reverse of details_text: the (name, value) of each field line at the
+/// start of `text`, and the description after them.
+pub fn split_fields(text: &str) -> (Vec<(String, String)>, &str) {
+    let mut fields = Vec::new();
+    let mut rest = text;
+    while let Some(line_and_more) = rest.strip_prefix(FIELD_MARK) {
+        let (line, more) = line_and_more
+            .split_once('\n')
+            .unwrap_or((line_and_more, ""));
+        let Some((name, value)) = line.split_once(": ") else {
+            break;
+        };
+        fields.push((name.to_string(), value.to_string()));
+        rest = more;
+    }
+    if fields.is_empty() {
+        return (fields, text);
+    }
+    (fields, rest.trim_start_matches('\n'))
+}
+
+/// The custom fields of a task that have a value, in the order of ClickUp.
+/// Each value is on one line, with at most MAX_FIELD_CHARS characters, and
+/// all saved values together have at most MAX_FIELDS_CHARS characters. Two fields
+/// can have the same name. Dates are days in the timezone `zone`.
+pub fn field_values(custom_fields: &serde_json::Value, zone: chrono_tz::Tz) -> Vec<FieldValue> {
+    let Some(fields) = custom_fields.as_array() else {
+        return Vec::new();
+    };
+    let mut total = 0;
+    let mut out = Vec::new();
+    for f in fields {
+        let Some(name) = f["name"].as_str().map(|n| crate::text::one_line(n, 100)) else {
+            continue;
+        };
+        let Some(value) = field_value(f, zone) else {
+            continue;
+        };
+        let value = crate::text::one_line(&value, MAX_FIELD_CHARS);
+        if name.is_empty() || value.is_empty() {
+            continue;
+        }
+        let saved = !LINKED_TASK_TYPES.contains(&f["type"].as_str().unwrap_or_default());
+        // Only saved values count: a linked task's name must not change
+        // which other fields fit, because that changes the saved text.
+        if saved {
+            let chars = value.chars().count();
+            if total + chars > MAX_FIELDS_CHARS {
+                continue;
+            }
+            total += chars;
+        }
+        out.push(FieldValue { name, value, saved });
+    }
+    out
+}
+
+/// The value of one custom field as text, or None when it has no value.
+/// ClickUp keeps a dropdown or label value as the option's index or id, so
+/// the option name comes from the field's type_config.
+fn field_value(f: &serde_json::Value, zone: chrono_tz::Tz) -> Option<String> {
+    use serde_json::Value;
+    let v = &f["value"];
+    let kind = f["type"].as_str().unwrap_or_default();
+    if v.is_null() || CALCULATED_TYPES.contains(&kind) {
+        return None;
+    }
+    let options = f["type_config"]["options"].as_array();
+    // The option that `key` points to. A number is an orderindex. A text is
+    // an id; only when no id matches is it an orderindex sent as text.
+    let option = |key: &Value| -> Option<&Value> {
+        let options = options?;
+        let by_index = || {
+            let i = as_int(key)?;
+            options.iter().find(|o| as_int(&o["orderindex"]) == Some(i))
+        };
+        if key.is_string() {
+            options.iter().find(|o| o["id"] == *key).or_else(by_index)
+        } else {
+            by_index()
+        }
+    };
+    let option_name = |o: &Value| -> Option<String> {
+        o["name"]
+            .as_str()
+            .or_else(|| o["label"].as_str())
+            .map(str::to_string)
+    };
+    // Names of a list of objects, like users or tasks.
+    let names = |a: &Vec<Value>, keys: &[&str]| -> String {
+        a.iter()
+            .filter_map(|x| keys.iter().find_map(|k| x[*k].as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match kind {
+        "drop_down" => option(v).and_then(option_name),
+        "labels" => Some(
+            v.as_array()?
+                .iter()
+                .filter_map(|k| option(k).and_then(option_name))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        // An unchecked box has no value, like other empty fields.
+        "checkbox" => (v == true || v == "true").then(|| "yes".to_string()),
+        // ClickUp keeps a date without a time as 4 am in the account's
+        // timezone, so the day is in that zone.
+        "date" => {
+            let ms = as_int(v)?;
+            chrono::DateTime::from_timestamp_millis(ms)
+                .map(|d| d.with_timezone(&zone).format("%Y-%m-%d").to_string())
+        }
+        "users" | "people" => Some(names(v.as_array()?, &["username", "email"])),
+        "tasks" | "list_relationship" => Some(names(v.as_array()?, &["name", "id"])),
+        "attachment" => Some(names(v.as_array()?, &["title", "url"])),
+        "location" => v["formatted_address"].as_str().map(str::to_string),
+        "progress" | "manual_progress" => {
+            progress(v, &f["type_config"]).map(|p| format!("{p:.0}%"))
+        }
+        _ => match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(if *b { "yes" } else { "no" }.to_string()),
+            _ => None,
+        },
+    }
+}
+
+/// The percent of a manual progress field. ClickUp keeps the current value
+/// between the start and end of the field (type_config), so the percent
+/// comes from those three when they are there.
+fn progress(v: &serde_json::Value, config: &serde_json::Value) -> Option<f64> {
+    let num = |x: &serde_json::Value| x.as_f64().or_else(|| x.as_str()?.trim().parse().ok());
+    if let (Some(current), Some(start), Some(end)) = (
+        num(&v["current"]),
+        num(&config["start"]),
+        num(&config["end"]),
+    ) && end != start
+    {
+        return Some((current - start) / (end - start) * 100.0);
+    }
+    num(&v["percent_completed"])
+}
+
+/// A number that ClickUp can send as a number or as text.
+fn as_int(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())
 }
 
 #[derive(Deserialize)]
@@ -327,6 +550,9 @@ struct RawUserInner {
     id: u64,
     #[serde(default)]
     username: Option<String>,
+    /// The account timezone, for example "Australia/Sydney".
+    #[serde(default)]
+    timezone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -416,9 +642,17 @@ impl Client {
         Ok((u.user.id, u.user.username.unwrap_or_default()))
     }
 
+    /// The timezone of the user's ClickUp account, for the dates of custom fields.
+    pub async fn zone(&self) -> anyhow::Result<chrono_tz::Tz> {
+        let u: RawUser = self.get_json("/user").await?;
+        Ok(zone(u.user.timezone.as_deref()))
+    }
+
     /// The open tasks assigned to the user, in all workspaces.
     pub async fn my_tasks(&self) -> anyhow::Result<MyTasks> {
-        let (me, _) = self.me().await?;
+        let u: RawUser = self.get_json("/user").await?;
+        let me = u.user.id;
+        let zone = zone(u.user.timezone.as_deref());
         let teams: RawTeams = self.get_json("/team").await?;
         let mut all = Vec::new();
         let mut cut = Vec::new();
@@ -434,7 +668,7 @@ impl Client {
                     ("order_by", "updated".to_string()),
                 ];
                 let body = self.get(&format!("/team/{}/task", team.id), &query).await?;
-                let (items, last) = parse_tasks(&body, &team.name)?;
+                let (items, last) = parse_tasks(&body, &team.name, zone)?;
                 all.extend(items);
                 if last {
                     done = true;
@@ -551,7 +785,7 @@ pub(crate) mod tests {
 
     #[test]
     fn parse_tasks_reads_a_page_and_skips_done_and_closed_tasks() {
-        let (items, last) = parse_tasks(PAGE.as_bytes(), "Rymera").unwrap();
+        let (items, last) = parse_tasks(PAGE.as_bytes(), "Rymera", DEFAULT_ZONE).unwrap();
         assert!(!last, "ClickUp said there are more pages");
         assert_eq!(
             items.len(),
@@ -572,9 +806,9 @@ pub(crate) mod tests {
 
     #[test]
     fn a_short_page_without_last_page_is_the_last() {
-        let (_, last) = parse_tasks(br#"{"tasks":[]}"#, "W").unwrap();
+        let (_, last) = parse_tasks(br#"{"tasks":[]}"#, "W", DEFAULT_ZONE).unwrap();
         assert!(last);
-        assert!(parse_tasks(b"not json", "W").is_err());
+        assert!(parse_tasks(b"not json", "W", DEFAULT_ZONE).is_err());
     }
 
     #[test]
@@ -593,6 +827,133 @@ pub(crate) mod tests {
         for bad in ["", "../user", "a/b", "a?b=1", "a b"] {
             assert!(check_task_id(bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn custom_fields_become_readable_text() {
+        let fields = serde_json::json!([
+            {"name": "Project", "type": "drop_down", "value": 1,
+             "type_config": {"options": [{"id": "a", "name": "Wholesale", "orderindex": 0}, {"id": "b", "name": "Coupons", "orderindex": "1"}]}},
+            {"name": "Area", "type": "labels", "value": ["x", "y"],
+             "type_config": {"options": [{"id": "x", "label": "Frontend"}, {"id": "y", "label": "API"}]}},
+            // 2026-01-01 17:00 UTC: 4 am on 2 January in Sydney (UTC+11).
+            {"name": "Launch", "type": "date", "value": "1767286800000"},
+            {"name": "Owner", "type": "users", "value": [{"username": "sam"}, {"username": "kim"}]},
+            {"name": "Parent", "type": "tasks", "value": [{"id": "86x", "name": "Big launch"}]},
+            {"name": "Signed", "type": "checkbox", "value": true},
+            {"name": "Doc", "type": "url", "value": "https://example.com/d"},
+            {"name": "Budget", "type": "currency", "value": 1500},
+            {"name": "Notes", "type": "text", "value": format!("line one\nline two {}", "y".repeat(MAX_FIELD_CHARS))},
+            {"name": "Total", "type": "formula", "value": null},
+            {"name": "Score", "type": "formula", "value": 7},
+            {"name": "Done", "type": "automatic_progress", "value": {"percent_completed": 50}},
+            {"name": "Steps", "type": "manual_progress", "value": {"current": "2"},
+             "type_config": {"start": 0, "end": 3}},
+            {"name": "Ready", "type": "manual_progress", "value": {"percent_completed": 33.333333}},
+            {"name": "Blank", "type": "short_text", "value": "  "},
+            {"name": "Paid", "type": "checkbox", "value": "false"},
+            {"name": "Client", "type": "drop_down", "value": "1",
+             "type_config": {"options": [{"id": "1", "name": "Acme", "orderindex": 0}, {"id": "z", "name": "Other", "orderindex": 1}]}},
+            {"name": "Client", "type": "short_text", "value": "Globex"}
+        ]);
+        let sydney = zone(Some("Australia/Sydney"));
+        let v = field_values(&fields, sydney);
+        let get = |n: &str| v.iter().find(|f| f.name == n).map(|f| f.value.as_str());
+        assert_eq!(get("Project"), Some("Coupons"));
+        assert_eq!(get("Area"), Some("Frontend, API"));
+        assert_eq!(
+            get("Launch"),
+            Some("2026-01-02"),
+            "the day in the account's timezone"
+        );
+        assert_eq!(
+            field_values(&fields, DEFAULT_ZONE)
+                .iter()
+                .find(|f| f.name == "Launch")
+                .map(|f| f.value.as_str()),
+            Some("2026-01-01"),
+            "without an account timezone the day is in UTC, not in the computer's zone"
+        );
+        assert_eq!(get("Owner"), Some("sam, kim"));
+        assert_eq!(get("Parent"), Some("Big launch"));
+        assert_eq!(get("Signed"), Some("yes"));
+        assert_eq!(get("Doc"), Some("https://example.com/d"));
+        assert_eq!(get("Budget"), Some("1500"));
+        let notes = get("Notes").unwrap();
+        assert!(
+            notes.starts_with("line one line two "),
+            "a value is on one line"
+        );
+        assert!(notes.ends_with('…') && notes.chars().count() == MAX_FIELD_CHARS);
+        assert_eq!(get("Total"), None, "a field without a value is left out");
+        assert_eq!(get("Score"), None, "a calculated field is left out");
+        assert_eq!(get("Done"), None, "a calculated field is left out");
+        assert_eq!(get("Steps"), Some("67%"), "2 of 0 to 3, rounded");
+        assert_eq!(get("Ready"), Some("33%"), "the percent is rounded");
+        assert_eq!(get("Blank"), None);
+        assert_eq!(get("Paid"), None, "an unchecked box is left out");
+        let clients: Vec<&str> = v
+            .iter()
+            .filter(|f| f.name == "Client")
+            .map(|f| f.value.as_str())
+            .collect();
+        assert_eq!(
+            clients,
+            ["Acme", "Globex"],
+            "a text value matches the option id first, and two fields can have the same name"
+        );
+
+        let text = details_text("Fix the cart", &v);
+        assert!(text.starts_with(&format!("{FIELD_MARK}Project: Coupons\n")));
+        assert!(
+            text.ends_with("\n\nFix the cart"),
+            "the description comes after the fields"
+        );
+        assert!(
+            !text.contains("Big launch"),
+            "the name of a linked task can change, so it is not saved"
+        );
+        assert!(text.contains("Owner: sam, kim"));
+        assert_eq!(details_text("Only text", &[]), "Only text");
+
+        let (back, description) = split_fields(&text);
+        assert_eq!(back[0], ("Project".to_string(), "Coupons".to_string()));
+        assert_eq!(back.len(), v.iter().filter(|f| f.saved).count());
+        assert_eq!(description, "Fix the cart");
+        assert_eq!(split_fields("Plain text"), (vec![], "Plain text"));
+        let only = details_text("", &v[..1]);
+        assert_eq!(
+            split_fields(&only),
+            (vec![("Project".into(), "Coupons".into())], "")
+        );
+    }
+
+    #[test]
+    fn custom_fields_keep_short_fields_after_the_total_limit() {
+        // 5 values of 280 characters fit in 1500, the sixth does not.
+        let long = |i: usize| serde_json::json!({"name": format!("F{i}"), "type": "text", "value": "x".repeat(280)});
+        let mut fields: Vec<_> = (0..8).map(long).collect();
+        // A linked task name does not count, so it does not push out a field.
+        fields.insert(
+            0,
+            serde_json::json!({"name": "Parent", "type": "tasks",
+            "value": [{"name": "y".repeat(MAX_FIELD_CHARS)}]}),
+        );
+        fields.push(serde_json::json!({"name": "Client", "type": "short_text", "value": "Acme"}));
+        let v = field_values(&serde_json::Value::Array(fields), DEFAULT_ZONE);
+        assert_eq!(v[1].name, "F0", "the first fields stay");
+        let names: Vec<&str> = v.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Parent", "F0", "F1", "F2", "F3", "F4", "Client"],
+            "a long value that does not fit is left out, and a short one after it stays"
+        );
+        let saved: usize = v
+            .iter()
+            .filter(|f| f.saved)
+            .map(|f| f.value.chars().count())
+            .sum();
+        assert!(saved <= MAX_FIELDS_CHARS);
     }
 
     #[test]

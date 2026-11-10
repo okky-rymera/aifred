@@ -181,7 +181,7 @@ impl ClickupTools {
     }
 
     #[tool(
-        description = "Get one ClickUp task: name, status, description (shortened), assignees, dates, and the last comments."
+        description = "Get one ClickUp task: name, status, description (shortened), custom fields that have a value (for example the project or the client), assignees, dates, and the last comments."
     )]
     async fn task_details(
         &self,
@@ -189,24 +189,36 @@ impl ClickupTools {
     ) -> Result<CallToolResult, ErrorData> {
         clickup::check_task_id(&a.id)
             .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
-        let (task, comments) = self
-            .client()?
-            .task_with_comments(&a.id)
-            .await
-            .map_err(fail)?;
-        let short = shorten(&task, &comments);
-        // Save the full description, so search_my_tasks can find words in it.
-        // It is the same text as the list download saves (description_text),
-        // so the summary of the task does not have to be made again.
-        // The id from ClickUp, because `a.id` can be the team's custom id.
-        let text =
+        let client = self.client()?;
+        let (task, comments) = client.task_with_comments(&a.id).await.map_err(fail)?;
+        // The dates of custom fields are days in the account's timezone.
+        let zone = match client.zone().await {
+            Ok(z) => Some(z),
+            Err(e) => {
+                eprintln!("aifred-clickup-mcp: cannot read the ClickUp timezone: {e:#}");
+                None
+            }
+        };
+        let description =
             clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
-        if let Some(id) = task["id"].as_str()
-            && let Err(e) = ClickupStore::new(&self.dir).save_details(id, &text)
+        let fields = clickup::field_values(
+            &task["custom_fields"],
+            zone.unwrap_or(clickup::DEFAULT_ZONE),
+        );
+        // Save the full description, so search_my_tasks can find words in it.
+        // It is the same text as the list download saves (details_text: the
+        // custom fields, then the description), so the summary of the task
+        // does not have to be made again. Without the account timezone a date
+        // can be one day off, and that changes the saved text, so it is not saved.
+        // The id from ClickUp, because `a.id` can be the team's custom id.
+        if zone.is_some()
+            && let Some(id) = task["id"].as_str()
+            && let Err(e) = ClickupStore::new(&self.dir)
+                .save_details(id, &clickup::details_text(&description, &fields))
         {
             eprintln!("aifred-clickup-mcp: cannot save the description: {e:#}");
         }
-        ok_json(&short)
+        ok_json(&shorten(&task, &comments, &description, &fields))
     }
 
     #[tool(
@@ -272,15 +284,19 @@ impl ServerHandler for ClickupTools {
 }
 
 /// Keeps the tool output small: only the useful task fields, a shortened
-/// description, and the last comments as plain text.
-fn shorten(task: &Value, comments: &Value) -> Value {
+/// description, the custom fields that have a value, and the last comments
+/// as plain text. `description` and `fields` come from task_details, so they are made once.
+fn shorten(
+    task: &Value,
+    comments: &Value,
+    description: &str,
+    fields: &[clickup::FieldValue],
+) -> Value {
     let names = |v: &Value| -> Vec<Value> {
         v.as_array()
             .map(|a| a.iter().map(|u| u["username"].clone()).collect())
             .unwrap_or_default()
     };
-    let text =
-        clickup::description_text(task["text_content"].as_str(), task["description"].as_str());
     let mut last: Vec<Value> = comments["comments"]
         .as_array()
         .map(|a| {
@@ -291,6 +307,11 @@ fn shorten(task: &Value, comments: &Value) -> Value {
         .unwrap_or_default();
     // ClickUp sends the newest comment first.
     last.truncate(MAX_COMMENTS);
+    // A list, not a map: two fields can have the same name.
+    let fields: Vec<Value> = fields
+        .iter()
+        .map(|f| json!({"name": f.name, "value": f.value}))
+        .collect();
     json!({
         "id": task["id"],
         "custom_id": task["custom_id"],
@@ -303,7 +324,8 @@ fn shorten(task: &Value, comments: &Value) -> Value {
         "date_updated": task["date_updated"],
         "assignees": names(&task["assignees"]),
         "tags": task["tags"].as_array().map(|t| t.iter().map(|x| x["name"].clone()).collect::<Vec<_>>()),
-        "description": cut(&text, MAX_TEXT_CHARS),
+        "description": cut(description, MAX_TEXT_CHARS),
+        "custom_fields": fields,
         "last_comments": last,
     })
 }
@@ -329,10 +351,17 @@ mod tests {
             "id": "86abc", "custom_id": "DEV-42", "name": "Write notes", "url": "u",
             "status": {"status": "in progress"}, "list": {"name": "Sprint"},
             "priority": {"priority": "high"}, "assignees": [{"username": "okky"}],
-            "text_content": "x".repeat(MAX_TEXT_CHARS + 10), "custom_fields": [{"big": "noise"}]
+            "text_content": "x".repeat(MAX_TEXT_CHARS + 10),
+            "custom_fields": [
+                {"name": "Project", "type": "drop_down", "value": 1,
+                 "type_config": {"options": [{"id": "a", "name": "Wholesale", "orderindex": 0}, {"id": "b", "name": "Coupons", "orderindex": 1}]}},
+                {"name": "Score", "type": "formula", "value": null}
+            ]
         });
         let comments = json!({"comments": (0..8).map(|i| json!({"comment_text": format!("c{i}"), "user": {"username": "sam"}, "date": "1"})).collect::<Vec<_>>()});
-        let s = shorten(&task, &comments);
+        let description = clickup::description_text(task["text_content"].as_str(), None);
+        let fields = clickup::field_values(&task["custom_fields"], clickup::DEFAULT_ZONE);
+        let s = shorten(&task, &comments, &description, &fields);
         assert_eq!(s["status"], "in progress");
         assert_eq!(s["assignees"], json!(["okky"]));
         assert!(
@@ -346,7 +375,11 @@ mod tests {
             s["last_comments"][0]["text"], "c0",
             "the newest comment stays"
         );
-        assert!(s.get("custom_fields").is_none());
+        assert_eq!(
+            s["custom_fields"],
+            json!([{"name": "Project", "value": "Coupons"}]),
+            "the dropdown shows the option name, and a field without a value is left out"
+        );
     }
 
     #[test]
