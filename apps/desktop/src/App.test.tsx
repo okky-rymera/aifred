@@ -3062,14 +3062,50 @@ describe("the conversation", () => {
         .getAllByRole("button", { name: "Send" })
         .every((b) => (b as HTMLButtonElement).disabled),
     ).toBe(true);
-    hold.resolve(answer("Two things.", { memory: ["Sam sends the invoice"] }));
+    hold.resolve(
+      answer("Two things.", {
+        memory: ["Sam sends the invoice"],
+        summaries: ["2026-11-10: - Booked the flights.", "2026-11-09: - Bali."],
+      }),
+    );
     expect(
       await within(panel()!).findByText("Two things."),
     ).toBeInTheDocument();
     await userEvent.click(
-      within(panel()!).getByText("Used 1 fact from memory"),
+      within(panel()!).getByText("Used 1 fact and 2 summaries from memory"),
     );
     expect(within(panel()!).getByText("Sam sends the invoice")).toBeVisible();
+    expect(within(panel()!).getByText("2026-11-09: - Bali.")).toBeVisible();
+  });
+
+  it("a new day keeps only the question and its answer in the panel", async () => {
+    await startApp({
+      history: [
+        { ts: 1, role: "user", text: "Yesterday's question", backend: "fake", files: [] },
+        { ts: 1, role: "assistant", text: "Yesterday's answer", backend: "fake", files: [] },
+      ],
+      onAsk: (p) => answer(`Fresh: ${p}`, { fresh: true }),
+    });
+    await userEvent.type(homeBox(), "good morning{Enter}");
+    expect(await within(panel()!).findByText("Fresh: good morning")).toBeInTheDocument();
+    expect(within(panel()!).getByText("good morning")).toBeInTheDocument();
+    expect(within(panel()!).queryByText("Yesterday's question")).toBeNull();
+    expect(within(panel()!).queryByText("Yesterday's answer")).toBeNull();
+  });
+
+  it("a new day while the app runs empties the chat", async () => {
+    await startApp({
+      history: [
+        { ts: 1, role: "user", text: "Yesterday's question", backend: "fake", files: [] },
+        { ts: 1, role: "assistant", text: "Yesterday's answer", backend: "fake", files: [] },
+      ],
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Conversation" }));
+    expect(await within(panel()!).findByText("Yesterday's answer")).toBeInTheDocument();
+    await emit("new-day");
+    await waitFor(() =>
+      expect(within(panel()!).queryByText("Yesterday's answer")).toBeNull(),
+    );
   });
 
   it("shows an error in the panel when the question fails", async () => {

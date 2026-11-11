@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 38;
+const VERSION: i64 = 39;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -1019,6 +1019,42 @@ CREATE TABLE clickup_comment (
 );
 ";
 
+/// Summaries of the chats of one day, and of one quarter (periods.rs).
+/// `period` is "YYYY-MM-DD" for a day and "YYYY-Qn" for a quarter. A day
+/// summary covers the main chat messages up to `turn_upto` and the side
+/// chat messages up to `side_upto`. Word and meaning search, as for the
+/// conversation summaries.
+const SCHEMA_39: &str = "
+CREATE TABLE period_summary (
+  id        INTEGER PRIMARY KEY,
+  period    TEXT NOT NULL UNIQUE,          -- 'YYYY-MM-DD' or 'YYYY-Qn'
+  summary   TEXT NOT NULL,
+  turn_upto INTEGER NOT NULL DEFAULT 0,    -- the last main chat message in the summary (a day)
+  side_upto INTEGER NOT NULL DEFAULT 0,    -- the last side chat message in the summary (a day)
+  made      INTEGER NOT NULL               -- when the summary was written, in Unix seconds
+);
+
+CREATE VIRTUAL TABLE period_fts USING fts5(summary, content='period_summary', content_rowid='id', tokenize='porter unicode61 remove_diacritics 2');
+CREATE TRIGGER period_fts_insert AFTER INSERT ON period_summary BEGIN
+  INSERT INTO period_fts (rowid, summary) VALUES (new.id, new.summary);
+END;
+CREATE TRIGGER period_fts_delete AFTER DELETE ON period_summary BEGIN
+  INSERT INTO period_fts (period_fts, rowid, summary) VALUES ('delete', old.id, old.summary);
+END;
+CREATE TRIGGER period_fts_update AFTER UPDATE OF summary ON period_summary BEGIN
+  INSERT INTO period_fts (period_fts, rowid, summary) VALUES ('delete', old.id, old.summary);
+  INSERT INTO period_fts (rowid, summary) VALUES (new.id, new.summary);
+END;
+
+CREATE VIRTUAL TABLE period_vec USING vec0(embedding float[384] distance_metric=cosine);
+CREATE TRIGGER period_vec_delete AFTER DELETE ON period_summary BEGIN
+  DELETE FROM period_vec WHERE rowid = old.id;
+END;
+CREATE TRIGGER period_vec_update AFTER UPDATE OF summary ON period_summary WHEN old.summary IS NOT new.summary BEGIN
+  DELETE FROM period_vec WHERE rowid = old.id;
+END;
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -1204,6 +1240,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 38 {
         tx.execute_batch(SCHEMA_38)?;
+    }
+    if version < 39 {
+        tx.execute_batch(SCHEMA_39)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

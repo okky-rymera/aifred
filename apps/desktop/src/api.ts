@@ -39,10 +39,14 @@ export type Answer = {
   cost_usd: number | null;
   /** Facts from memory that the app added to the question, because they match it. */
   memory: string[];
+  /** Summaries of earlier days and quarters that the app added, each as "<period>: <summary>". */
+  summaries: string[];
   /** The model you picked for this message. null: the default model. */
   model: string | null;
   /** The short line under the answer: time, model, lookups, and cost. */
   info: string;
+  /** True when this message started a fresh conversation, because the day changed. */
+  fresh: boolean;
 };
 
 /** The models that the chat box offers. null is the default model. */
@@ -1230,3 +1234,7 @@ export const onTasksChanged = (f: () => void) =>
 export const ITEMS_SORTED = "items-sorted";
 /** Calls `f` each time AIfred's sort moved items. Returns the stop function. */
 export const onItemsSorted = (f: () => void) => listen(ITEMS_SORTED, () => f());
+/** The event that AIfred sends when the day changed while the app runs: the chat starts fresh. */
+export const NEW_DAY = "new-day";
+/** Calls `f` each time a new day starts while the app runs. Returns the stop function. */
+export const onNewDay = (f: () => void) => listen(NEW_DAY, () => f());

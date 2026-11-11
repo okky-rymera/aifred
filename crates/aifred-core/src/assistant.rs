@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::{AskRequest, AskStats, Backend, Event, OnEvent, ToolServer};
 use crate::history::{History, Turn};
 use crate::memory::MemoryStore;
+use crate::periods;
 use crate::tasks::TaskStore;
 use crate::uploads::{self, FileRef};
 
@@ -126,7 +127,7 @@ You are aifred, the user's personal assistant.
 - Search memory before you say that you do not know something about the user.
 - Add a fact to memory only when the user tells you something lasting about themselves or their work. Do not add a fact that is already in memory.
 - Give each new fact 1 to 3 tags: short topic words, for example \"testing\", \"people\", or \"workflow\". Use the tags that exist (memory_tags) when one fits. Make a new tag only when no tag fits.
-- Search old chats when the user refers to an earlier conversation.
+- The chat starts fresh each day. Each earlier day has a summary of its chats, and each past quarter has one. Search old chats when the user refers to an earlier conversation: search_history finds day summaries, quarter summaries, and single messages. day_summaries gives the summaries of a range of days, for example last week. day_messages gives all messages of one day, when its summary is not enough.
 - When the user asks what to do, what is open, or for a plan, call overview first. It has all open items with a short summary each. Open the details of an item only when its summary is not enough.
 - When the user asks about a topic, use search_tasks, search_my_items, or search_my_tasks.
 - When you name an item from the overview, link it to its key, for example [the PayPal bug](item:github:acme/shop#7). The app opens the item from this link. Give the web link too when the user may want it.
@@ -162,8 +163,9 @@ const ADDED_FACTS: u32 = 8;
 /// A long conversation gets a new summary each time this many tokens of
 /// messages (4 characters count as 1 token) are not in its summary yet.
 const SUMMARY_EVERY_TOKENS: u64 = 20_000;
-/// An ended conversation shorter than this gets no summary: a search finds
-/// its few messages directly, and the summary would cost an AI call.
+/// A past day with less than this many bytes of messages gets no day
+/// summary: a search finds its few messages directly, and the summary would
+/// cost an AI call.
 const SUMMARY_MIN_CHARS: usize = 2000;
 /// Each message goes into the summary call with at most this many characters.
 const SUMMARY_TURN_CHARS: usize = 4000;
@@ -171,15 +173,39 @@ const SUMMARY_TURN_CHARS: usize = 4000;
 /// 25,000 tokens). A larger backlog, for example an imported history, gets
 /// its summary in more than one call.
 const SUMMARY_BATCH_CHARS: usize = 100_000;
-/// summarize_old writes at most this many old conversations in one run.
-/// Each one is at least one AI call, so a large import is done over a few starts.
-const OLD_SUMMARIES_PER_RUN: usize = 5;
+/// summarize_days writes at most this many day summaries in one run at
+/// start-up. Each one is at least one AI call, so a long backlog (for
+/// example after the update that added day summaries) is done over a few starts.
+pub const DAY_SUMMARIES_PER_RUN: usize = 5;
+/// Day and quarter summaries that match the message go into it (periods.rs),
+/// at most this many for each message...
+const ADDED_SUMMARIES: u32 = 2;
+/// ...and the search stops when this many are in the Claude session already.
+/// A summary stays in the session, so it goes in only once. The newest day
+/// summary goes in even then, so a session can hold a few more than this.
+const PUSHED_SUMMARIES_MAX: usize = 8;
 
 const SUMMARY_RULES: &str = "\
 You write a summary of a conversation between a user and AIfred, the user's personal assistant.
 - Keep decisions, facts about the user, tasks, names, dates, links, and open questions.
 - If there is an earlier summary, keep its points that still matter, and add the new points.
 - Write at most 250 words, as short bullet points in plain English.
+- Do not add facts that are not in the text. Write only the summary.";
+
+/// The instructions for the summary of one day (periods.rs).
+const DAY_RULES: &str = "\
+You write a summary of the chats of one day between a user and AIfred, the user's personal assistant. The day has the main chat, and side chats about the plan of a day, an item, or a mission.
+- Keep decisions, facts about the user, tasks, names, dates, links, and open questions. Say what the user worked on and what was decided.
+- If there is an earlier summary of this day, keep its points that still matter, and add the new points.
+- Write at most 250 words, as short bullet points in plain English.
+- Do not add facts that are not in the text. Write only the summary.";
+
+/// The instructions for the summary of one quarter, from its day summaries (periods.rs).
+const QUARTER_RULES: &str = "\
+You write a summary of one quarter of a year, from the day summaries of the chats between a user and AIfred, the user's personal assistant.
+- Keep what matters months later: decisions, projects and how they ended, facts about the user, people, dates, and open questions. Leave out the small steps of each day.
+- If there is an earlier summary of this quarter, keep its points that still matter, and add the new points.
+- Write at most 400 words, as short bullet points in plain English, with the dates when they matter.
 - Do not add facts that are not in the text. Write only the summary.";
 
 /// The instructions for a job run (jobs.rs), after the base rules.
@@ -210,11 +236,17 @@ pub struct Answer {
     pub cost_usd: Option<f64>,
     /// The facts that the app added to this message, because they match it.
     pub memory: Vec<String>,
+    /// The day and quarter summaries that the app added to this message
+    /// (periods.rs), each as "<period>: <summary>".
+    pub summaries: Vec<String>,
     /// The model that the user picked for this message. None: the default.
     pub model: Option<String>,
     /// The short line under the answer (answer_info). The window shows it
     /// as it is, so a new answer and a saved one look the same.
     pub info: String,
+    /// True when this message started a fresh conversation, because the
+    /// day changed. The window then shows only this message and its answer.
+    pub fresh: bool,
 }
 
 impl Answer {
@@ -232,6 +264,9 @@ struct SessionState {
     id: Option<String>,
     model_ms: u64,
     cost_usd: f64,
+    /// The day and quarter summaries that went into this session (periods.rs).
+    #[serde(default)]
+    pushed: Vec<String>,
 }
 
 pub struct Assistant<B: Backend> {
@@ -241,6 +276,8 @@ pub struct Assistant<B: Backend> {
     pub program: PathBuf,
     /// One summary at a time. Two at the same time would cost two AI calls.
     summary: tokio::sync::Mutex<()>,
+    /// One run of the day summaries at a time, for the same reason.
+    day_summaries: tokio::sync::Mutex<()>,
     /// One run of the item summaries at a time, for the same reason. It holds the items with no usable summary
     /// from the AI in this run of the app, so they do not cost more calls.
     item_summaries: tokio::sync::Mutex<std::collections::HashSet<crate::summaries::Key>>,
@@ -252,6 +289,20 @@ pub struct Assistant<B: Backend> {
     /// One look-up of new items at a time (research()). Two at the same
     /// time would look at the same items and cost the AI calls two times.
     research_run: tokio::sync::Mutex<()>,
+}
+
+/// A new day: ends the conversation that started on an earlier day and
+/// drops its Claude session, so the chat starts fresh with a new session.
+/// The old day gets its summary later (summarize_days). Returns true when
+/// a conversation ended.
+fn roll_day(dir: &Path, session_path: &Path) -> anyhow::Result<bool> {
+    let fresh = History::new(dir)
+        .archive_if_started_before(&crate::plan::today())?
+        .is_some();
+    if fresh {
+        let _ = std::fs::remove_file(session_path);
+    }
+    Ok(fresh)
 }
 
 /// Rules and memory only. It must stay the same between messages:
@@ -307,6 +358,7 @@ impl<B: Backend> Assistant<B> {
             backend,
             program,
             summary: tokio::sync::Mutex::new(()),
+            day_summaries: tokio::sync::Mutex::new(()),
             item_summaries: tokio::sync::Mutex::new(Default::default()),
             item_sort: tokio::sync::Mutex::new(()),
             sort_again: std::sync::atomic::AtomicBool::new(false),
@@ -316,6 +368,13 @@ impl<B: Backend> Assistant<B> {
 
     fn history(&self) -> History {
         History::new(&self.dir)
+    }
+
+    /// Ends the conversation of an earlier day, so the chat starts fresh
+    /// today. The app calls it at start-up; ask does the same before each
+    /// message. Returns true when a conversation ended.
+    pub fn start_day(&self) -> anyhow::Result<bool> {
+        roll_day(&self.dir, &self.session_path())
     }
 
     /// Runs database and file work on a thread for blocking work. Each
@@ -355,44 +414,126 @@ impl<B: Backend> Assistant<B> {
     }
 
     /// Starts a new conversation. Returns the id of the conversation that
-    /// ended. Give it to summarize_ended().
+    /// ended. The old messages get their day summary later (summarize_days).
     pub fn new_conversation(&self) -> anyhow::Result<Option<i64>> {
         let ended = self.history().archive()?;
         let _ = std::fs::remove_file(self.session_path());
         Ok(ended)
     }
 
-    /// Writes the last summary of a conversation that ended. Short
-    /// conversations get none. Returns true when it made a summary.
-    pub async fn summarize_ended(&self, conversation: i64) -> anyhow::Result<bool> {
-        let _one = self.summary.lock().await;
-        let u = self
-            .off_thread(move |d| History::new(d).unsummarized(conversation))
-            .await?;
-        let chars: usize = u.turns.iter().map(|t| t.text.len()).sum();
-        if u.turns.is_empty() || (u.summary.is_none() && chars < SUMMARY_MIN_CHARS) {
-            return Ok(false);
-        }
-        while self.summarize(conversation).await? {}
-        Ok(true)
-    }
-
-    /// Writes the missing summaries of ended conversations, newest first, at
-    /// most OLD_SUMMARIES_PER_RUN. Returns how many it made. It stops at the
-    /// first error, so a broken login does not spend more calls.
-    pub async fn summarize_old(&self) -> anyhow::Result<usize> {
-        let ids = self
-            .off_thread(|d| {
-                History::new(d).ended_without_full_summary(SUMMARY_MIN_CHARS, OLD_SUMMARIES_PER_RUN)
+    /// Writes the missing day summaries (periods.rs), newest day first, at
+    /// most `limit` days, and then one quarter summary when a quarter is
+    /// ready. Returns how many it made. It stops at the first error, so a
+    /// broken login does not spend more calls. It skips the work when
+    /// another run is busy.
+    pub async fn summarize_days(&self, limit: usize) -> anyhow::Result<usize> {
+        let Ok(_one) = self.day_summaries.try_lock() else {
+            return Ok(0);
+        };
+        let today = crate::plan::today();
+        let days = self
+            .off_thread({
+                let today = today.clone();
+                move |d| periods::days_to_summarize(d, &today, SUMMARY_MIN_CHARS, None, limit)
             })
             .await?;
         let mut made = 0;
-        for id in ids {
-            if self.summarize_ended(id).await? {
-                made += 1;
-            }
+        for day in days {
+            while self.summarize_day(&day).await? {}
+            made += 1;
+        }
+        let quarter = self
+            .off_thread(move |d| periods::quarter_to_summarize(d, &today, SUMMARY_MIN_CHARS))
+            .await?;
+        if let Some(q) = quarter {
+            self.summarize_quarter(&q).await?;
+            made += 1;
         }
         Ok(made)
+    }
+
+    /// One AI call: the old summary of the day and its oldest new messages,
+    /// up to SUMMARY_BATCH_CHARS, become the new summary. Returns true when
+    /// more messages are left after this call.
+    async fn summarize_day(&self, day: &str) -> anyhow::Result<bool> {
+        let u = self
+            .off_thread({
+                let day = day.to_string();
+                move |d| periods::unsummarized_day(d, &day)
+            })
+            .await?;
+        let mut prompt = format!("Day: {day}\n");
+        if let Some(s) = &u.summary {
+            prompt.push_str(&format!("\nEarlier summary of this day:\n{s}\n"));
+        }
+        prompt.push_str("\nMessages:\n");
+        let mut used = 0;
+        let mut taken: usize = 0;
+        let (mut turn_upto, mut side_upto) = (u.turn_upto, u.side_upto);
+        for m in &u.messages {
+            let text: String = m.text.chars().take(SUMMARY_TURN_CHARS).collect();
+            // Always take one message, so each call makes progress.
+            if taken > 0 && used + text.len() > SUMMARY_BATCH_CHARS {
+                break;
+            }
+            used += text.len();
+            taken += 1;
+            if m.chat == "main" {
+                turn_upto = turn_upto.max(m.id);
+            } else {
+                side_upto = side_upto.max(m.id);
+            }
+            prompt.push_str(&format!("\n{}\n{text}\n", m.label()));
+        }
+        if taken == 0 {
+            return Ok(false);
+        }
+        let summary = self.backend.complete(DAY_RULES, &prompt, None).await?;
+        anyhow::ensure!(!summary.is_empty(), "the summary is empty");
+        let more = taken < u.messages.len();
+        let day = day.to_string();
+        self.off_thread(move |d| periods::set_day_summary(d, &day, &summary, turn_upto, side_upto))
+            .await?;
+        Ok(more)
+    }
+
+    /// Writes the summary of a quarter from its day summaries. Each group of
+    /// day summaries up to SUMMARY_BATCH_CHARS is one AI call, and the next
+    /// call builds on the summary so far.
+    async fn summarize_quarter(&self, quarter: &str) -> anyhow::Result<()> {
+        let (first, last) = periods::quarter_days(quarter)?;
+        let days = self
+            .off_thread(move |d| periods::day_summaries(d, &first, &last))
+            .await?;
+        let mut so_far: Option<String> = None;
+        let mut from = 0;
+        while from < days.len() {
+            let mut prompt = format!("Quarter: {quarter}\n");
+            if let Some(s) = &so_far {
+                prompt.push_str(&format!("\nEarlier summary of this quarter:\n{s}\n"));
+            }
+            prompt.push_str("\nDay summaries:\n");
+            let mut used = 0;
+            let mut taken = 0;
+            for d in &days[from..] {
+                if taken > 0 && used + d.summary.len() > SUMMARY_BATCH_CHARS {
+                    break;
+                }
+                used += d.summary.len();
+                taken += 1;
+                prompt.push_str(&format!("\n[{}]\n{}\n", d.period, d.summary));
+            }
+            from += taken;
+            let summary = self.backend.complete(QUARTER_RULES, &prompt, None).await?;
+            anyhow::ensure!(!summary.is_empty(), "the summary is empty");
+            so_far = Some(summary);
+        }
+        let Some(summary) = so_far else {
+            return Ok(());
+        };
+        let quarter = quarter.to_string();
+        self.off_thread(move |d| periods::set_quarter_summary(d, &quarter, &summary))
+            .await
     }
 
     /// Writes a new summary of the current conversation when more than
@@ -621,15 +762,60 @@ impl<B: Backend> Assistant<B> {
         Ok(facts.into_iter().map(|f| f.text).collect())
     }
 
-    /// The message to the backend: the time, the matching facts, and the text
-    /// of the user. The facts go here and not into the instructions, so the
-    /// instructions stay the same between messages.
-    fn message(now: &str, facts: &[String], prompt: &str) -> String {
+    /// The day and quarter summaries for the message (periods.rs): the ones
+    /// that match it, at most ADDED_SUMMARIES, without the ones in `pushed`
+    /// (already in the session). The search stops when PUSHED_SUMMARIES_MAX
+    /// are in the session already. The newest day summary goes in as soon as
+    /// it exists, also then, so the chat goes on from the last day. It is
+    /// written after the first answer of the day (summarize_days), so it can
+    /// come with the second message.
+    async fn matching_summaries(
+        &self,
+        prompt: &str,
+        pushed: &[String],
+    ) -> anyhow::Result<Vec<periods::PeriodSummary>> {
+        let (prompt, pushed) = (prompt.to_string(), pushed.to_vec());
+        self.off_thread(move |dir| {
+            let mut out: Vec<periods::PeriodSummary> = Vec::new();
+            if let Some(last) = periods::newest_day(dir)?
+                && !pushed.contains(&last.period)
+            {
+                out.push(last);
+            }
+            if pushed.len() < PUSHED_SUMMARIES_MAX {
+                // The search can load the model (embed.rs), so it runs off the async thread.
+                for s in periods::search(dir, &prompt, Some(ADDED_SUMMARIES))? {
+                    if !pushed.contains(&s.period) && !out.iter().any(|o| o.period == s.period) {
+                        out.push(s);
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// The message to the backend: the time, the matching facts and day
+    /// summaries, and the text of the user. They go here and not into the
+    /// instructions, so the instructions stay the same between messages.
+    fn message(
+        now: &str,
+        facts: &[String],
+        summaries: &[periods::PeriodSummary],
+        prompt: &str,
+    ) -> String {
         let mut m = format!("[Now: {now}]\n");
         if !facts.is_empty() {
             m.push_str("[Facts from memory that can help with this message:\n");
             for f in facts {
                 m.push_str(&format!("- {f}\n"));
+            }
+            m.push_str("]\n");
+        }
+        if !summaries.is_empty() {
+            m.push_str("[Summaries of earlier chats that can help with this message:\n");
+            for s in summaries {
+                m.push_str(&format!("### {}\n{}\n", s.period, s.summary));
             }
             m.push_str("]\n");
         }
@@ -736,6 +922,8 @@ impl<B: Backend> Assistant<B> {
                         "memory_tags",
                         "facts_with_tag",
                         "search_history",
+                        "day_summaries",
+                        "day_messages",
                     ]
                 } else {
                     &[
@@ -746,6 +934,8 @@ impl<B: Backend> Assistant<B> {
                         "tag_memory",
                         "forget_memory",
                         "search_history",
+                        "day_summaries",
+                        "day_messages",
                     ]
                 },
             ),
@@ -855,8 +1045,8 @@ impl<B: Backend> Assistant<B> {
     ) -> anyhow::Result<Answer> {
         let session_path = self.session_path();
         let ids = opts.files.clone();
-        let (model, saved, small, summary, unsummarized, system, files, earlier_files) = self
-            .off_thread({
+        let (model, saved, small, summary, unsummarized, system, files, earlier_files, fresh) =
+            self.off_thread({
                 let session_path = session_path.clone();
                 move |dir| {
                     // The model that the user picked last in the chat box.
@@ -864,13 +1054,14 @@ impl<B: Backend> Assistant<B> {
                         Some(m) => m,
                         None => crate::settings::chat_model(dir)?,
                     };
+                    let history = History::new(dir);
+                    let fresh = roll_day(dir, &session_path)?;
                     let saved: SessionState = std::fs::read(&session_path)
                         .ok()
                         .and_then(|b| serde_json::from_slice(&b).ok())
                         .unwrap_or_default();
                     let small = memory_is_small(dir)?;
                     // A replay needs the summary and every turn after it.
-                    let history = History::new(dir);
                     let (summary, unsummarized) = match history.current()? {
                         Some(id) => {
                             let u = history.unsummarized(id)?;
@@ -890,6 +1081,7 @@ impl<B: Backend> Assistant<B> {
                         system_prompt(dir, small)?,
                         files,
                         earlier_files,
+                        fresh,
                     ))
                 }
             })
@@ -909,12 +1101,22 @@ impl<B: Backend> Assistant<B> {
                 vec![]
             }
         };
+        let summaries = match self.matching_summaries(prompt, &saved.pushed).await {
+            Ok(s) => s,
+            Err(e) => {
+                // The AI can still search the summaries itself.
+                on_event(Event::Notice {
+                    message: format!("Cannot add the day summaries: {e:#}"),
+                });
+                vec![]
+            }
+        };
         let text = format!("{}{prompt}", uploads::note(&files));
         let req = AskRequest {
             system,
             history: unsummarized,
             summary,
-            prompt: Self::message(&Self::now(), &facts, &text),
+            prompt: Self::message(&Self::now(), &facts, &summaries, &text),
             tools,
             session: saved.id.clone(),
             model: model.clone(),
@@ -933,10 +1135,13 @@ impl<B: Backend> Assistant<B> {
         };
         let model_ms = res.stats.model_ms.map(|v| v.saturating_sub(base_ms));
         let cost_usd = res.stats.cost_usd.map(|v| (v - base_cost).max(0.0));
+        let mut pushed = if same { saved.pushed } else { vec![] };
+        pushed.extend(summaries.iter().map(|s| s.period.clone()));
         let state = SessionState {
             id: res.session.clone(),
             model_ms: res.stats.model_ms.unwrap_or(base_ms),
             cost_usd: res.stats.cost_usd.unwrap_or(base_cost),
+            pushed,
         };
         let (name, prompt, text) = (self.backend.name(), prompt.to_string(), res.text.clone());
         let refs: Vec<FileRef> = files.into_iter().map(|(f, _)| f).collect();
@@ -955,8 +1160,13 @@ impl<B: Backend> Assistant<B> {
             model_ms,
             cost_usd,
             memory: facts,
+            summaries: summaries
+                .iter()
+                .map(|s| format!("{}: {}", s.period, s.summary))
+                .collect(),
             model,
             info: String::new(),
+            fresh,
         }
         .with_info())
     }
@@ -1146,7 +1356,7 @@ impl<B: Backend> Assistant<B> {
             system,
             history: earlier,
             summary: None,
-            prompt: Self::message(&Self::now(), &facts, &text),
+            prompt: Self::message(&Self::now(), &facts, &[], &text),
             tools,
             session: None,
             model: model.clone(),
@@ -1160,8 +1370,10 @@ impl<B: Backend> Assistant<B> {
             cost_usd: res.stats.cost_usd,
             stats: res.stats,
             memory: facts,
+            summaries: vec![],
             model,
             info: String::new(),
+            fresh: false,
         }
         .with_info();
         let (th, q, a, info) = (
@@ -1208,7 +1420,7 @@ impl<B: Backend> Assistant<B> {
             system: format!("{system}\n\n{JOB_RULES}"),
             history: vec![],
             summary: None,
-            prompt: Self::message(&Self::now(), &facts, &text),
+            prompt: Self::message(&Self::now(), &facts, &[], &text),
             tools,
             session: None,
             model: Some(JOB_MODEL.into()),
@@ -1274,7 +1486,7 @@ impl<B: Backend> Assistant<B> {
                     system,
                     history: vec![],
                     summary: None,
-                    prompt: Self::message(&Self::now(), &[], &prompt),
+                    prompt: Self::message(&Self::now(), &[], &[], &prompt),
                     tools,
                     session: None,
                     model: Some(JOB_MODEL.into()),
@@ -1632,6 +1844,10 @@ mod tests {
         tools: std::sync::Mutex<Vec<Vec<ToolServer>>>,
         /// The answer of the look-up before the brief. Empty: one question about each item.
         research: std::sync::Mutex<String>,
+        /// The session id that each answer reports. None: no session.
+        session: std::sync::Mutex<Option<String>>,
+        /// The session id of each ask request.
+        sessions: std::sync::Mutex<Vec<Option<String>>>,
     }
 
     impl Backend for FakeBackend {
@@ -1648,6 +1864,7 @@ mod tests {
             self.histories.lock().unwrap().push(req.history.clone());
             self.tools.lock().unwrap().push(req.tools.clone());
             self.models.lock().unwrap().push(req.model.clone());
+            self.sessions.lock().unwrap().push(req.session.clone());
             self.asks
                 .lock()
                 .unwrap()
@@ -1677,7 +1894,7 @@ mod tests {
             };
             Ok(crate::backend::AskResponse {
                 text,
-                session: None,
+                session: self.session.lock().unwrap().clone(),
                 stats: AskStats::default(),
             })
         }
@@ -1790,52 +2007,250 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Unix seconds at noon, `days_ago` days before today, local time.
+    fn noon_days_ago(days_ago: i64) -> i64 {
+        use chrono::TimeZone;
+        let d = (chrono::Local::now().date_naive() - chrono::Days::new(days_ago as u64))
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        chrono::Local.from_local_datetime(&d).unwrap().timestamp()
+    }
+
+    /// A conversation with one message, `days_ago` days ago. It is the
+    /// current conversation: a conversation from before ends.
+    fn old_day(dir: &Path, days_ago: i64, text: &str) -> i64 {
+        let ts = noon_days_ago(days_ago);
+        crate::db::write(dir, |tx| {
+            tx.execute("UPDATE conversation SET ended = ?1 WHERE ended IS NULL", [ts])?;
+            tx.execute("INSERT INTO conversation (started) VALUES (?1)", [ts])?;
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO turn (conversation_id, ts, role, text, backend) VALUES (?1, ?2, 'user', ?3, 'fake')",
+                rusqlite::params![id, ts, text],
+            )?;
+            Ok(id)
+        })
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn old_conversations_with_no_summary_get_one_later() {
-        let (a, dir) = fake("summary-old");
-        a.history().append("user", "Hi", "fake").unwrap();
-        a.new_conversation().unwrap();
-        a.history()
-            .append("user", &"Plan the Bali trip. ".repeat(150), "fake")
-            .unwrap();
-        let long = a.new_conversation().unwrap().unwrap();
-        // The current conversation never gets a summary here.
-        a.history()
-            .append("user", &"Book the flights. ".repeat(150), "fake")
-            .unwrap();
-        assert_eq!(
-            a.summarize_old().await.unwrap(),
-            1,
-            "only the long ended conversation"
+    async fn the_chat_starts_fresh_on_a_new_day() {
+        let (a, dir) = fake("new-day");
+        // The current conversation started two days ago, with a Claude session.
+        old_day(&dir, 2, "Plan the Bali trip.");
+        std::fs::write(
+            a.session_path(),
+            serde_json::to_vec(&SessionState {
+                id: Some("old".into()),
+                pushed: vec!["2026-01-01".into()],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        *a.backend.session.lock().unwrap() = Some("new".into());
+        let ans = a.ask("Hi", &mut |_| {}).await.unwrap();
+        assert!(ans.fresh, "the day changed");
+        let sessions = a.backend.sessions.lock().unwrap().clone();
+        assert_eq!(sessions, vec![None], "no resume of the old session");
+        assert!(
+            a.backend.histories.lock().unwrap()[0].is_empty(),
+            "the old day is not replayed"
         );
-        assert!(a.history().unsummarized(long).unwrap().turns.is_empty());
-        assert_eq!(a.summarize_old().await.unwrap(), 0, "nothing left to do");
-        assert_eq!(a.backend.prompts.lock().unwrap().len(), 1);
+        assert_eq!(
+            a.history().load().unwrap().len(),
+            2,
+            "today: the question and the answer"
+        );
+        let ans = a.ask("More", &mut |_| {}).await.unwrap();
+        assert!(!ans.fresh, "the same day goes on in the same session");
+        assert_eq!(
+            a.backend
+                .sessions
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .as_deref(),
+            Some("new")
+        );
+        assert!(!a.start_day().unwrap(), "started today: nothing to end");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
-    async fn an_ended_conversation_gets_a_summary_only_when_it_is_long_enough() {
-        let (a, dir) = fake("summary-ended");
-        a.history().append("user", "Hi", "fake").unwrap();
-        let short = a.new_conversation().unwrap().unwrap();
-        assert!(
-            !a.summarize_ended(short).await.unwrap(),
-            "a short chat costs no AI call"
-        );
+    async fn past_days_get_a_summary_and_a_short_day_gets_none() {
+        let (a, dir) = fake("day-summaries");
+        old_day(&dir, 3, &"Plan the Bali trip. ".repeat(150));
+        old_day(&dir, 2, "Hi");
+        old_day(&dir, 1, &"Book the flights. ".repeat(150));
+        // Today never gets a summary.
         a.history()
-            .append("user", &"Plan the Bali trip. ".repeat(150), "fake")
+            .append("user", &"Book a hotel too. ".repeat(150), "fake")
             .unwrap();
-        let long = a.new_conversation().unwrap().unwrap();
-        assert!(a.summarize_ended(long).await.unwrap());
-        assert!(
-            !a.summarize_ended(long).await.unwrap(),
-            "no new messages, no new summary"
-        );
-        assert_eq!(a.backend.prompts.lock().unwrap().len(), 1);
         assert_eq!(
-            a.history().search_summaries("summary", None).unwrap()[0].conversation,
-            long
+            a.summarize_days(1).await.unwrap(),
+            1,
+            "the newest day first"
+        );
+        let yesterday = periods::newest_day(&dir).unwrap().unwrap();
+        assert_eq!(yesterday.summary, "- summary 1");
+        assert_eq!(
+            a.summarize_days(5).await.unwrap(),
+            1,
+            "the long day of 3 days ago"
+        );
+        assert_eq!(a.summarize_days(5).await.unwrap(), 0, "nothing left to do");
+        let prompts = a.backend.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            prompts[0].contains("[main chat, user]\nBook the flights."),
+            "{}",
+            prompts[0]
+        );
+        assert!(prompts[1].contains("Plan the Bali trip."));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_long_day_gets_its_summary_in_more_than_one_call() {
+        let (a, dir) = fake("day-batches");
+        let id = old_day(&dir, 1, &"a".repeat(1000));
+        let ts = noon_days_ago(1);
+        crate::db::write(&dir, |tx| {
+            for _ in 1..300 {
+                tx.execute(
+                    "INSERT INTO turn (conversation_id, ts, role, text, backend) VALUES (?1, ?2, 'user', ?3, 'fake')",
+                    rusqlite::params![id, ts, "a".repeat(1000)],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(a.summarize_days(1).await.unwrap(), 1);
+        let prompts = a.backend.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 3, "100,000 characters in each call");
+        assert!(
+            prompts[1].contains("Earlier summary of this day:\n- summary 1"),
+            "{}",
+            &prompts[1][..200]
+        );
+        let day = (chrono::Local::now().date_naive() - chrono::Days::new(1))
+            .format("%F")
+            .to_string();
+        assert!(
+            periods::unsummarized_day(&dir, &day)
+                .unwrap()
+                .messages
+                .is_empty(),
+            "every message is in the summary"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_quarter_that_ended_gets_a_summary_from_its_day_summaries() {
+        let (a, dir) = fake("quarter-summary");
+        periods::set_day_summary(&dir, "2026-08-03", "- Planned the Bali trip.", 1, 0).unwrap();
+        periods::set_day_summary(&dir, "2026-08-20", "- Booked the flights.", 2, 0).unwrap();
+        assert_eq!(a.summarize_days(1).await.unwrap(), 1, "the quarter");
+        let prompts = a.backend.prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("Quarter: 2026-Q3")
+                && prompts[0].contains("[2026-08-03]\n- Planned the Bali trip.")
+                && prompts[0].contains("[2026-08-20]\n- Booked the flights."),
+            "{}",
+            prompts[0]
+        );
+        assert_eq!(
+            periods::get(&dir, "2026-Q3").unwrap().unwrap().summary,
+            "- summary 1"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn matching_day_summaries_go_into_the_message_once_per_session() {
+        let (a, dir) = fake("pushed-summaries");
+        periods::set_day_summary(
+            &dir,
+            "2026-11-09",
+            "- The user plans a holiday in Bali.",
+            1,
+            0,
+        )
+        .unwrap();
+        periods::set_day_summary(&dir, "2026-11-10", "- The dentist is on Tuesday.", 2, 0).unwrap();
+        *a.backend.session.lock().unwrap() = Some("s1".into());
+        let sent = |i: usize| a.backend.asks.lock().unwrap()[i].0.clone();
+        let ans = a
+            .ask("What about the Bali trip?", &mut |_| {})
+            .await
+            .unwrap();
+        assert!(
+            sent(0).contains("### 2026-11-10\n- The dentist")
+                && sent(0).contains("### 2026-11-09\n- The user plans"),
+            "the first message gets the newest day and the match: {}",
+            sent(0)
+        );
+        assert!(
+            ans.summaries.iter().any(|m| m.starts_with("2026-11-09: ")),
+            "{:?}",
+            ans.summaries
+        );
+        assert!(ans.memory.is_empty(), "summaries are not facts");
+        a.ask("Bali again?", &mut |_| {}).await.unwrap();
+        assert!(
+            !sent(1).contains("Summaries of earlier chats"),
+            "already in the session: {}",
+            sent(1)
+        );
+        // The summary of the last day is written after the first answer of
+        // the day: it goes in with the next message.
+        periods::set_day_summary(&dir, "2026-11-11", "- Booked the flights.", 3, 0).unwrap();
+        a.ask("And the hotel?", &mut |_| {}).await.unwrap();
+        assert!(
+            sent(2).contains("### 2026-11-11\n- Booked the flights."),
+            "{}",
+            sent(2)
+        );
+        // A new session: the summaries go in again.
+        *a.backend.session.lock().unwrap() = Some("s2".into());
+        a.new_conversation().unwrap();
+        a.ask("Bali?", &mut |_| {}).await.unwrap();
+        assert!(
+            sent(3).contains("### 2026-11-09") && sent(3).contains("### 2026-11-11"),
+            "{}",
+            sent(3)
+        );
+        // The search stops when PUSHED_SUMMARIES_MAX (8) summaries are in
+        // the session. The newest day still goes in.
+        periods::set_day_summary(&dir, "2026-11-07", "- Bali: the car hire.", 4, 0).unwrap();
+        periods::set_day_summary(&dir, "2026-11-08", "- Bali: a villa in Ubud.", 5, 0).unwrap();
+        periods::set_day_summary(&dir, "2026-11-12", "- Bali: the hotel is booked.", 6, 0).unwrap();
+        let pushed = |n: usize| {
+            let state = SessionState {
+                id: Some("s2".into()),
+                pushed: (1..=n).map(|d| format!("2026-10-{d:02}")).collect(),
+                ..Default::default()
+            };
+            std::fs::write(a.session_path(), serde_json::to_vec(&state).unwrap()).unwrap();
+        };
+        pushed(7);
+        a.ask("Bali?", &mut |_| {}).await.unwrap();
+        assert_eq!(
+            sent(4).matches("### ").count(),
+            3,
+            "7 pushed: the newest day and 2 matches: {}",
+            sent(4)
+        );
+        pushed(8);
+        a.ask("Bali?", &mut |_| {}).await.unwrap();
+        assert!(
+            sent(5).matches("### ").count() == 1 && sent(5).contains("### 2026-11-12"),
+            "8 pushed: the newest day only: {}",
+            sent(5)
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2015,13 +2430,13 @@ mod tests {
             "the instructions stay the same"
         );
 
-        let m = Assistant::<ClaudeBackend>::message("Monday", &facts[..1], "When?");
+        let m = Assistant::<ClaudeBackend>::message("Monday", &facts[..1], &[], "When?");
         assert_eq!(
             m,
             "[Now: Monday]\n[Facts from memory that can help with this message:\n- Sam sends the hosting invoice each month\n]\nWhen?"
         );
         assert_eq!(
-            Assistant::<ClaudeBackend>::message("Monday", &[], "When?"),
+            Assistant::<ClaudeBackend>::message("Monday", &[], &[], "When?"),
             "[Now: Monday]\nWhen?"
         );
         std::fs::remove_dir_all(&dir).unwrap();

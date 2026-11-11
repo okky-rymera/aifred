@@ -209,10 +209,29 @@ impl Updater {
     }
 }
 
+/// How often the app looks for the day change (App::watch_day).
+const DAY_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The work of App::summarize_days: the missing day summaries, at most
+/// `limit` days, then their meaning search vectors with `fill`.
+async fn write_day_summaries(
+    a: &Assistant<ClaudeBackend>,
+    limit: usize,
+    fill: &(impl Fn() + Send),
+) {
+    match a.summarize_days(limit).await {
+        Ok(n) if n > 0 => fill(),
+        Ok(_) => {}
+        Err(e) => eprintln!("aifred: cannot write the day summaries: {e:#}"),
+    }
+}
+
 struct App {
     assistant: Arc<Assistant<ClaudeBackend>>,
     /// One question at a time: two at once would race on the saved session.
-    busy: Mutex<()>,
+    /// Shared with the day watcher (watch_day), so a day change never runs
+    /// in the middle of a question.
+    busy: Arc<Mutex<()>>,
     /// The side chats (the plan chat, the item chats) that work on a
     /// question now. One question at a time in each chat, but different
     /// chats can work at the same time: each question has its own folder.
@@ -240,7 +259,7 @@ impl App {
         let meaning = Arc::new(std::sync::Mutex::new(meaning.into()));
         Self {
             assistant,
-            busy: Mutex::new(()),
+            busy: Arc::new(Mutex::new(())),
             side_busy: Arc::default(),
             google_login: tokio::sync::watch::Sender::new(0),
             brief_busy: Mutex::new(()),
@@ -251,46 +270,85 @@ impl App {
         }
     }
 
-    /// Writes a chat summary in the background: of the conversation that
-    /// ended (`Some(id)`), or of the current one when it is long (`None`).
-    /// It is one more AI call, so it runs only when it is needed (assistant.rs).
-    fn summarize(&self, ended: Option<i64>) {
+    /// Writes a new summary of the current conversation in the background
+    /// when it is long. It is one more AI call, so it runs only when it is
+    /// needed (assistant.rs). A lost Claude session gets it with the replay.
+    fn summarize_current(&self) {
         if !self.background {
             return;
         }
         let a = self.assistant.clone();
-        let fill = self.fill_job();
         tauri::async_runtime::spawn(async move {
-            let made = match ended {
-                Some(id) => a.summarize_ended(id).await,
-                None => a.summarize_if_long().await,
-            };
-            match made {
-                // The summary gets its meaning search vector.
-                Ok(true) => fill(),
-                Ok(false) => {}
-                Err(e) => eprintln!("aifred: cannot write the chat summary: {e:#}"),
+            if let Err(e) = a.summarize_if_long().await {
+                eprintln!("aifred: cannot write the chat summary: {e:#}");
             }
         });
     }
 
-    /// Writes the missing summaries of old conversations in the background:
-    /// conversations from the old history files, and summaries that stopped
-    /// when the app closed. At most 5 conversations in one run (assistant.rs).
-    fn summarize_old(&self) {
+    /// Watches for the day change while the app runs: each minute it reads
+    /// the local day, and on a new day it ends the conversation of the old
+    /// day, writes its summary, and tells the window (api.ts NEW_DAY). So
+    /// the summary is ready before the first message of the day, also when
+    /// the app stays open over midnight. A check each minute also works
+    /// after the computer sleeps. A day change during a question waits for
+    /// the next minute; the question itself also ends the old day (assistant.rs).
+    fn watch_day(&self) {
+        if !self.background {
+            return;
+        }
+        let (a, busy, handle) = (
+            self.assistant.clone(),
+            self.busy.clone(),
+            self.handle.clone(),
+        );
+        let fill = self.fill_job();
+        tauri::async_runtime::spawn(async move {
+            let mut last = aifred_core::plan::today();
+            loop {
+                tokio::time::sleep(DAY_CHECK).await;
+                let today = aifred_core::plan::today();
+                if today == last {
+                    continue;
+                }
+                let ended = {
+                    let Ok(_guard) = busy.try_lock() else {
+                        continue;
+                    };
+                    // A database write: on a thread for blocking work, as the
+                    // commands do (blocking), so a locked database does not
+                    // stop the other work of the app.
+                    let a = a.clone();
+                    match tauri::async_runtime::spawn_blocking(move || a.start_day()).await {
+                        Ok(Ok(ended)) => ended,
+                        Ok(Err(e)) => {
+                            eprintln!("aifred: cannot end the conversation of the last day: {e:#}");
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("aifred: the day change stopped: {e}");
+                            continue;
+                        }
+                    }
+                };
+                last = today;
+                if ended && let Some(h) = handle.get() {
+                    let _ = h.emit("new-day", ()); // api.ts NEW_DAY
+                }
+                write_day_summaries(&a, 1, &fill).await;
+            }
+        });
+    }
+
+    /// Writes the missing day summaries in the background, at most `limit`
+    /// days, and a quarter summary when a quarter is ready (assistant.rs).
+    /// Each one is at least one AI call.
+    fn summarize_days(&self, limit: usize) {
         if !self.background {
             return;
         }
         let a = self.assistant.clone();
         let fill = self.fill_job();
-        tauri::async_runtime::spawn(async move {
-            match a.summarize_old().await {
-                // The summaries get their meaning search vectors.
-                Ok(n) if n > 0 => fill(),
-                Ok(_) => {}
-                Err(e) => eprintln!("aifred: cannot write the old chat summaries: {e:#}"),
-            }
-        });
+        tauri::async_runtime::spawn(async move { write_day_summaries(&a, limit, &fill).await });
     }
 
     /// Writes the missing summaries of long descriptions in the background
@@ -450,7 +508,10 @@ async fn ask(
         .map_err(err)?;
     // The new messages, and the facts or tasks that AIfred added.
     app.fill_vectors();
-    app.summarize(None);
+    app.summarize_current();
+    // One waiting day, the newest first: the day that ended, or else one
+    // more day of the backlog. Each day is one AI call.
+    app.summarize_days(1);
     app.summarize_items();
     app.sort_items();
     Ok(answer)
@@ -571,11 +632,8 @@ async fn new_conversation(app: State<'_, App>) -> CmdResult<()> {
     let Ok(_guard) = app.busy.try_lock() else {
         return Err("Wait until the current question is done.".into());
     };
-    let ended = app.assistant.new_conversation().map_err(err)?;
-    // The old conversation gets a summary in the background, for search.
-    if ended.is_some() {
-        app.summarize(ended);
-    }
+    // The old messages get their day summary later (summarize_days).
+    app.assistant.new_conversation().map_err(err)?;
     Ok(())
 }
 
@@ -2154,7 +2212,12 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
     // Vectors for the data from before, or from the command-line program and
     // the tool servers. The first start also downloads the model here.
     app.fill_vectors();
-    app.summarize_old();
+    // A new day: the chat starts fresh. Then the days before get their
+    // summaries, at most 5 in one start.
+    if let Err(e) = app.assistant.start_day() {
+        eprintln!("aifred: cannot end the conversation of the last day: {e:#}");
+    }
+    app.summarize_days(aifred_core::assistant::DAY_SUMMARIES_PER_RUN);
     // Deletes the saved files that no task and no message uses any more.
     let dir = app.assistant.dir.clone();
     std::thread::spawn(move || {
@@ -2198,6 +2261,8 @@ fn open_window(program: std::path::PathBuf) -> anyhow::Result<()> {
             // Items that came in while the app was closed, for example from
             // the command-line program. After the handle: the sort tells the window.
             app.state::<App>().sort_items();
+            // The day change while the app runs. After the handle: it tells the window.
+            app.state::<App>().watch_day();
             // AIfred's own jobs run while the app runs, also in the tray.
             scheduler::start(app.handle().clone());
             // Check for updates after the start, then on each interval.

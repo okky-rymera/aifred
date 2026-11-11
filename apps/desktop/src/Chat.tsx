@@ -60,7 +60,17 @@ export type ChatMsg = {
   info?: string;
   /** Facts from memory that the app added to the question. */
   facts?: string[];
+  /** Summaries of earlier days that the app added to the question. */
+  summaries?: string[];
 };
+
+/** "1 fact and 2 summaries", for the line under an answer. */
+export function usedLine(facts: number, summaries: number): string {
+  const parts: string[] = [];
+  if (facts > 0) parts.push(`${facts} fact${facts === 1 ? "" : "s"}`);
+  if (summaries > 0) parts.push(`${summaries} ${summaries === 1 ? "summary" : "summaries"}`);
+  return parts.join(" and ");
+}
 
 export function Files(props: { files: api.FileRef[]; onRemove?: (i: number) => void; busy?: string[] }) {
   if (!props.files.length && !props.busy?.length) return null;
@@ -116,13 +126,13 @@ export function Messages(props: {
           <div key={i} className={`m-ai${m.role === "intro" ? " m-intro" : ""}`}>
             <Md text={m.text} onItem={props.onItem} hasItem={props.hasItem} />
             {m.info && <span className="mmeta">{m.info}</span>}
-            {m.facts && m.facts.length > 0 && (
+            {((m.facts?.length ?? 0) > 0 || (m.summaries?.length ?? 0) > 0) && (
               <details>
                 <summary>
-                  Used {m.facts.length} fact{m.facts.length === 1 ? "" : "s"} from memory
+                  Used {usedLine(m.facts?.length ?? 0, m.summaries?.length ?? 0)} from memory
                 </summary>
                 <ul>
-                  {m.facts.map((f, j) => (
+                  {[...(m.facts ?? []), ...(m.summaries ?? [])].map((f, j) => (
                     <li key={j}>{f}</li>
                   ))}
                 </ul>

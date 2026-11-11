@@ -123,6 +123,28 @@ impl History {
         })
     }
 
+    /// Ends the current conversation when it started on a day before
+    /// `today` ("YYYY-MM-DD", local). Returns the id of the conversation
+    /// that ended. The chat starts fresh each day (assistant.rs).
+    pub fn archive_if_started_before(&self, today: &str) -> anyhow::Result<Option<i64>> {
+        db::write(&self.dir, |tx| {
+            let id: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM conversation WHERE ended IS NULL AND date(started, 'unixepoch', 'localtime') < ?1",
+                    [today],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = id {
+                tx.execute(
+                    "UPDATE conversation SET ended = ?1 WHERE id = ?2",
+                    rusqlite::params![now() as i64, id],
+                )?;
+            }
+            Ok(id)
+        })
+    }
+
     /// The id of the current conversation, or None before the first message.
     pub fn current(&self) -> anyhow::Result<Option<i64>> {
         db::read(&self.dir, |c| {
@@ -184,33 +206,6 @@ impl History {
         })
     }
 
-    /// Ended conversations with messages that are not in their summary, newest
-    /// first. A conversation with no summary must have at least `min_chars`
-    /// bytes of messages, the same rule as Assistant::summarize_ended.
-    /// Examples: conversations from the old history files, and a summary
-    /// that stopped when the app closed.
-    pub fn ended_without_full_summary(
-        &self,
-        min_chars: usize,
-        limit: usize,
-    ) -> anyhow::Result<Vec<i64>> {
-        db::read(&self.dir, |c| {
-            let mut q = c.prepare(
-                "SELECT c.id FROM conversation c
-                 WHERE c.ended IS NOT NULL
-                   AND EXISTS (SELECT 1 FROM turn t WHERE t.conversation_id = c.id AND t.id > COALESCE(c.summary_upto, 0))
-                   AND (c.summary IS NOT NULL
-                        OR (SELECT SUM(length(CAST(t.text AS BLOB))) FROM turn t WHERE t.conversation_id = c.id) >= ?1)
-                 ORDER BY c.id DESC
-                 LIMIT ?2",
-            )?;
-            let ids = q.query_map(rusqlite::params![min_chars as i64, limit as i64], |r| {
-                r.get(0)
-            })?;
-            Ok(ids.collect::<Result<_, _>>()?)
-        })
-    }
-
     /// Saves a summary of `conversation` that covers the messages up to turn `upto`.
     pub fn set_summary(&self, conversation: i64, summary: &str, upto: i64) -> anyhow::Result<()> {
         db::write(&self.dir, |tx| {
@@ -219,41 +214,6 @@ impl History {
                 rusqlite::params![summary, upto, conversation],
             )?;
             Ok(())
-        })
-    }
-
-    /// Conversation summaries that match `query` by words or by meaning, best first.
-    pub fn search_summaries(
-        &self,
-        query: &str,
-        limit: Option<u32>,
-    ) -> anyhow::Result<Vec<SummaryHit>> {
-        db::read(&self.dir, |c| {
-            let ids = db::hybrid(
-                c,
-                &self.dir,
-                query,
-                "conversation_vec",
-                "SELECT f.rowid FROM conversation_fts f WHERE conversation_fts MATCH ?1 ORDER BY bm25(conversation_fts)",
-                "SELECT 1 FROM conversation WHERE id = ?1 AND summary IS NOT NULL",
-                &[],
-                limit,
-            )?;
-            let mut get =
-                c.prepare("SELECT id, started, ended, summary FROM conversation WHERE id = ?1")?;
-            Ok(ids
-                .iter()
-                .map(|id| {
-                    get.query_row([id], |r| {
-                        Ok(SummaryHit {
-                            conversation: r.get(0)?,
-                            started: r.get(1)?,
-                            ended: r.get(2)?,
-                            summary: r.get(3)?,
-                        })
-                    })
-                })
-                .collect::<Result<_, _>>()?)
         })
     }
 }
@@ -265,16 +225,6 @@ pub struct Unsummarized {
     pub turns: Vec<Turn>,
     /// The turn id of each item in `turns`.
     pub ids: Vec<i64>,
-}
-
-/// A conversation summary that a search found.
-#[derive(Debug, Serialize)]
-pub struct SummaryHit {
-    pub conversation: i64,
-    pub started: u64,
-    /// None for the current conversation.
-    pub ended: Option<u64>,
-    pub summary: String,
 }
 
 /// One message that a search found, with the message before and after it.
@@ -468,8 +418,24 @@ mod tests {
         assert!(u.summary.is_some());
         assert_eq!(h.archive().unwrap(), Some(id));
         assert_eq!(h.current_summary().unwrap(), None);
-        let hits = h.search_summaries("holidays", None).unwrap();
-        assert_eq!((hits[0].conversation, hits[0].ended.is_some()), (id, true));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_conversation_from_an_earlier_day_ends_at_the_next_message() {
+        let d = temp("history-day");
+        let h = History::new(&d);
+        assert_eq!(h.archive_if_started_before("2026-11-11").unwrap(), None);
+        h.append("user", "Hi", "claude").unwrap();
+        let id = h.current().unwrap().unwrap();
+        let day = chrono::Local::now().format("%F").to_string();
+        assert_eq!(
+            h.archive_if_started_before(&day).unwrap(),
+            None,
+            "started today"
+        );
+        assert_eq!(h.archive_if_started_before("9999-01-01").unwrap(), Some(id));
+        assert_eq!(h.current().unwrap(), None);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

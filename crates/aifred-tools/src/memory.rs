@@ -8,6 +8,7 @@
 use aifred_core::default_data_dir;
 use aifred_core::history::{History, HistoryHit, Turn};
 use aifred_core::memory::{Fact, MemoryStore};
+use aifred_core::periods;
 use aifred_core::text::cut;
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt, handler::server::wrapper::Parameters, model::*, tool,
@@ -19,8 +20,12 @@ use serde_json::{Value, json};
 
 /// Old answers can be long. Each message in a search result is cut to this size.
 const MAX_MESSAGE_CHARS: usize = 1000;
-/// Summaries in each search_history result. Each one covers a whole conversation.
+/// Summaries in each search_history result. Each one covers a day or a quarter (periods.rs).
 const SUMMARY_RESULTS: u32 = 3;
+/// day_summaries gives at most this many days in one call.
+const DAYS_MAX: i64 = 31;
+/// day_messages gives at most this many messages in one call.
+const DAY_MESSAGES_MAX: usize = 100;
 
 #[derive(Clone)]
 struct MemoryTools {
@@ -64,6 +69,22 @@ struct SetTagsArgs {
 struct IdArgs {
     /// Fact id, from search_memory.
     id: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DaysArgs {
+    /// The first day, "YYYY-MM-DD".
+    from: String,
+    /// The last day, "YYYY-MM-DD", at most 30 days after `from` (31 days in all). Default: the same day as `from`.
+    to: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DayArgs {
+    /// The day, "YYYY-MM-DD".
+    day: String,
+    /// Skip this many messages first. Default 0. The result says when there are more.
+    offset: Option<u32>,
 }
 
 fn fail(e: anyhow::Error) -> ErrorData {
@@ -173,19 +194,64 @@ impl MemoryTools {
     }
 
     #[tool(
-        description = "Search all conversations with the user, also old ones, best match first. \"summaries\" are short summaries of whole conversations. \"messages\" are single messages, each with the message before and after it. Times are Unix seconds. \"current\" is true for the conversation that is open now."
+        description = "Search all chats with the user, also old ones, best match first. \"summaries\" are short summaries of one day (period \"YYYY-MM-DD\") or one quarter (period \"YYYY-Qn\"). \"messages\" are single messages of the main chat, each with the message before and after it. Times are Unix seconds. \"current\" is true for the conversation that is open now. For all messages of a day, use day_messages."
     )]
     async fn search_history(
         &self,
         Parameters(a): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let h = History::new(&self.dir);
-        let summaries = h
-            .search_summaries(&a.query, Some(SUMMARY_RESULTS))
+        let summaries =
+            periods::search(&self.dir, &a.query, Some(SUMMARY_RESULTS)).map_err(fail)?;
+        let hits = History::new(&self.dir)
+            .search(&a.query, a.limit)
             .map_err(fail)?;
-        let hits = h.search(&a.query, a.limit).map_err(fail)?;
         ok_json(
             &json!({ "summaries": summaries, "messages": hits.iter().map(hit).collect::<Vec<_>>() }),
+        )
+    }
+
+    #[tool(
+        description = "The days from `from` to `to` (both included, at most 31 days) that have chats, oldest first, each with its summary and its number of messages. Use it for a range of days, for example last week. A day with only a few short messages, and today, have no summary (null): day_messages has their messages."
+    )]
+    async fn day_summaries(
+        &self,
+        Parameters(a): Parameters<DaysArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let to = a.to.as_deref().unwrap_or(&a.from);
+        let (f, t) = (
+            periods::check_day(&a.from).map_err(fail)?,
+            periods::check_day(to).map_err(fail)?,
+        );
+        if t < f || (t - f).num_days() >= DAYS_MAX {
+            return Err(ErrorData::invalid_params(
+                format!("the range must be from 1 to {DAYS_MAX} days, with `from` first"),
+                None,
+            ));
+        }
+        let days = periods::days(&self.dir, &a.from, to).map_err(fail)?;
+        ok_json(&json!(days))
+    }
+
+    #[tool(
+        description = "All messages of one day, oldest first: the main chat (\"chat\": \"main\") and the side chats (the plan chat of a day, the chat of an item, the chat of a mission). Use it when the summary of the day is not enough. Each message is cut to 1,000 characters. At most 100 messages in one call: when \"more\" is true, call again with `offset`."
+    )]
+    async fn day_messages(
+        &self,
+        Parameters(a): Parameters<DayArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let all = periods::messages_of_day(&self.dir, &a.day).map_err(fail)?;
+        let offset = a.offset.unwrap_or(0) as usize;
+        let page: Vec<Value> = all
+            .iter()
+            .skip(offset)
+            .take(DAY_MESSAGES_MAX)
+            .map(|m| {
+                json!({ "ts": m.ts, "chat": m.chat, "role": m.role, "text": cut(&m.text, MAX_MESSAGE_CHARS) })
+            })
+            .collect();
+        let more = offset + page.len() < all.len();
+        ok_json(
+            &json!({ "day": a.day, "total": all.len(), "offset": offset, "messages": page, "more": more }),
         )
     }
 }
@@ -298,18 +364,20 @@ mod tests {
             "claude",
         )
         .unwrap();
-        let id = h.current().unwrap().unwrap();
-        h.set_summary(id, "- The user asked about the dentist.", 2)
-            .unwrap();
+        periods::set_day_summary(
+            &t.dir,
+            "2026-11-10",
+            "- The user asked about the dentist.",
+            2,
+            0,
+        )
+        .unwrap();
         let out = body(t.search_history(search("dentist")).await.unwrap());
         assert_eq!(
             out["summaries"][0]["summary"],
             "- The user asked about the dentist."
         );
-        assert!(
-            out["summaries"][0]["ended"].is_null(),
-            "the current conversation"
-        );
+        assert_eq!(out["summaries"][0]["period"], "2026-11-10");
         let hits = &out["messages"];
         let long = hits
             .as_array()
@@ -324,6 +392,108 @@ mod tests {
                 .ends_with("[... shortened]")
         );
         assert_eq!(long["before"]["text"], "Tell me about the dentist");
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_day_tools_give_summaries_of_a_range_and_the_messages_of_a_day() {
+        let t = tools("days");
+        let h = History::new(&t.dir);
+        h.append("user", "Remind me about the dentist", "claude")
+            .unwrap();
+        h.append("assistant", "Noted.", "claude").unwrap();
+        aifred_core::side::append_pair(
+            &t.dir,
+            "item:task:a",
+            "Is it urgent?",
+            &[],
+            "No.",
+            "",
+            false,
+        )
+        .unwrap();
+        periods::set_day_summary(&t.dir, "2026-11-09", "- Bali.", 1, 0).unwrap();
+        periods::set_day_summary(&t.dir, "2026-11-10", "- Dentist.", 2, 0).unwrap();
+        let days = |from: &str, to: Option<&str>| {
+            Parameters(DaysArgs {
+                from: from.into(),
+                to: to.map(String::from),
+            })
+        };
+        let out = body(
+            t.day_summaries(days("2026-11-01", Some("2026-11-30")))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out[0]["day"], "2026-11-09");
+        assert_eq!(out[1]["summary"], "- Dentist.");
+        let out = body(t.day_summaries(days("2026-11-10", None)).await.unwrap());
+        assert_eq!(out.as_array().unwrap().len(), 1);
+        // Today has messages and no summary yet.
+        let today = aifred_core::plan::today();
+        let out = body(t.day_summaries(days(&today, None)).await.unwrap());
+        assert_eq!(
+            (out[0]["summary"].is_null(), out[0]["messages"].as_u64()),
+            (true, Some(4))
+        );
+        assert!(
+            t.day_summaries(days("2026-11-10", Some("2026-11-01")))
+                .await
+                .is_err()
+        );
+        assert!(
+            t.day_summaries(days("2026-11-01", Some("2026-12-31")))
+                .await
+                .is_err()
+        );
+
+        let day = |offset: Option<u32>| {
+            Parameters(DayArgs {
+                day: today.clone(),
+                offset,
+            })
+        };
+        let out = body(t.day_messages(day(None)).await.unwrap());
+        assert_eq!(out["total"], 4);
+        assert_eq!(out["more"], false);
+        let chats: Vec<&str> = out["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["chat"].as_str().unwrap())
+            .collect();
+        assert_eq!(chats, vec!["main", "main", "item:task:a", "item:task:a"]);
+        let out = body(t.day_messages(day(Some(3))).await.unwrap());
+        assert_eq!(out["messages"][0]["text"], "No.");
+        // A page has at most 100 messages: 4 so far, 101 more.
+        for i in 0..101 {
+            h.append("user", &format!("Message {i}"), "claude").unwrap();
+        }
+        let out = body(t.day_messages(day(None)).await.unwrap());
+        assert_eq!(
+            (
+                out["total"].as_u64(),
+                out["messages"].as_array().unwrap().len(),
+                out["more"].as_bool()
+            ),
+            (Some(105), 100, Some(true))
+        );
+        let out = body(t.day_messages(day(Some(100))).await.unwrap());
+        assert_eq!(
+            (
+                out["messages"].as_array().unwrap().len(),
+                out["more"].as_bool()
+            ),
+            (5, Some(false))
+        );
+        assert!(
+            t.day_messages(Parameters(DayArgs {
+                day: "soon".into(),
+                offset: None
+            }))
+            .await
+            .is_err()
+        );
         std::fs::remove_dir_all(&t.dir).unwrap();
     }
 }

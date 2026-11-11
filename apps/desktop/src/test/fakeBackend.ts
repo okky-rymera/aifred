@@ -454,6 +454,8 @@ export function answer(text: string, extra: Partial<Answer> = {}): Answer {
     model_ms: 1000,
     cost_usd: 0.005,
     memory: [],
+    summaries: [],
+    fresh: false,
     model: null,
     info: "",
     ...extra,

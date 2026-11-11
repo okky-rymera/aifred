@@ -51,10 +51,12 @@ The source code:
   - A program starts the helper when it needs it. The start takes about 0.2 s.
   - The helper stops after 5 minutes with no requests. Then the model uses no memory.
   - The helper's messages go to `embed.log` in the data folder.
+- The chat starts fresh each day, with a new Claude session. The app looks for the day change at start-up and each minute while it runs. The messages of every day stay in the database.
 - AIfred writes short summaries of chats. Each summary is one more AI call on your Claude login:
-  - When you start a new conversation, the old one gets a summary, if it has at least 2,000 characters.
-  - A long conversation gets a new summary each time 20,000 tokens (about 80,000 characters) of new messages are not in the summary yet.
-  - AIfred searches the summaries together with the messages. When Claude cannot continue a session, AIfred sends the summary and the messages after it (at most 100,000 characters, newest first).
+  - Each past day with chats gets a summary: the main chat and the side chats (plan, item, mission) of that day. A day with less than 2,000 characters of messages gets none: a search finds its few messages directly. The day that ended gets its summary at start-up, or at the first minute of the new day while the app runs. After each answer, one more waiting day gets its summary, the newest first. At start-up, at most 5 waiting days get theirs. So the days from before the update get their summaries over a few starts and answers, one AI call each.
+  - Each quarter gets a summary from its day summaries, after the quarter ends.
+  - A long conversation gets a new summary each time 20,000 tokens (about 80,000 characters) of new messages are not in the summary yet. When Claude cannot continue a session, AIfred sends this summary and the messages after it (at most 100,000 characters, newest first).
+  - Each message gets the day and quarter summaries that match it (at most 2), and the summary of the last day goes in as soon as it exists. A summary goes into a session only once. The AI can also search the summaries and the messages (`search_history`), list the summaries of a range of days (`day_summaries`), and read all messages of one day (`day_messages`).
 - AIfred saves the description of each GitHub item and ClickUp task when it downloads the list. A local task can have a description too: click the task to change it.
 - Click a local task to change it. A local task can have these fields:
   - a description,

@@ -28,6 +28,7 @@ pub mod links;
 pub mod memory;
 pub mod missions;
 pub mod overview;
+pub mod periods;
 pub mod plan;
 pub mod program;
 pub mod related;

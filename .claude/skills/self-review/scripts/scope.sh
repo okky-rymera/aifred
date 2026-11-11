@@ -67,7 +67,7 @@ if [ -z "$ARG" ] && [ -n "$dirty" ]; then
   scope="uncommitted changes"
   git diff HEAD -- . "${EXCL[@]}" > "$RUN/diff.patch"
   # New files are not in `git diff`. Add each one as a new-file hunk.
-  git ls-files --others --exclude-standard | grep -vE "$SKIP_RE" | while read -r f; do
+  { git ls-files --others --exclude-standard | grep -vE "$SKIP_RE" || true; } | while read -r f; do
     [ -L "$f" ] && continue # a link, for example to a node_modules folder
     git diff --no-index -- /dev/null "$f" >> "$RUN/diff.patch" || true
   done

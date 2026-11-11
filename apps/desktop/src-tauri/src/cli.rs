@@ -54,6 +54,12 @@ fn after_answer(a: Arc<Assistant<ClaudeBackend>>) -> tokio::task::JoinHandle<()>
             Ok(false) => {}
             Err(e) => eprintln!("[aifred] cannot write the summary: {e:#}"),
         }
+        // One waiting day gets its summary, the newest first (periods.rs).
+        match a.summarize_days(1).await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[aifred] saved {n} day summaries"),
+            Err(e) => eprintln!("[aifred] cannot write the day summaries: {e:#}"),
+        }
         // Items that the tool servers downloaded can need a summary.
         match a.summarize_items().await {
             Ok(0) => {}
@@ -145,17 +151,8 @@ async fn run_async(args: Vec<String>) -> anyhow::Result<()> {
             Ok(())
         }
         Some("new") => {
-            if let Some(ended) = a.new_conversation()? {
-                // The old conversation gets a summary, for search. It is one more AI call.
-                match a.summarize_ended(ended).await {
-                    Ok(true) => {
-                        eprintln!("[aifred] saved a summary of the old conversation");
-                        fill_vectors(a.clone()).await;
-                    }
-                    Ok(false) => {}
-                    Err(e) => eprintln!("[aifred] cannot write the summary: {e:#}"),
-                }
-            }
+            // The old messages get their day summary later (summarize_days).
+            a.new_conversation()?;
             println!("Started a new conversation.");
             Ok(())
         }

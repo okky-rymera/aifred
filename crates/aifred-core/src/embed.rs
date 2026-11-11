@@ -351,11 +351,11 @@ const KINDS: [Kind; 5] = [
         filter: "1",
     },
     Kind {
-        table: "conversation",
-        vec: "conversation_vec",
+        table: "period_summary",
+        vec: "period_vec",
         key: "id",
         text: "summary",
-        filter: "summary IS NOT NULL",
+        filter: "1",
     },
 ];
 

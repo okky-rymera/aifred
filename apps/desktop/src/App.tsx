@@ -34,7 +34,7 @@ import { TasksPage } from "./Tasks";
 import { MemoryList } from "./Memory";
 import { CalendarView, PlanChat } from "./Calendar";
 import { RestartButton, SettingsPage } from "./Settings";
-import { useItemsSorted, useTasksChanged } from "./useTasksChanged";
+import { useItemsSorted, useNewDay, useTasksChanged } from "./useTasksChanged";
 
 type Page = "home" | "plan" | "tasks" | "memory" | "settings";
 type Toast = { text: string; undo?: () => void; error?: boolean };
@@ -619,6 +619,13 @@ export default function App() {
     loadTodayBrief();
   }, [loadTodayBrief]);
   useItemsSorted(afterSort);
+
+  // A new day while the app runs: the chat starts fresh. A question that
+  // runs now keeps its messages; its answer still comes.
+  const freshDay = useCallback(() => {
+    setMain((c) => (c.busy ? c : EMPTY_CHAT));
+  }, []);
+  useNewDay(freshDay);
 
   // AIfred's jobs can write the brief in the background (for example when you
   // finish a task). Check for a newer brief each minute.
@@ -1755,11 +1762,12 @@ export default function App() {
       const a = await ask((e) =>
         set((c) => ({ ...c, progress: [...c.progress, api.describe(e)] })),
       );
+      // A new day: the chat starts fresh. Only this question stays.
       set((c) => ({
         ...c,
         msgs: [
-          ...c.msgs,
-          { role: "assistant", text: a.text, info: a.info, facts: a.memory },
+          ...(a.fresh ? c.msgs.slice(-1) : c.msgs),
+          { role: "assistant", text: a.text, info: a.info, facts: a.memory, summaries: a.summaries },
         ],
       }));
     } catch (e) {
