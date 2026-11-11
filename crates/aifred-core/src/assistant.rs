@@ -32,16 +32,19 @@ pub const ITEM_KEY_ENV: &str = "AIFRED_ITEM_KEY";
 pub const MISSION_ID_ENV: &str = "AIFRED_MISSION_ID";
 /// In the question chat of the home page: the item keys that complete_task
 /// can mark done, one on each line (context::QuestionScope::close). They are
-/// the item of the chat and the items that the home page asks about now,
-/// the same limit as for ClickUp (QUESTION_CHAT_ENV). Not set: complete_task
-/// uses ITEM_KEY_ENV.
+/// the item of the chat and the items that the home page asked about today
+/// that are still open in their source and that the user did not skip or
+/// correct, the same limit as for ClickUp (QUESTION_CHAT_ENV). Not set:
+/// complete_task uses ITEM_KEY_ENV.
 pub const DONE_KEY_ENV: &str = "AIFRED_DONE_KEY";
 /// In the question chat of the home page (the chat of an item that the
 /// home page asks about now, or that you answered there today,
 /// context::item_chat): the ClickUp task ids that it can mark done, one on
 /// each line. They are the item of the chat and the items that the home
-/// page asks about now. Only that chat can mark ClickUp tasks done: your
-/// answer there can say that a task is finished.
+/// page asked about today that are still open in ClickUp and that the user
+/// did not skip or correct. Only that chat can mark ClickUp tasks done:
+/// your answer there can say that a task is finished, also when the chat
+/// went on to the next item.
 pub const QUESTION_CHAT_ENV: &str = "AIFRED_QUESTION_CHAT";
 /// In the question chat: the ClickUp task ids that it can put back to the
 /// status from before (the undo of mark_task_done), one on each line. They
@@ -50,8 +53,20 @@ pub const QUESTION_CHAT_ENV: &str = "AIFRED_QUESTION_CHAT";
 /// saved status, not a status from the AI.
 pub const QUESTION_REOPEN_ENV: &str = "AIFRED_QUESTION_REOPEN";
 /// In the question chat: the item key of the chat. mark_task_done saves it
-/// with the close, so that only this chat can put the task back.
+/// with the close, so that only this chat can put the task back, and
+/// add_task_comment saves it with the comment, so that only this chat can
+/// delete the comment on the same day (delete_task_comment).
+/// add_task_comment works on the tasks of QUESTION_CHAT_ENV and
+/// QUESTION_REOPEN_ENV.
 pub const QUESTION_ITEM_ENV: &str = "AIFRED_QUESTION_ITEM";
+/// In the question chat: the user's own words, the earlier messages of the
+/// user in this chat and the message now, newest last, at most
+/// MAX_SAID_CHARS from the end. add_task_comment writes only the user's
+/// words to ClickUp, and checks the comment against them: the item text
+/// comes from other people, and must not reach the team as a comment.
+pub const QUESTION_SAID_ENV: &str = "AIFRED_QUESTION_SAID";
+/// The most characters of QUESTION_SAID_ENV.
+pub const MAX_SAID_CHARS: usize = 20_000;
 
 /// What the tools of an item chat or a mission chat can change (ask_side).
 #[derive(Debug, Default)]
@@ -65,6 +80,13 @@ struct Bound {
     /// The ClickUp task ids that the question chat can put back
     /// (QUESTION_REOPEN_ENV): the tasks that it closed today.
     reopen: Vec<String>,
+    /// The ClickUp task ids with a comment that the question chat wrote
+    /// today: the chat keeps its ClickUp tools for the undo of the
+    /// comment, also when the task left the home page.
+    commented: Vec<String>,
+    /// The user's earlier messages in the question chat
+    /// (QUESTION_SAID_ENV, with the message now).
+    said: String,
     /// The item of the question chat (QUESTION_ITEM_ENV). Empty for
     /// other chats.
     item: String,
@@ -100,7 +122,7 @@ You are aifred, the user's personal assistant.
 - A message that is only a short to-do line, with no question, is a new task for the user. Examples: \"pay rent friday high #home\", \"call Sam tomorrow\", \"review the contract\". Add it with add_task at once, with no lookups first. Take the due day, the priority (urgent, high, low), and the #tags from the words, and leave them out of the title. Then answer in one line, for example \"Added: Pay rent, due Fri 6 Nov, high priority, #home.\"
 - When the user attached files to a new task, give their ids (from the file note) in the files field of add_task.
 - GitHub is read-only. If the user asks for a change there, say what you would change.
-- ClickUp is read-only for you. The user marks ClickUp tasks done in the AIfred to-do list. Only the question chat of the home page can mark the ClickUp tasks that it asks about done, when the user says that they are finished.
+- ClickUp is read-only for you. The user marks ClickUp tasks done in the AIfred to-do list. Only the question chat of the home page can mark the ClickUp tasks that the home page asked about today done, when the user says that they are finished, and write a comment on such a task when the user asks for a note in ClickUp.
 - Search memory before you say that you do not know something about the user.
 - Add a fact to memory only when the user tells you something lasting about themselves or their work. Do not add a fact that is already in memory.
 - Give each new fact 1 to 3 tags: short topic words, for example \"testing\", \"people\", or \"workflow\". Use the tags that exist (memory_tags) when one fits. Make a new tag only when no tag fits.
@@ -954,7 +976,17 @@ impl<B: Backend> Assistant<B> {
         let (small, system, earlier, context, files, earlier_files, bound) = self
             .off_thread(move |dir| {
                 let small = memory_is_small(dir)?;
-                let earlier: Vec<Turn> = crate::side::load(dir, &th)?
+                let saved = crate::side::load(dir, &th)?;
+                // The user's own words, for the ClickUp comment check of
+                // the question chat. A saved user turn is the message as
+                // the user sent it, with no chat note and no file note.
+                let said: String = saved
+                    .iter()
+                    .filter(|t| t.role == "user")
+                    .map(|t| t.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let earlier: Vec<Turn> = saved
                     .into_iter()
                     .map(|t| Turn { ts: t.ts, role: t.role, text: t.text, backend: String::new(), files: t.files })
                     .collect();
@@ -991,11 +1023,13 @@ impl<B: Backend> Assistant<B> {
                         bound = Some(match scope {
                             Some(s) => {
                                 // The undo: only the ClickUp tasks that this
-                                // question chat closed today.
-                                let since = crate::calendar::day_start(&crate::plan::today())?;
-                                let reopen = crate::clickup_list::ClickupStore::new(dir)
-                                    .closed_since(since.max(0) as u64, &key)?;
-                                Bound { keys: s.keys, close: s.close, reopen, item: key.clone(), question: true, mission: None }
+                                // question chat closed today, and the
+                                // comments that it wrote today.
+                                let since = crate::calendar::today_start()?;
+                                let store = crate::clickup_list::ClickupStore::new(dir);
+                                let reopen = store.closed_since(since, &key)?;
+                                let commented = store.commented_since(since, &key)?;
+                                Bound { keys: s.keys, close: s.close, reopen, commented, said, item: key.clone(), question: true, mission: None }
                             }
                             None => Bound { keys: vec![key.clone()], ..Default::default() },
                         });
@@ -1041,14 +1075,17 @@ impl<B: Backend> Assistant<B> {
         // An item chat or a mission chat: the item text comes from other
         // people, so the tools can change only the items of the chat. The
         // question chat on the home page can also change the other items
-        // that it asks about today, and mark ClickUp tasks done that the
-        // home page asks about now: the user's answer can say that a task
-        // is finished. The prompt (context::for_chat_on) allows changes only
-        // from the user's own words. An empty list allows no item.
+        // that it asks about today, and mark the ClickUp tasks done that
+        // the home page asked about today: the user's answer can say that
+        // a task is finished, also one message after the answer about it.
+        // The prompt (context::for_chat_on) allows changes only from the
+        // user's own words. An empty list allows no item.
         if let Some(Bound {
             keys,
             close,
             reopen,
+            commented,
+            said,
             item,
             question,
             mission,
@@ -1061,7 +1098,7 @@ impl<B: Backend> Assistant<B> {
                     t.env.push((MISSION_ID_ENV.to_string(), m.to_string()));
                 }
                 // The wide list is for the notes and the undo. Only the
-                // items that the home page asks about now can be marked done.
+                // items that are still open in their source can be marked done.
                 if question {
                     t.env.push((DONE_KEY_ENV.to_string(), close.join("\n")));
                 }
@@ -1073,15 +1110,33 @@ impl<B: Backend> Assistant<B> {
                     .collect()
             };
             let close = ids(&close);
-            if question && (!close.is_empty() || !reopen.is_empty()) {
+            // The ClickUp tools stay while an undo is possible: a close or
+            // a comment of today, also when the task left the home page.
+            if question && (!close.is_empty() || !reopen.is_empty() || !commented.is_empty()) {
+                // The newest words count most: the end stays.
+                let said = if said.is_empty() {
+                    prompt.to_string()
+                } else {
+                    format!("{said}\n{prompt}")
+                };
+                let skip = said.chars().count().saturating_sub(MAX_SAID_CHARS);
+                let said: String = said.chars().skip(skip).collect();
                 for t in tools.iter_mut().filter(|t| t.name == "clickup") {
                     t.env
                         .push((QUESTION_CHAT_ENV.to_string(), close.join("\n")));
                     t.env
                         .push((QUESTION_REOPEN_ENV.to_string(), reopen.join("\n")));
                     t.env.push((QUESTION_ITEM_ENV.to_string(), item.clone()));
-                    t.allowed_tools
-                        .extend(["mark_task_done".to_string(), "reopen_task".to_string()]);
+                    t.env.push((QUESTION_SAID_ENV.to_string(), said.clone()));
+                    t.allowed_tools.extend(
+                        [
+                            "mark_task_done",
+                            "reopen_task",
+                            "add_task_comment",
+                            "delete_task_comment",
+                        ]
+                        .map(String::from),
+                    );
                 }
             }
         }
@@ -2416,7 +2471,7 @@ mod tests {
             Some(format!("{asked}\n{parent}\n{task_c1}"))
         );
         // complete_task gets the same limit as ClickUp: only the items
-        // that the home page asks about now.
+        // that the home page asked about today.
         let done = env(&server(&tools[0], "tasks"), DONE_KEY_ENV).unwrap();
         assert!(done.lines().any(|k| k == asked), "{done}");
         let c = server(&tools[0], "clickup");
@@ -2425,6 +2480,11 @@ mod tests {
         assert_eq!(env(&c, QUESTION_REOPEN_ENV).as_deref(), Some(""));
         assert!(c.allowed_tools.iter().any(|t| t == "mark_task_done"));
         assert!(c.allowed_tools.iter().any(|t| t == "reopen_task"));
+        assert!(c.allowed_tools.iter().any(|t| t == "add_task_comment"));
+        assert!(c.allowed_tools.iter().any(|t| t == "delete_task_comment"));
+        // The comment tool gets the user's own words: the message now, and
+        // later the earlier messages of the user in this chat.
+        assert_eq!(env(&c, QUESTION_SAID_ENV).as_deref(), Some("It is done."));
         // Another item chat: bound to its item, and ClickUp only reads.
         assert_eq!(
             env(&server(&tools[1], "tasks"), ITEM_KEY_ENV),
@@ -2434,6 +2494,7 @@ mod tests {
         let c = server(&tools[1], "clickup");
         assert_eq!(env(&c, QUESTION_CHAT_ENV), None);
         assert!(!c.allowed_tools.iter().any(|t| t == "mark_task_done"));
+        assert!(!c.allowed_tools.iter().any(|t| t == "add_task_comment"));
         // The question chat names the other questions: one answer can
         // answer them too.
         let prompt = a.backend.asks.lock().unwrap()[0].0.clone();
@@ -2468,6 +2529,11 @@ mod tests {
         let tools = a.backend.tools.lock().unwrap().clone();
         let c = server(&tools[2], "clickup");
         assert_eq!(env(&c, QUESTION_CHAT_ENV).as_deref(), Some("c1"));
+        assert_eq!(
+            env(&c, QUESTION_SAID_ENV).as_deref(),
+            Some("It is done.\nNo deadline."),
+            "the user's words only: no answer of the AI, no chat note"
+        );
         let prompt = a.backend.asks.lock().unwrap()[2].0.clone();
         assert!(prompt.contains("The echowp work."), "{prompt}");
         assert!(prompt.contains("AIfred asks the user"), "{prompt}");
@@ -2503,6 +2569,43 @@ mod tests {
         assert_eq!(env(&c, QUESTION_CHAT_ENV).as_deref(), Some(""));
         assert_eq!(env(&c, QUESTION_REOPEN_ENV).as_deref(), Some("c1"));
         assert_eq!(env(&c, QUESTION_ITEM_ENV), Some(asked.clone()));
+        // The user put the task back in ClickUp by hand, and the task is
+        // still out of the saved list: no close and no undo is possible,
+        // so ClickUp only reads.
+        closed.forget_closed("c1").unwrap();
+        a.ask_side(
+            &format!("item:{asked}"),
+            "Thanks.",
+            None,
+            vec![],
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let tools = a.backend.tools.lock().unwrap().clone();
+        let c = server(&tools[4], "clickup");
+        assert_eq!(env(&c, QUESTION_ITEM_ENV), None);
+        assert!(!c.allowed_tools.iter().any(|t| t == "delete_task_comment"));
+        // A comment that this chat wrote today keeps the tools: the user
+        // can still ask for its undo.
+        closed
+            .note_comment("458", "c1", &asked, "Stopped.", crate::files::now())
+            .unwrap();
+        a.ask_side(
+            &format!("item:{asked}"),
+            "Undo the note.",
+            None,
+            vec![],
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        let tools = a.backend.tools.lock().unwrap().clone();
+        let c = server(&tools[5], "clickup");
+        assert_eq!(env(&c, QUESTION_CHAT_ENV).as_deref(), Some(""));
+        assert_eq!(env(&c, QUESTION_REOPEN_ENV).as_deref(), Some(""));
+        assert_eq!(env(&c, QUESTION_ITEM_ENV), Some(asked.clone()));
+        assert!(c.allowed_tools.iter().any(|t| t == "delete_task_comment"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

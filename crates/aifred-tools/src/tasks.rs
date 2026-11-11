@@ -294,7 +294,8 @@ fn chat_items() -> Option<Vec<String>> {
 }
 
 /// The items that complete_task can mark done. In the question chat of the
-/// home page, only the items that it asks about now
+/// home page, only the items that the home page asked about today that
+/// are still open and that the user did not skip or correct
 /// (assistant::DONE_KEY_ENV), not all the items that it can change.
 /// Else the same as chat_items.
 fn done_items() -> Option<Vec<String>> {

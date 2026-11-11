@@ -36,6 +36,15 @@ pub struct ClickupList {
     pub warning: Option<String>,
 }
 
+/// One comment that the question chat wrote (ClickupStore::note_comment).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Comment {
+    /// The comment id from ClickUp.
+    pub id: String,
+    /// The comment, as written.
+    pub text: String,
+}
+
 pub struct ClickupStore {
     dir: PathBuf,
 }
@@ -166,11 +175,94 @@ impl ClickupStore {
         })
     }
 
+    /// Notes that the question chat of the item `chat` wrote the comment
+    /// `id` with `text` on the task `task`. delete_task_comment uses it
+    /// (comments_since). The undo works only on the same day, so it also
+    /// removes the notes older than KEEP_CLOSED. `id` must pass
+    /// clickup::check_comment_id: the undo gives it to ClickUp in the
+    /// address of the call.
+    pub fn note_comment(
+        &self,
+        id: &str,
+        task: &str,
+        chat: &str,
+        text: &str,
+        now: u64,
+    ) -> anyhow::Result<()> {
+        db::write(&self.dir, |tx| {
+            tx.execute(
+                "DELETE FROM clickup_comment WHERE ts < ?1",
+                [now.saturating_sub(KEEP_CLOSED) as i64],
+            )?;
+            tx.execute(
+                "INSERT INTO clickup_comment (id, task, chat, text, ts) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (id) DO UPDATE SET task = ?2, chat = ?3, text = ?4, ts = ?5",
+                rusqlite::params![id.trim(), task.trim(), chat.trim(), text.trim(), now as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The comments that the question chat of the item `chat` wrote on the
+    /// task `task` at `since` or later (note_comment), newest first: the
+    /// undo deletes one of them. Two comments in the same second: the one
+    /// noted last is first. The ids are text and not always numbers, so
+    /// the row order breaks the tie, not the id. Empty: this chat wrote no
+    /// comment on the task since then. Another chat cannot delete them:
+    /// the text of its item comes from other people.
+    pub fn comments_since(
+        &self,
+        task: &str,
+        chat: &str,
+        since: u64,
+    ) -> anyhow::Result<Vec<Comment>> {
+        db::read(&self.dir, |c| {
+            let mut q = c.prepare(
+                "SELECT id, text FROM clickup_comment
+                 WHERE task = ?1 AND chat = ?2 AND ts >= ?3
+                 ORDER BY ts DESC, rowid DESC",
+            )?;
+            let rows = q.query_map(
+                rusqlite::params![task.trim(), chat.trim(), since as i64],
+                |r| {
+                    Ok(Comment {
+                        id: r.get(0)?,
+                        text: r.get(1)?,
+                    })
+                },
+            )?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+    }
+
+    /// The tasks with a comment that the question chat of the item `chat`
+    /// wrote at `since` or later, each once, oldest first. The chat gets
+    /// its comment tools while this is not empty, so the undo works also
+    /// when the task left the home page (assistant::ask_side).
+    pub fn commented_since(&self, since: u64, chat: &str) -> anyhow::Result<Vec<String>> {
+        db::read(&self.dir, |c| {
+            let mut q = c.prepare(
+                "SELECT task FROM clickup_comment WHERE ts >= ?1 AND chat = ?2
+                 GROUP BY task ORDER BY MIN(ts), task",
+            )?;
+            let rows = q.query_map(rusqlite::params![since as i64, chat.trim()], |r| r.get(0))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+    }
+
+    /// Forgets the comment `id`, after the undo deleted it.
+    pub fn forget_comment(&self, id: &str) -> anyhow::Result<()> {
+        db::write(&self.dir, |tx| {
+            tx.execute("DELETE FROM clickup_comment WHERE id = ?1", [id.trim()])?;
+            Ok(())
+        })
+    }
+
     /// Takes one task out of the saved list, after the user marked it done
     /// at `now`. The task stays for search. The time of the list does not
     /// change. A missing task is not an error. The close is AIfred's own,
     /// so its reason is known: Done. A status that the user picked before
-    /// the close does not win over it (status.rs).
+    /// the close does not win over it (status.rs). restore is the undo.
     pub fn remove(&self, id: &str, now: u64) -> anyhow::Result<()> {
         db::write(&self.dir, |tx| {
             tx.execute(
@@ -180,6 +272,26 @@ impl ClickupStore {
                 rusqlite::params![SOURCE, id, now as i64, crate::status::DONE],
             )?;
             Ok(())
+        })
+    }
+
+    /// Puts one task back in the saved list, after the undo of a close in
+    /// the window (clickup_undo_done) or in the question chat
+    /// (reopen_task). The undo of remove: the close columns go back to
+    /// what a download sets for an open task (db::save_list), and the
+    /// AIfred status column is written again, as after a download
+    /// (status::refresh_one_in). The time of the list does not change. A
+    /// missing task is not an error.
+    pub fn restore(&self, id: &str) -> anyhow::Result<()> {
+        let id = id.trim();
+        db::write(&self.dir, |tx| {
+            tx.execute(
+                "UPDATE work_item SET in_list = 1, closed_at = NULL, close_reason = NULL,
+                   close_label = NULL, close_tries = 0, close_checked = 0
+                 WHERE source = ?1 AND item_id = ?2 AND in_list = 0",
+                rusqlite::params![SOURCE, id],
+            )?;
+            crate::status::refresh_one_in(tx, &format!("{SOURCE}:{id}"))
         })
     }
 
@@ -209,12 +321,16 @@ impl ClickupStore {
         db::save_details(&self.dir, SOURCE, id, details)
     }
 
-    /// Deletes all saved ClickUp tasks. Use it when the token changes: the old
-    /// tasks can belong to another ClickUp account.
+    /// Deletes all saved ClickUp tasks, and the notes of the closes and
+    /// the comments of the question chat. Use it when the token changes:
+    /// the old tasks can belong to another ClickUp account, and the undo
+    /// of a close or a comment must not ask that account.
     pub fn clear(&self) -> anyhow::Result<()> {
         db::write(&self.dir, |tx| {
             tx.execute("DELETE FROM work_item WHERE source = ?1", [SOURCE])?;
             tx.execute("DELETE FROM work_fetch WHERE source = ?1", [SOURCE])?;
+            tx.execute("DELETE FROM clickup_closed", [])?;
+            tx.execute("DELETE FROM clickup_comment", [])?;
             crate::links::drop_gone_in(tx, crate::files::now())?;
             Ok(())
         })
@@ -291,6 +407,78 @@ pub(crate) mod tests {
 
     fn tasks(items: Vec<ClickupItem>) -> MyTasks {
         MyTasks { items, cut: vec![] }
+    }
+
+    #[test]
+    fn the_comments_of_the_question_chat_are_kept_for_the_undo() {
+        let d = temp("comments");
+        let s = ClickupStore::new(&d);
+        let ids = |task: &str, chat: &str, since: u64| -> Vec<String> {
+            s.comments_since(task, chat, since)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id)
+                .collect()
+        };
+        assert!(ids("c1", "clickup:c1", 0).is_empty());
+        s.note_comment(" 8 ", "c1", "clickup:c1", " Eight. ", 90)
+            .unwrap();
+        s.note_comment(" 9 ", "c1", "clickup:c1", "Nine.", 100)
+            .unwrap();
+        // The comments of this chat on the task from `since` on, newest
+        // first, with their text.
+        assert_eq!(
+            s.comments_since("c1", "clickup:c1", 0).unwrap(),
+            vec![
+                Comment {
+                    id: "9".into(),
+                    text: "Nine.".into()
+                },
+                Comment {
+                    id: "8".into(),
+                    text: "Eight.".into()
+                },
+            ]
+        );
+        assert_eq!(ids("c1", "clickup:c1", 95), vec!["9"]);
+        assert!(ids("c1", "clickup:c1", 101).is_empty());
+        // Another chat cannot delete them.
+        assert!(ids("c1", "task:t9", 0).is_empty());
+        // The tasks with a comment of this chat, each once, oldest first:
+        // the chat keeps its comment tools for them.
+        s.note_comment("10", "c0", "clickup:c1", "Zero.", 95)
+            .unwrap();
+        assert_eq!(
+            s.commented_since(0, "clickup:c1").unwrap(),
+            vec!["c1", "c0"]
+        );
+        assert_eq!(s.commented_since(96, "clickup:c1").unwrap(), vec!["c1"]);
+        assert!(s.commented_since(0, "task:t9").unwrap().is_empty());
+        s.forget_comment("10").unwrap();
+        s.forget_comment("9").unwrap();
+        assert_eq!(ids("c1", "clickup:c1", 0), vec!["8"]);
+        // Two comments in the same second: the last one noted is first,
+        // also when its id sorts lower as text ("1000" < "999").
+        s.note_comment("999", "c1", "clickup:c1", "A", 100).unwrap();
+        s.note_comment("1000", "c1", "clickup:c1", "B", 100)
+            .unwrap();
+        assert_eq!(ids("c1", "clickup:c1", 0), vec!["1000", "999", "8"]);
+        s.forget_comment("1000").unwrap();
+        assert_eq!(ids("c1", "clickup:c1", 0), vec!["999", "8"]);
+        s.forget_comment("999").unwrap();
+        // A new comment removes the notes older than KEEP_CLOSED.
+        s.note_comment("11", "c2", "task:t1", "Late.", 100 + KEEP_CLOSED + 1)
+            .unwrap();
+        assert!(ids("c1", "clickup:c1", 0).is_empty());
+        assert_eq!(ids("c2", "task:t1", 0), vec!["11"]);
+        // A new token: the notes go with the tasks, so the undo never asks
+        // another account to delete the comment or put the task back.
+        s.note_closed("c3", "to do", "clickup:c3", 100 + KEEP_CLOSED + 1)
+            .unwrap();
+        s.clear().unwrap();
+        assert!(ids("c2", "task:t1", 0).is_empty());
+        assert_eq!(s.closed_status("c3").unwrap(), None);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -396,6 +584,41 @@ pub(crate) mod tests {
         let l = s.cached("acct", u64::MAX, 5000).unwrap().unwrap();
         assert_eq!(ids(&l), vec!["b"]);
         assert_eq!(l.fetched_at, 1000);
+        // The undo of the close puts the task back, with no close columns,
+        // so the question chat can use it again at once. The AIfred status
+        // column is written again, as after a download: a stale value does
+        // not stay.
+        db::write(&d, |tx| {
+            tx.execute(
+                "UPDATE work_item SET status = 'stale' WHERE item_id = 'a'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        s.restore(" a ").unwrap();
+        s.restore("nope").unwrap();
+        let status: String = db::read(&d, |c| {
+            Ok(c.query_row(
+                "SELECT status FROM work_item WHERE item_id = 'a'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+        assert_eq!(status, crate::status::TODO);
+        let l = s.cached("acct", u64::MAX, 5000).unwrap().unwrap();
+        assert_eq!(ids(&l), vec!["b", "a"], "newest change first");
+        assert_eq!(l.fetched_at, 1000);
+        let close: (bool, Option<String>, Option<i64>) = db::read(&d, |c| {
+            Ok(c.query_row(
+                "SELECT in_list, close_reason, closed_at FROM work_item WHERE item_id = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+        assert_eq!(close, (true, None, None));
         s.clear().unwrap();
         assert!(s.cached("acct", u64::MAX, 5000).unwrap().is_none());
         std::fs::remove_dir_all(&d).unwrap();

@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 37;
+const VERSION: i64 = 38;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -1007,6 +1007,18 @@ ALTER TABLE work_item ADD COLUMN closed_at INTEGER;  -- when the item left the l
 ALTER TABLE work_item ADD COLUMN close_checked INTEGER NOT NULL DEFAULT 0;  -- the last read of an item that is still open in its source
 ";
 
+/// The ClickUp comments that the question chat wrote (clickup_list.rs).
+/// delete_task_comment can delete only these, and only from the same chat.
+const SCHEMA_38: &str = "
+CREATE TABLE clickup_comment (
+  id   TEXT PRIMARY KEY,  -- the comment id from ClickUp
+  task TEXT NOT NULL,     -- the task id
+  chat TEXT NOT NULL,     -- the item key of the question chat that wrote it
+  text TEXT NOT NULL,     -- the comment, so the undo can say which one went
+  ts   INTEGER NOT NULL   -- when AIfred wrote it, in Unix seconds
+);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -1189,6 +1201,9 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 37 {
         tx.execute_batch(SCHEMA_37)?;
+    }
+    if version < 38 {
+        tx.execute_batch(SCHEMA_38)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;

@@ -779,6 +779,12 @@ pub fn day_start(day: &str) -> anyhow::Result<i64> {
     Ok(local_midnight(d)?.timestamp())
 }
 
+/// Local midnight of today, in Unix seconds. The undo of the question chat
+/// works only on the same day: the chat and its tools use this one start.
+pub fn today_start() -> anyhow::Result<u64> {
+    Ok(day_start(&crate::plan::today())?.max(0) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

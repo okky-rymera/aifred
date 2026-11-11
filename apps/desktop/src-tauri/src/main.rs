@@ -1237,8 +1237,9 @@ async fn clickup_items(app: State<'_, App>, force: bool) -> CmdResult<ClickupLis
     }
 }
 
-/// Moves one task to the closed status of its ClickUp list. This is the only
-/// change AIfred makes in ClickUp, and only the user starts it.
+/// Moves one task to the closed status of its ClickUp list. The window and
+/// the question chat make this change in ClickUp, and only the user starts
+/// it. The question chat can also write a comment in the user's words.
 /// Returns the status the task had before, for the undo.
 #[tauri::command]
 async fn clickup_mark_done(app: State<'_, App>, id: String) -> CmdResult<String> {
@@ -1252,13 +1253,22 @@ async fn clickup_mark_done(app: State<'_, App>, id: String) -> CmdResult<String>
     Ok(before)
 }
 
-/// Puts a task back to the status it had before clickup_mark_done.
+/// Puts a task back to the status it had before clickup_mark_done, and
+/// back in the saved list, so it shows at once and the question chat can
+/// use it again.
 #[tauri::command]
 async fn clickup_undo_done(app: State<'_, App>, id: String, status: String) -> CmdResult<()> {
-    clickup_client(&app.assistant.dir)?
+    let dir = app.assistant.dir.clone();
+    clickup_client(&dir)?
         .set_status(&id, &status)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    // ClickUp has the change. If the saved list cannot change, the task
+    // only shows after the next reload, so this is not an error.
+    if let Err(e) = blocking(&app, move |_| ClickupStore::new(&dir).restore(&id)).await {
+        eprintln!("aifred: cannot put the task back in the saved ClickUp list: {e}");
+    }
+    Ok(())
 }
 
 #[tauri::command]

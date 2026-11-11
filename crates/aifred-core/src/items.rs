@@ -36,6 +36,20 @@ pub fn split(key: &str) -> anyhow::Result<(&str, &str)> {
 /// a GitHub or ClickUp item in the last download that is not closed in
 /// AIfred (status.rs: for example, a task with a rule for Unfinished).
 pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
+    present(c, key, true)
+}
+
+/// True when the item is still in its source: a local task that is not
+/// done, or a GitHub or ClickUp item that was in the last download. A
+/// status that the user picked in AIfred (for example Cancelled) does not
+/// count: the item can still be closed in ClickUp (context::QuestionScope).
+pub fn in_source(c: &Connection, key: &str) -> anyhow::Result<bool> {
+    present(c, key, false)
+}
+
+/// is_open and in_source: with `open`, a GitHub or ClickUp item must also
+/// not be closed in AIfred. A local task has no AIfred status: done or not.
+fn present(c: &Connection, key: &str, open: bool) -> anyhow::Result<bool> {
     let (source, id) = split(key)?;
     let found = if source == "task" {
         c.query_row(
@@ -45,11 +59,14 @@ pub fn is_open(c: &Connection, key: &str) -> anyhow::Result<bool> {
         )
         .optional()?
     } else {
+        let status = if open {
+            format!(" AND status NOT IN {}", crate::status::CLOSED_SQL)
+        } else {
+            String::new()
+        };
         c.query_row(
             &format!(
-                "SELECT 1 FROM work_item WHERE source = ?1 AND item_id = ?2 AND in_list = 1
-                 AND status NOT IN {}",
-                crate::status::CLOSED_SQL
+                "SELECT 1 FROM work_item WHERE source = ?1 AND item_id = ?2 AND in_list = 1{status}"
             ),
             [source, id],
             |_| Ok(()),

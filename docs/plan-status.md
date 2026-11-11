@@ -44,7 +44,7 @@ Example: in the Rocks list, "Delayed" means "we did not do it this quarter, and 
 
 ## Decisions
 
-1. The status is only in AIfred. Only "mark done" changes ClickUp (user, 2026-11-10).
+1. The status is only in AIfred. Only "mark done" changes ClickUp (user, 2026-11-10). Added on 2026-11-11: the question chat of the home page can also write a comment on a ClickUp task. It writes the user's own words, only when the user asks for a note there. A Cancelled pick in AIfred stays as it is. A later "mark done" from the chat wins over it (status rule 1), and the user accepted that.
 2. The Rocks list. The user gave "🎯 Rocks (Q4 2026)" in the "Company Wide" space as the example. Its statuses, from ClickUp on 2026-11-10:
 
    | ClickUp status | ClickUp type | AIfred today | AIfred status in this plan |

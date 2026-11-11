@@ -631,18 +631,44 @@ fn done_status(list_json: &[u8]) -> anyhow::Result<String> {
     bail!("the task's list has no closed status")
 }
 
+/// The most characters in one comment from Client::add_comment.
+pub const MAX_COMMENT_CHARS: usize = 2000;
+
 /// A ClickUp task id is letters, digits, "-", and "_". The check keeps an
 /// id from changing the address of the call.
 pub fn check_task_id(id: &str) -> anyhow::Result<()> {
+    check_id(id, "task")
+}
+
+/// check_task_id for a comment id: the same form, and the undo gives it to
+/// ClickUp in the address of the call too.
+pub fn check_comment_id(id: &str) -> anyhow::Result<()> {
+    check_id(id, "comment")
+}
+
+fn check_id(id: &str, what: &str) -> anyhow::Result<()> {
     if id.is_empty()
         || id.len() > 64
         || !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        bail!("bad ClickUp task id: {id:?}");
+        bail!("bad ClickUp {what} id: {id:?}");
     }
     Ok(())
+}
+
+/// The text of one comment (Client::add_comment), trimmed: not empty and
+/// at most MAX_COMMENT_CHARS characters.
+pub fn check_comment_text(text: &str) -> anyhow::Result<&str> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("the comment is empty");
+    }
+    if text.chars().count() > MAX_COMMENT_CHARS {
+        bail!("the comment is too long: at most {MAX_COMMENT_CHARS} characters");
+    }
+    Ok(text)
 }
 
 /// ClickUp's own task ids are letters and digits only. A team's custom id
@@ -732,6 +758,35 @@ struct RawError {
     err: String,
 }
 
+/// ClickUp said 404: the task or the comment is not there (any more), or
+/// this account cannot see it. delete_comment reads it: a comment that is
+/// already gone is no error.
+#[derive(Debug)]
+pub struct NotFound(String);
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotFound {}
+
+/// The call left for ClickUp, but no reply came back: a timeout, or a
+/// broken connection. ClickUp may have made the change. A call that
+/// changes ClickUp (add_comment) reads it: the user must look in ClickUp
+/// before the change is made again.
+#[derive(Debug)]
+pub struct NoReply(String);
+
+impl std::fmt::Display for NoReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoReply {}
+
 pub struct Client {
     http: reqwest::Client,
     token: String,
@@ -759,17 +814,19 @@ impl Client {
 
     /// Sends one call. Returns the reply body, or an error with ClickUp's message.
     async fn send(&self, req: reqwest::RequestBuilder) -> anyhow::Result<Vec<u8>> {
-        let res = req
-            .header("Authorization", &self.token)
-            .send()
-            .await
-            .context("cannot reach ClickUp")?;
+        // A call that cannot connect never reached ClickUp. Any other
+        // failure (a timeout, a broken connection) came after the call
+        // left, so ClickUp may have the change: NoReply.
+        let res = match req.header("Authorization", &self.token).send().await {
+            Ok(r) => r,
+            Err(e) if e.is_connect() => return Err(e).context("cannot reach ClickUp"),
+            Err(e) => return Err(NoReply(format!("no reply from ClickUp: {e}")).into()),
+        };
         let status = res.status();
-        let body = res
-            .bytes()
-            .await
-            .context("cannot read the ClickUp reply")?
-            .to_vec();
+        let body = match res.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(e) => return Err(NoReply(format!("cannot read the ClickUp reply: {e}")).into()),
+        };
         if status.is_success() {
             return Ok(body);
         }
@@ -781,6 +838,9 @@ impl Client {
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             bail!("ClickUp asks AIfred to slow down. Try again in one minute.");
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(NotFound(format!("ClickUp said {status}: {msg}")).into());
         }
         bail!("ClickUp said {status}: {msg}")
     }
@@ -1023,6 +1083,50 @@ impl Client {
         Ok(head.status.status)
     }
 
+    /// Writes one comment on a task, as the user. Returns the comment id
+    /// from ClickUp, so delete_comment can take it back. None: ClickUp
+    /// saved the comment but sent a reply that AIfred cannot read, so the
+    /// comment is there with no id for the undo. The text is the user's
+    /// words (check_comment_text): nobody is notified. An error with
+    /// NoReply in it: the comment may be saved too, so the call must not be
+    /// made again before the user looks in ClickUp.
+    pub async fn add_comment(&self, id: &str, text: &str) -> anyhow::Result<Option<String>> {
+        check_task_id(id)?;
+        let text = check_comment_text(text)?;
+        let body = serde_json::json!({ "comment_text": text, "notify_all": false });
+        let reply = self
+            .send(
+                self.http
+                    .post(format!("{}/task/{id}/comment", self.base))
+                    .json(&body),
+            )
+            .await?;
+        // ClickUp said yes: the comment is saved. A reply of another form
+        // is not an error, else the caller writes the comment again.
+        let made: Option<RawComment> = serde_json::from_slice(&reply).ok();
+        Ok(made.map(|m| m.id.text()))
+    }
+
+    /// Deletes one comment. The undo of add_comment uses it. False: ClickUp
+    /// said 404, so the comment is not there for this account: the user
+    /// deleted it by hand, or the token is of another account now. The
+    /// meaning of the 404 is taken from the ClickUp docs, not from a test
+    /// against ClickUp.
+    pub async fn delete_comment(&self, comment_id: &str) -> anyhow::Result<bool> {
+        check_comment_id(comment_id)?;
+        let sent = self
+            .send(
+                self.http
+                    .delete(format!("{}/comment/{comment_id}", self.base)),
+            )
+            .await;
+        match sent {
+            Ok(_) => Ok(true),
+            Err(e) if e.downcast_ref::<NotFound>().is_some() => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Sets the status of one task. The undo of mark_done uses it.
     pub async fn set_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
         check_task_id(id)?;
@@ -1037,6 +1141,31 @@ impl Client {
         )
         .await?;
         Ok(())
+    }
+}
+
+/// The reply of ClickUp to a new comment. The id is a number there today,
+/// but a string in the comments of a task: both are read.
+#[derive(Deserialize)]
+struct RawComment {
+    id: CommentId,
+}
+
+/// A comment id as ClickUp sends it: a number or a string.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CommentId {
+    Number(u64),
+    Text(String),
+}
+
+impl CommentId {
+    /// The id as plain text, with no JSON quotes.
+    fn text(&self) -> String {
+        match self {
+            CommentId::Number(n) => n.to_string(),
+            CommentId::Text(s) => s.trim().to_string(),
+        }
     }
 }
 
@@ -1556,6 +1685,106 @@ pub(crate) mod tests {
             c.mark_done("../user").await.is_err(),
             "a bad id never reaches ClickUp"
         );
+    }
+
+    #[tokio::test]
+    async fn a_comment_is_written_as_the_user_and_can_be_deleted() {
+        let (base, log) = fake_clickup(|method, path| match (method, path) {
+            ("POST", "/api/v2/task/86abc/comment") => (
+                200,
+                r#"{"id":458,"hist_id":"26508","date":1568036964079}"#.into(),
+            ),
+            // ClickUp sends the id of a new comment as a number today, and
+            // as a string in the comments of a task: both are read.
+            ("POST", "/api/v2/task/86def/comment") => (
+                200,
+                r#"{"id":"459","hist_id":"26509","date":1568036964079}"#.into(),
+            ),
+            // ClickUp saved the comment, but the reply is of another form:
+            // the comment is there, with no id for the undo.
+            ("POST", "/api/v2/task/86ghi/comment") => (200, "ok".into()),
+            ("DELETE", "/api/v2/comment/458") => (200, "{}".into()),
+            // A comment that is already gone: no error, the undo is done.
+            ("DELETE", "/api/v2/comment/457") => (404, r#"{"err":"Comment not found"}"#.into()),
+            ("DELETE", "/api/v2/comment/456") => (500, r#"{"err":"Oops"}"#.into()),
+            _ => (404, r#"{"err":"no"}"#.into()),
+        })
+        .await;
+        let c = Client::with_base("pk_test", &base);
+        assert_eq!(
+            c.add_comment("86abc", " Stopped: the sites move. ")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("458")
+        );
+        assert_eq!(
+            c.add_comment("86def", "Hi").await.unwrap().as_deref(),
+            Some("459")
+        );
+        assert_eq!(c.add_comment("86ghi", "Hi").await.unwrap(), None);
+        assert!(c.delete_comment("458").await.unwrap());
+        assert!(!c.delete_comment("457").await.unwrap(), "already gone");
+        let e = c.delete_comment("456").await.unwrap_err().to_string();
+        assert!(e.contains("500") && e.contains("Oops"), "{e}");
+        let calls = log.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                r#"POST /api/v2/task/86abc/comment {"comment_text":"Stopped: the sites move.","notify_all":false}"#.to_string(),
+                r#"POST /api/v2/task/86def/comment {"comment_text":"Hi","notify_all":false}"#.to_string(),
+                r#"POST /api/v2/task/86ghi/comment {"comment_text":"Hi","notify_all":false}"#.to_string(),
+                "DELETE /api/v2/comment/458".to_string(),
+                "DELETE /api/v2/comment/457".to_string(),
+                "DELETE /api/v2/comment/456".to_string(),
+            ]
+        );
+        assert!(
+            c.add_comment("86abc", "  ").await.is_err(),
+            "no empty comment"
+        );
+        let long = "x".repeat(MAX_COMMENT_CHARS + 1);
+        let e = c.add_comment("86abc", &long).await.unwrap_err().to_string();
+        assert!(e.contains("too long"), "{e}");
+        assert_eq!(
+            c.add_comment("86abc", &long[1..]).await.unwrap().as_deref(),
+            Some("458"),
+            "a comment of MAX_COMMENT_CHARS characters is fine"
+        );
+        assert!(
+            c.add_comment("../x", "Hi").await.is_err(),
+            "a bad id never reaches ClickUp"
+        );
+        let e = c.delete_comment("../x").await.unwrap_err().to_string();
+        assert!(e.contains("bad ClickUp comment id"), "{e}");
+        // No server at the address: the call never left, so the error does
+        // not say that the comment may be saved.
+        let gone = Client::with_base("pk_test", "http://127.0.0.1:1");
+        let e = gone.add_comment("86abc", "Hi").await.unwrap_err();
+        assert!(e.downcast_ref::<NoReply>().is_none(), "{e:#}");
+        assert!(format!("{e:#}").contains("cannot reach ClickUp"), "{e:#}");
+    }
+
+    /// ClickUp took the call and then went quiet: the comment may be
+    /// saved, and the error says so (NoReply), so the caller does not
+    /// write it again.
+    #[tokio::test]
+    async fn a_call_with_no_reply_says_that_the_change_may_be_saved() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/api/v2", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                // Take the call, send nothing, and close.
+                drop(sock);
+            }
+        });
+        let c = Client::with_base("pk_test", &base);
+        let e = c.add_comment("86abc", "Hi").await.unwrap_err();
+        assert!(e.downcast_ref::<NoReply>().is_some(), "{e:#}");
+        assert!(format!("{e:#}").contains("no reply from ClickUp"), "{e:#}");
+        // A delete with no reply is an error too, not "already gone".
+        let e = c.delete_comment("458").await.unwrap_err();
+        assert!(e.downcast_ref::<NoReply>().is_some(), "{e:#}");
     }
 
     #[tokio::test]

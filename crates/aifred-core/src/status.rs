@@ -10,7 +10,10 @@
 //! do it. Unfinished and Cancelled are not finished work: AIfred keeps no
 //! work time for them, and no "task done" job starts.
 //!
-//! The status is only in AIfred. Only "mark done" changes ClickUp, as before.
+//! The status is only in AIfred. Only "mark done" changes the status in
+//! ClickUp, as before. The question chat can also write a comment on a
+//! ClickUp task in the user's words (aifred-tools, add_task_comment): a
+//! comment changes no status.
 //!
 //! Which status wins, first match:
 //! 1. The status that the user picked (item_status, or a weekly review

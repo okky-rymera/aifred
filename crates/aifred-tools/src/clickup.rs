@@ -1,13 +1,16 @@
-//! Read-only ClickUp tools for aifred, served over MCP (stdio).
+//! ClickUp tools for aifred, served over MCP (stdio). They read, apart
+//! from the four tools of the question chat (below).
 //!
 //! The server reads the ClickUp token from the aifred data folder
 //! ($AIFRED_HOME, or ~/.aifred), or from AIFRED_CLICKUP_TOKEN. The token never
 //! goes into the tool settings file that Claude reads.
 //!
 //! These tools only read, with one exception: the question chat on the home
-//! page (QUESTION_CHAT_ENV) can mark a task that the home page asks about
-//! done when the user says it is finished, and put the status from before back. The user also marks
-//! ClickUp tasks done in the window.
+//! page (QUESTION_CHAT_ENV) can mark a task that the home page asked about
+//! today done when the user says it is finished, put the status from
+//! before back, and write a comment on such a task in the user's words
+//! (also on a task that it closed today, QUESTION_REOPEN_ENV). The user
+//! also marks ClickUp tasks done in the window.
 //!
 //! my_tasks uses the list that the window saved in the database while it is
 //! new enough, and saves each new list it gets from ClickUp. search_my_tasks
@@ -50,27 +53,152 @@ struct SearchArgs {
     limit: Option<u32>,
 }
 
+/// The task of a tool that changes ClickUp. The team's custom id (DEV-42)
+/// is not accepted: the lists of the question chat and the notes for the
+/// undo hold ClickUp's own id.
+#[derive(Deserialize, JsonSchema)]
+struct TaskArgs {
+    /// ClickUp task id from my_tasks (for example "86abc123"), or the item key "clickup:86abc123". Not the team's custom id.
+    id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CommentArgs {
+    /// ClickUp task id from my_tasks (for example "86abc123"), or the item key "clickup:86abc123". Not the team's custom id.
+    id: String,
+    /// The comment, in the user's own words from this chat, plain text, short.
+    text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DeleteCommentArgs {
+    /// ClickUp task id from my_tasks (for example "86abc123"), or the item key "clickup:86abc123". Not the team's custom id.
+    id: String,
+    /// The comment to delete, from add_task_comment. Leave it out when this chat wrote one comment on the task today: that one goes.
+    comment_id: Option<String>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct DetailArgs {
     /// ClickUp task id from my_tasks (for example "86abc123"), or the team's custom id (for example "DEV-42").
     id: String,
 }
 
-/// An error unless the question chat of the home page started this server
-/// and `id` is in the list of the env value `var` (one task id on each
-/// line): QUESTION_CHAT_ENV for mark_task_done (the tasks that the home page
-/// asks about now), QUESTION_REOPEN_ENV for reopen_task (the tasks that the
-/// question chat closed today). Other chats get
-/// item text from other people, and that text must not close tasks.
-fn check_question_chat(var: &str, id: &str) -> Result<(), ErrorData> {
+/// True when the question chat of the home page started this server and
+/// `id` is in the list of the env value `var` (one task id on each line):
+/// QUESTION_CHAT_ENV for mark_task_done (the tasks that the home page asked
+/// about today and that are still open in ClickUp), QUESTION_REOPEN_ENV for
+/// reopen_task (the tasks that the question chat closed today). Other chats
+/// get item text from other people, and that text must not change tasks.
+fn in_question_chat(var: &str, id: &str) -> bool {
     let allowed = std::env::var(var).unwrap_or_default();
-    if allowed.lines().any(|t| t.trim() == id.trim()) {
+    allowed.lines().any(|t| t.trim() == id.trim())
+}
+
+/// An error unless in_question_chat. `scope` names the tasks of the list,
+/// and `advice` says what the user can do instead: both differ for a
+/// close and for its undo.
+fn check_question_chat(var: &str, id: &str, scope: &str, advice: &str) -> Result<(), ErrorData> {
+    if in_question_chat(var, id) {
         Ok(())
     } else {
         Err(ErrorData::invalid_request(
-            "Only the question chat on the home page can change ClickUp, and only the tasks that it asks about. Tell the user to mark the task done in AIfred or in ClickUp.",
+            format!(
+                "Only the question chat on the home page can change ClickUp, and only {scope}. {advice}"
+            ),
             None,
         ))
+    }
+}
+
+/// check_question_chat for a comment: the task is in QUESTION_CHAT_ENV (the
+/// home page asked about it today and it is open), or in
+/// QUESTION_REOPEN_ENV (this chat closed it today: the user can still say
+/// why, one message after the close).
+fn check_comment_chat(id: &str) -> Result<(), ErrorData> {
+    if in_question_chat(aifred_core::assistant::QUESTION_REOPEN_ENV, id) {
+        return Ok(());
+    }
+    check_question_chat(
+        aifred_core::assistant::QUESTION_CHAT_ENV,
+        id,
+        "the tasks that the home page asked about today",
+        "Tell the user to add the comment in ClickUp.",
+    )
+}
+
+/// The words of 3 or more letters or digits in `s`, in lower case.
+fn words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(String::from)
+        .collect()
+}
+
+/// Nothing when `text` is in the user's own words `said` (the messages of
+/// the user in this chat, QUESTION_SAID_ENV), else why not. The check is
+/// a heuristic: at least 2 of 3 words of the comment are in the user's
+/// words, where a word matches on its first 3 letters ("move" and
+/// "moving"). Text from other people (a task description) has mostly
+/// other words, so the AI cannot send it to the team as a comment. With
+/// no user words at all, no comment passes.
+fn in_users_words(text: &str, said: &str) -> Result<(), String> {
+    let said = words(said);
+    if said.is_empty() {
+        return Err("The words of the user in this chat are not known, so no comment can go to ClickUp. Tell the user to add the comment in ClickUp.".into());
+    }
+    let stem = |w: &str| w.chars().take(3).collect::<String>();
+    let stems: std::collections::HashSet<String> = said.iter().map(|w| stem(w)).collect();
+    let all = words(text);
+    let missing: Vec<&str> = all
+        .iter()
+        .filter(|w| !stems.contains(&stem(w)))
+        .map(String::as_str)
+        .collect();
+    if missing.len() * 3 > all.len() {
+        return Err(format!(
+            "The comment must be in the user's own words from this chat, and these words are not there: {}. Write what the user wrote, or tell the user to add the comment in ClickUp.",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The comment that delete_task_comment deletes, out of the comments
+/// `wrote` of this chat on the task today (newest first): the one with the
+/// id `wanted`, or the only one. With another id, or with no id and more
+/// than one comment, the error lists the comments with their text, so the
+/// AI can ask the user which one.
+fn pick_comment<'a>(
+    wrote: &'a [aifred_core::clickup_list::Comment],
+    wanted: Option<&str>,
+) -> Result<&'a aifred_core::clickup_list::Comment, ErrorData> {
+    let listed = || {
+        wrote
+            .iter()
+            .map(|c| format!("\n- {}: {:?}", c.id, cut(&c.text, 200)))
+            .collect::<String>()
+    };
+    match wanted.map(str::trim) {
+        Some(wanted) => wrote.iter().find(|c| c.id == wanted).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!(
+                    "This chat wrote no comment {wanted:?} on this task today. Its comments on the task today, newest first:{}",
+                    listed()
+                ),
+                None,
+            )
+        }),
+        None if wrote.len() == 1 => Ok(&wrote[0]),
+        None => Err(ErrorData::invalid_params(
+            format!(
+                "This chat wrote {} comments on this task today. Give the comment_id of the one to delete, newest first:{}",
+                wrote.len(),
+                listed()
+            ),
+            None,
+        )),
     }
 }
 
@@ -239,10 +367,15 @@ impl ClickupTools {
     )]
     async fn mark_task_done(
         &self,
-        Parameters(a): Parameters<DetailArgs>,
+        Parameters(a): Parameters<TaskArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = task_id(&a.id);
-        check_question_chat(aifred_core::assistant::QUESTION_CHAT_ENV, id)?;
+        check_question_chat(
+            aifred_core::assistant::QUESTION_CHAT_ENV,
+            id,
+            "the tasks that the home page asked about today and that are still open in ClickUp",
+            "Tell the user to mark the task done in AIfred or in ClickUp.",
+        )?;
         clickup::check_task_id(id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         let before = self.client()?.mark_done(id).await.map_err(fail)?;
         // The undo (reopen_task) needs this note, with the chat that closed
@@ -265,10 +398,15 @@ impl ClickupTools {
     )]
     async fn reopen_task(
         &self,
-        Parameters(a): Parameters<DetailArgs>,
+        Parameters(a): Parameters<TaskArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = task_id(&a.id);
-        check_question_chat(aifred_core::assistant::QUESTION_REOPEN_ENV, id)?;
+        check_question_chat(
+            aifred_core::assistant::QUESTION_REOPEN_ENV,
+            id,
+            "the tasks that this chat marked done today",
+            "Tell the user to open the task again in ClickUp.",
+        )?;
         clickup::check_task_id(id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         // Only the status that AIfred saved when it closed the task. So the
         // AI cannot give another status, for example a closed one.
@@ -283,9 +421,126 @@ impl ClickupTools {
         if let Err(e) = store.forget_closed(id) {
             eprintln!("aifred-clickup-mcp: cannot forget the close: {e:#}");
         }
-        ok_json(
-            &json!({ "id": id, "status": status, "note": "The task shows again after the next download of the ClickUp list." }),
-        )
+        // The undo of remove (mark_task_done): the task is back in the
+        // saved list at once, so the question chat can use it again in the
+        // next message. ClickUp has the change, so a failure is not an
+        // error: the next download puts the task back.
+        if let Err(e) = store.restore(id) {
+            eprintln!("aifred-clickup-mcp: cannot put the task back in the saved list: {e:#}");
+        }
+        ok_json(&json!({ "id": id, "status": status }))
+    }
+
+    #[tool(
+        description = "Write one comment on a ClickUp task, as the user. Use it only when the user asks for a note or an explanation in ClickUp, and write only what the user's own words in this chat say, short: the tool refuses other words. The team sees it in ClickUp. Call it once: when the answer is an error that says the comment may be saved, do not call it again; tell the user to look at the task in ClickUp. delete_task_comment with the task id and the `comment_id` of the answer is the undo."
+    )]
+    async fn add_task_comment(
+        &self,
+        Parameters(a): Parameters<CommentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = task_id(&a.id);
+        check_comment_chat(id)?;
+        clickup::check_task_id(id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        let text = clickup::check_comment_text(&a.text)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        // Only the user's own words go to the team. The chat note and the
+        // item text come from other people, and the prompt alone does not
+        // keep them out.
+        let said = std::env::var(aifred_core::assistant::QUESTION_SAID_ENV).unwrap_or_default();
+        in_users_words(text, &said).map_err(|e| ErrorData::invalid_params(e, None))?;
+        let made = match self.client()?.add_comment(id, text).await {
+            Ok(m) => m,
+            // The call left, but no reply came: ClickUp may have the
+            // comment. A second call could write it two times.
+            Err(e) if e.downcast_ref::<clickup::NoReply>().is_some() => {
+                return Err(ErrorData::internal_error(
+                    format!(
+                        "No reply from ClickUp, so the comment may be saved. Do not write it again. Tell the user to look at the task in ClickUp. ({e:#})"
+                    ),
+                    None,
+                ));
+            }
+            Err(e) => return Err(fail(e)),
+        };
+        let mut out = json!({ "id": id, "text": text });
+        // The undo (delete_task_comment) needs this note, with the chat
+        // that wrote the comment: the chat does not keep the comment id
+        // from one message to the next. ClickUp has the comment, so a
+        // failed note is not an error: the user can delete it in ClickUp.
+        // The undo gives the id to ClickUp in the address of the call, so
+        // an id of another form is not noted: no error, and no undo.
+        let chat = std::env::var(aifred_core::assistant::QUESTION_ITEM_ENV).unwrap_or_default();
+        let noted = match &made {
+            Some(comment_id) => clickup::check_comment_id(comment_id).and_then(|()| {
+                ClickupStore::new(&self.dir).note_comment(comment_id, id, &chat, text, now())
+            }),
+            None => Err(anyhow::anyhow!("ClickUp sent no comment id")),
+        };
+        match (made, noted) {
+            (Some(comment_id), Ok(())) => out["comment_id"] = json!(comment_id),
+            (_, Err(e)) => {
+                eprintln!("aifred-clickup-mcp: cannot note the comment for the undo: {e:#}");
+                out["note"] = json!(
+                    "ClickUp saved the comment, but AIfred cannot delete it from the chat. The user can delete it in ClickUp."
+                );
+            }
+            (None, Ok(())) => unreachable!("no id is not noted"),
+        }
+        ok_json(&out)
+    }
+
+    #[tool(
+        description = "Undo add_task_comment: delete one comment that this chat wrote today on a ClickUp task. Use it only when the user asks for the undo. Give `comment_id` from the add_task_comment answer; without it, the one comment of this chat on the task today goes, and with more than one the answer lists them with their text. The answer has the `text` of the deleted comment, `deleted` true when ClickUp deleted it now, and `gone` true when it was not there any more."
+    )]
+    async fn delete_task_comment(
+        &self,
+        Parameters(a): Parameters<DeleteCommentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = task_id(&a.id);
+        clickup::check_task_id(id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        // Only a comment that this question chat wrote today. Another chat
+        // gets item text from other people, and that text must not delete
+        // comments. A bare comment id from the AI is not trusted: it must
+        // be in the notes of this chat.
+        let chat = std::env::var(aifred_core::assistant::QUESTION_ITEM_ENV).unwrap_or_default();
+        let store = ClickupStore::new(&self.dir);
+        let wrote = if chat.trim().is_empty() {
+            vec![]
+        } else {
+            let since = aifred_core::calendar::today_start().map_err(fail)?;
+            store.comments_since(id, &chat, since).map_err(fail)?
+        };
+        if wrote.is_empty() {
+            return Err(ErrorData::invalid_request(
+                "This chat wrote no comment on this task today, so it cannot delete one. Tell the user to delete the comment in ClickUp.",
+                None,
+            ));
+        }
+        let comment = pick_comment(&wrote, a.comment_id.as_deref())?;
+        // A comment that is already gone (the user deleted it in ClickUp)
+        // is forgotten too: else every later undo on the task would find
+        // it again.
+        let deleted = self
+            .client()?
+            .delete_comment(&comment.id)
+            .await
+            .map_err(fail)?;
+        if let Err(e) = store.forget_comment(&comment.id) {
+            eprintln!("aifred-clickup-mcp: cannot forget the comment: {e:#}");
+        }
+        let mut out = json!({
+            "id": id,
+            "comment_id": comment.id,
+            "text": comment.text,
+            "deleted": deleted,
+        });
+        if !deleted {
+            out["gone"] = json!(true);
+            out["note"] = json!(
+                "ClickUp has no such comment for this account any more: the user deleted it, or the token is of another account now."
+            );
+        }
+        ok_json(&out)
     }
 }
 
@@ -423,6 +678,123 @@ mod tests {
             .unwrap_err();
         assert!(e.message.contains("bad ClickUp task id"), "{e:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The comment tools without the question chat, or for a comment that
+    /// another chat wrote: an error before any ClickUp call. The fake
+    /// token would fail if ClickUp were asked.
+    #[tokio::test]
+    async fn comments_need_the_question_chat_and_only_its_own_comments_go() {
+        let dir =
+            std::env::temp_dir().join(format!("aifred-clickup-mcp-comment-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        clickup::save_token(&dir, "pk_test").unwrap();
+        let t = ClickupTools { dir: dir.clone() };
+        // The test process has no question chat env: no task is allowed.
+        let e = t
+            .add_task_comment(Parameters(CommentArgs {
+                id: "clickup:86abc".into(),
+                text: "Stopped for now.".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("question chat"), "{e:?}");
+        // A comment that another chat wrote cannot be deleted here: this
+        // process is no question chat (no QUESTION_ITEM_ENV).
+        ClickupStore::new(&dir)
+            .note_comment("458", "86abc", "clickup:86abc", "Stopped.", now())
+            .unwrap();
+        let e = t
+            .delete_task_comment(Parameters(DeleteCommentArgs {
+                id: "clickup:86abc".into(),
+                comment_id: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("wrote no comment"), "{e:?}");
+        let e = t
+            .delete_task_comment(Parameters(DeleteCommentArgs {
+                id: "../x".into(),
+                comment_id: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("bad ClickUp task id"), "{e:?}");
+        // The close and its undo say what the user can do instead: a close
+        // in AIfred or ClickUp, or a reopen in ClickUp.
+        let e = t
+            .mark_task_done(Parameters(TaskArgs { id: "86abc".into() }))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("still open in ClickUp"), "{e:?}");
+        assert!(e.message.contains("mark the task done"), "{e:?}");
+        let e = t
+            .reopen_task(Parameters(TaskArgs { id: "86abc".into() }))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("marked done today"), "{e:?}");
+        assert!(e.message.contains("open the task again"), "{e:?}");
+        assert!(!e.message.contains("still open"), "{e:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The comment check is a heuristic: most words of the comment are
+    /// words of the user, matched on their first 3 letters.
+    #[test]
+    fn a_comment_is_in_the_users_own_words_or_it_does_not_go() {
+        let said = "Tell them I stopped because the sites are moving.\nUndo that.";
+        assert_eq!(in_users_words("Stopped: the sites move.", said), Ok(()));
+        assert_eq!(
+            in_users_words("STOPPED, the sites are moving", said),
+            Ok(())
+        );
+        // Short words and numbers do not count.
+        assert_eq!(in_users_words("OK 42", said), Ok(()));
+        // Text from a task description, or a memory fact: most words are
+        // not the user's.
+        let e = in_users_words("The user lives in Berlin and uses Vim.", said).unwrap_err();
+        assert!(e.contains("berlin") && e.contains("vim"), "{e}");
+        assert!(e.contains("own words"), "{e}");
+        // One word of three can differ ("now" is not in the user's words).
+        assert_eq!(in_users_words("Stopped the sites now.", said), Ok(()));
+        // No user words at all: nothing goes.
+        let e = in_users_words("Stopped.", "").unwrap_err();
+        assert!(e.contains("not known"), "{e}");
+    }
+
+    /// The undo deletes the one comment of the chat on the task, or the
+    /// one that the AI names from the notes; else it lists them.
+    #[test]
+    fn the_undo_picks_one_comment_or_lists_them() {
+        use aifred_core::clickup_list::Comment;
+        let one = vec![Comment {
+            id: "9".into(),
+            text: "Nine.".into(),
+        }];
+        assert_eq!(pick_comment(&one, None).unwrap().id, "9");
+        assert_eq!(pick_comment(&one, Some(" 9 ")).unwrap().id, "9");
+        let two = vec![
+            Comment {
+                id: "9".into(),
+                text: "Nine.".into(),
+            },
+            Comment {
+                id: "8".into(),
+                text: "Eight.".into(),
+            },
+        ];
+        let e = pick_comment(&two, None).unwrap_err();
+        assert!(e.message.contains("2 comments"), "{e:?}");
+        assert!(
+            e.message.contains("\n- 9: \"Nine.\"\n- 8: \"Eight.\""),
+            "{e:?}"
+        );
+        assert_eq!(pick_comment(&two, Some("8")).unwrap().text, "Eight.");
+        // An id that is not in the notes of this chat: not trusted.
+        let e = pick_comment(&two, Some("7")).unwrap_err();
+        assert!(e.message.contains("no comment \"7\""), "{e:?}");
+        assert!(e.message.contains("- 8: \"Eight.\""), "{e:?}");
     }
 
     #[tokio::test]
