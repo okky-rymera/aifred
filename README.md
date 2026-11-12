@@ -336,7 +336,7 @@ When new items come in, AIfred puts them into trees by itself. It does not ask f
 - Each move has a new item in it. So AIfred does not move old items around again and again.
 - AIfred never moves an item that you placed. Your own move, "Move out", and an Undo of AIfred's move all count as your choice.
 - An Undo of your own move puts everything back as it was before the move. AIfred can sort the items again, as before.
-- The brief tells you what AIfred moved since the brief of the day before, with the reason. For one move: "I made X a subtask of Y." For more: "I reorganized several tasks:" and one line for each parent. The app writes this part from a log, not the AI, so it is always true.
+- The brief tells you what AIfred moved since the brief of the day before, with the reason. For one move: "I made X a subtask of Y." For more: "I reorganized 3 tasks." in a folded section. Click it to see one line for each parent. The app writes this part from a log, not the AI, so it is always true.
 - Each line has an Undo. The item goes back to where it was, and AIfred does not move it again.
 - The note shows at most 5 lines first. "Show N more" shows the rest. The first sort after the update can move many old items.
 - The screen shows the new trees and the note as soon as a sort moves items. The note needs today's brief: without a brief, open the item to see AIfred's reason.

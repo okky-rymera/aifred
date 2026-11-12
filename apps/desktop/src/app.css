@@ -376,6 +376,8 @@ button.chip:hover { filter: brightness(.95); }
 .brief .btext.moves p, .brief .btext.moves ul { margin: 0; }
 .brief .btext.moves ul { padding-left: 20px; }
 .brief .btext.moves .linkbtn { font-size: inherit; padding: 0; }
+.brief .btext.moves summary { cursor: pointer; }
+.brief .btext.moves details[open] summary { margin-bottom: 4px; }
 .brief .acts { display: flex; flex-wrap: wrap; gap: 6px; }
 .strip { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; }
 .strip .ic { width: 28px; height: 28px; border-radius: 8px; background: var(--pane); display: grid; place-items: center; color: var(--muted); flex: none; }

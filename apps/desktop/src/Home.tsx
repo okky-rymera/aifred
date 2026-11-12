@@ -467,8 +467,10 @@ function MovesNote(props: { moves: api.Moved[]; more?: number }) {
       {groups.length === 1 && groups[0].length === 1 ? (
         <p>{line(groups[0], true)}</p>
       ) : (
-        <>
-          <p>I reorganized several tasks:</p>
+        <details>
+          <summary>
+            I reorganized {props.moves.length} tasks.
+          </summary>
           <ul>
             {(all ? groups : groups.slice(0, MOVES_SHOWN)).map((g) => (
               <li key={g[0].id}>{line(g, false)}</li>
@@ -479,7 +481,7 @@ function MovesNote(props: { moves: api.Moved[]; more?: number }) {
               Show {groups.length - MOVES_SHOWN} more
             </button>
           )}
-        </>
+        </details>
       )}
       {!!props.more && (
         <p className="hintx">

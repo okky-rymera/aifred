@@ -1192,7 +1192,12 @@ describe("subtasks", () => {
       },
     });
     const note = await screen.findByLabelText("What AIfred sorted");
-    expect(note).toHaveTextContent("I reorganized several tasks:");
+    // The list is folded, so it does not make the brief long.
+    const fold = note.querySelector("details")!;
+    expect(fold).not.toHaveAttribute("open");
+    expect(note).toHaveTextContent("I reorganized 3 tasks.");
+    await userEvent.click(within(note).getByText("I reorganized 3 tasks."));
+    expect(fold).toHaveAttribute("open");
     const lines = within(note).getAllByRole("listitem");
     expect(lines).toHaveLength(2);
     expect(lines[0]).toHaveTextContent(
