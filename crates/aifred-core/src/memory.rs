@@ -204,6 +204,11 @@ impl MemoryStore {
         Self { dir: dir.into() }
     }
 
+    /// One fact, in use or forgotten.
+    pub fn get(&self, id: i64) -> anyhow::Result<Fact> {
+        db::read(&self.dir, |c| get(c, id))
+    }
+
     /// All facts: the ones in use in their order, then the forgotten ones, newest first.
     pub fn list(&self) -> anyhow::Result<Vec<Fact>> {
         db::read(&self.dir, |c| {

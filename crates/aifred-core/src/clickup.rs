@@ -20,6 +20,8 @@ const API: &str = "https://api.clickup.com/api/v2";
 const PAGE_SIZE: usize = 100;
 /// The most pages we read from one workspace: 1000 tasks.
 const MAX_PAGES: u32 = 10;
+/// finished_tasks() reads at most this many pages for each workspace.
+const FINISHED_PAGES: u32 = 2;
 
 // ----- Token -----
 
@@ -198,6 +200,11 @@ struct RawTask {
     due_date: Option<String>,
     #[serde(default)]
     date_updated: Option<String>,
+    /// When the task went to a "done" or "closed" status, in Unix milliseconds.
+    #[serde(default)]
+    date_done: Option<String>,
+    #[serde(default)]
+    date_closed: Option<String>,
     #[serde(default)]
     text_content: Option<String>,
     #[serde(default)]
@@ -273,17 +280,36 @@ fn parse_tasks(
     workspace: &str,
     zone: chrono_tz::Tz,
 ) -> anyhow::Result<(Vec<ClickupItem>, bool)> {
+    let (items, last) = parse_page(json, workspace, zone, false)?;
+    Ok((items.into_iter().map(|(i, _)| i).collect(), last))
+}
+
+/// One task of parse_page(), with its done time in Unix seconds.
+type Finished = (ClickupItem, Option<u64>);
+
+/// parse_tasks(), for the open tasks or, with `finished`, for the tasks in
+/// a "done" or "closed" status. Each item has its done time in Unix
+/// seconds, when ClickUp sends one.
+fn parse_page(
+    json: &[u8],
+    workspace: &str,
+    zone: chrono_tz::Tz,
+    finished: bool,
+) -> anyhow::Result<(Vec<Finished>, bool)> {
     let raw: RawTasks =
         serde_json::from_slice(json).context("ClickUp sent a task list we cannot read")?;
     let last = raw.last_page.unwrap_or(raw.tasks.len() < PAGE_SIZE);
     let items = raw
         .tasks
         .into_iter()
-        .filter(|t| is_open(&t.status.kind))
+        .filter(|t| is_open(&t.status.kind) != finished)
         .map(|t| {
+            let done = millis(t.date_done.as_deref())
+                .or(millis(t.date_closed.as_deref()))
+                .map(|ms| ms / 1000);
             let (list_id, list) = t.list.map(|l| (l.id, l.name)).unwrap_or_default();
             let (folder_id, folder) = t.folder.map(RawFolder::shown).unwrap_or_default();
-            ClickupItem {
+            let item = ClickupItem {
                 id: t.id,
                 custom_id: t.custom_id.filter(|c| !c.is_empty()),
                 title: t.name,
@@ -305,7 +331,8 @@ fn parse_tasks(
                     &description_text(t.text_content.as_deref(), t.description.as_deref()),
                     &field_values(&t.custom_fields, zone),
                 )),
-            }
+            };
+            (item, done)
         })
         .collect();
     Ok((items, last))
@@ -906,6 +933,44 @@ impl Client {
             }
         }
         Ok(MyTasks { items: all, cut })
+    }
+
+    /// The tasks assigned to the user that went to a "done" or "closed"
+    /// status after `since` (Unix seconds), in all workspaces, with their
+    /// done time. AIfred saves the ones that it did not know
+    /// (db::save_finished), so the brief can match them to open work
+    /// (matches.rs).
+    /// It reads at most FINISHED_PAGES pages for each workspace.
+    pub async fn finished_tasks(&self, since: u64) -> anyhow::Result<Vec<(ClickupItem, u64)>> {
+        let u: RawUser = self.get_json("/user").await?;
+        let me = u.user.id;
+        let zone = zone(u.user.timezone.as_deref());
+        let teams: RawTeams = self.get_json("/team").await?;
+        let mut all = Vec::new();
+        for team in teams.teams {
+            check_task_id(&team.id)?;
+            for page in 0..FINISHED_PAGES {
+                let query = [
+                    ("page", page.to_string()),
+                    ("assignees[]", me.to_string()),
+                    ("subtasks", "true".to_string()),
+                    ("include_closed", "true".to_string()),
+                    ("date_done_gt", (since * 1000).to_string()),
+                    ("order_by", "updated".to_string()),
+                ];
+                let body = self.get(&format!("/team/{}/task", team.id), &query).await?;
+                let (items, last) = parse_page(&body, &team.name, zone, true)?;
+                all.extend(
+                    items
+                        .into_iter()
+                        .map(|(i, done)| (i, done.unwrap_or(since))),
+                );
+                if last {
+                    break;
+                }
+            }
+        }
+        Ok(all)
     }
 
     /// The names of the spaces of one workspace, by space id.
@@ -1524,6 +1589,48 @@ pub(crate) mod tests {
             calls.iter().all(|c| c.starts_with("GET ")),
             "reading changes nothing: {calls:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn finished_tasks_reads_only_done_and_closed_tasks_with_their_done_time() {
+        let (base, log) = fake_clickup(|_, path| match path {
+            "/api/v2/user" => (200, r#"{"user":{"id":7}}"#.into()),
+            "/api/v2/team" => (200, r#"{"teams":[{"id":"111","name":"A"}]}"#.into()),
+            p if p.starts_with("/api/v2/team/111/task?page=0") => (
+                200,
+                r#"{"tasks":[
+                {"id":"a","name":"Open","url":"u","status":{"status":"to do","type":"open"}},
+                {"id":"b","name":"Shipped","url":"u","status":{"status":"shipped","type":"done"},"date_done":"1700000000000"},
+                {"id":"c","name":"Closed","url":"u","status":{"status":"complete","type":"closed"},"date_closed":"1700000500000"},
+                {"id":"d","name":"No time","url":"u","status":{"status":"complete","type":"closed"}}
+                ],"last_page":true}"#
+                    .into(),
+            ),
+            _ => (404, r#"{"err":"no"}"#.into()),
+        })
+        .await;
+        let got = Client::with_base("pk_test", &base)
+            .finished_tasks(1_699_000_000)
+            .await
+            .unwrap();
+        let got: Vec<(&str, u64)> = got.iter().map(|(i, t)| (i.id.as_str(), *t)).collect();
+        assert_eq!(
+            got,
+            [
+                ("b", 1_700_000_000),
+                ("c", 1_700_000_500),
+                ("d", 1_699_000_000)
+            ],
+            "no open task; no done time: the start of the window"
+        );
+        let calls = log.lock().unwrap().clone();
+        let q = calls.iter().find(|c| c.contains("/team/111/task")).unwrap();
+        assert!(q.contains("include_closed=true"), "{q}");
+        assert!(
+            q.contains("date_done_gt=1699000000000"),
+            "milliseconds: {q}"
+        );
+        assert!(q.contains("assignees%5B%5D=7"), "{q}");
     }
 
     #[tokio::test]

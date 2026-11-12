@@ -27,6 +27,10 @@
 //! `missions` lists the open missions (missions.rs), so the brief can keep
 //! a mission when its work stays the same.
 //!
+//! `finished_recently` lists the ClickUp and GitHub items that closed as
+//! Done in the last days (matches.rs), also the ones that were never in the
+//! list. The brief marks the same open work done.
+//!
 //! Each open item that waits for open items (blockers.rs) has
 //! `blocked_by`: the keys of those items. The brief ranks it lower and
 //! names its blockers first.
@@ -188,6 +192,12 @@ pub fn build(dir: &Path, clickup_account: Option<&str>) -> anyhow::Result<Value>
             out["waiting_for"] = waiting.into();
         }
 
+        // Work that closed as Done in ClickUp or GitHub lately (matches.rs):
+        // the brief marks the same open work done.
+        let finished = crate::matches::finished_for_ai(c, crate::files::now())?;
+        if !finished.is_empty() {
+            out["finished_recently"] = finished.into();
+        }
         let missions = crate::missions::for_ai(c)?;
         if !missions.is_empty() {
             out["missions"] = missions.into();

@@ -989,6 +989,89 @@ describe("subtasks", () => {
     );
   });
 
+  it("a new brief that marks a task done shows the task as done", async () => {
+    const invoice = task("Send the invoice");
+    const fake = await startApp({ tasks: [invoice] });
+    expect(await screen.findByText("Send the invoice")).toBeInTheDocument();
+    const loads = () => fake.calls.filter((c) => c.cmd === "tasks").length;
+    // Like matches::apply in the brief call: the task is done, with a note.
+    fake.onWriteBrief = async (day) => {
+      fake.tasks[0].done = true;
+      fake.tasks[0].done_at = 9;
+      return {
+        day,
+        written: 9,
+        text: "One thing.",
+        why: {},
+        done: [
+          {
+            id: 1,
+            key: `task:${invoice.id}`,
+            title: "Send the invoice",
+            step: "",
+            by_key: "clickup:86z",
+            by_title: "Invoice for Ana",
+            why: "The same invoice.",
+          },
+        ],
+      };
+    };
+    const before = loads();
+    await userEvent.click(
+      screen.getByRole("button", { name: /Write the brief|Write again/ }),
+    );
+    expect(
+      await screen.findByLabelText("What AIfred marked done"),
+    ).toBeInTheDocument();
+    // The task list loads again, so the task shows as done.
+    await waitFor(() => expect(loads()).toBeGreaterThan(before));
+  });
+
+  it("the brief says which task AIfred marked done, and Undo opens it again", async () => {
+    const invoice = task("Send the invoice", { done: true, done_at: 5 });
+    const fake = await startApp({
+      tasks: [invoice],
+      briefs: {
+        [today()]: {
+          day: today(),
+          written: 3,
+          text: "One thing.",
+          why: {},
+          done: [
+            {
+              id: 4,
+              key: `task:${invoice.id}`,
+              title: "Send the invoice",
+              step: "",
+              by_key: "clickup:86z",
+              by_title: "Invoice for Ana",
+              why: "The same invoice closed in ClickUp.",
+            },
+          ],
+        },
+      },
+    });
+    const note = await screen.findByLabelText("What AIfred marked done");
+    expect(note).toHaveTextContent(
+      "I marked Send the invoice done, because Invoice for Ana is finished. The same invoice closed in ClickUp.",
+    );
+    await userEvent.click(
+      within(note).getByRole("button", { name: "Undo: Send the invoice" }),
+    );
+    await waitFor(() => expect(fake.tasks[0].done).toBe(false));
+    expect(fake.calls.find((c) => c.cmd === "undo_done_match")?.args).toEqual({
+      id: 4,
+    });
+    expect(
+      screen.queryByLabelText("What AIfred marked done"),
+    ).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'Open again: Send the invoice. AIfred does not mark it done for "Invoice for Ana" again.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("the brief says what AIfred sorted, and Undo puts the item back", async () => {
     const move = {
       id: 1,
@@ -2564,6 +2647,42 @@ describe("missions on the home page", () => {
     expect(
       screen.queryByRole("dialog", { name: "Mission details" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("when the AI in the mission chat finishes the mission, the panel and the answer stay", async () => {
+    const s = setup();
+    let fake: Awaited<ReturnType<typeof startApp>> | undefined;
+    fake = await startApp({
+      ...s,
+      onAskSide: (p) => {
+        // Like finish_mission in the tool server: the mission leaves today's list.
+        fake!.briefs[today()]!.missions = [];
+        return answer(`Finished. Ask me to undo it. (${p})`);
+      },
+    });
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Open mission: Ship the launch post",
+      }),
+    );
+    const side = screen.getByRole("dialog", { name: "Mission details" });
+    await userEvent.type(
+      within(side).getByRole("textbox", {
+        name: "Ask AIfred about this mission",
+      }),
+      "finish it{Enter}",
+    );
+    expect(
+      await within(side).findByText("Finished. Ask me to undo it. (finish it)"),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("list", { name: "Today's missions" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Mission details" }),
+    ).toBeInTheDocument();
   });
 
   it("a finished mission closes its side panel", async () => {

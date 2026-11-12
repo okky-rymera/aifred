@@ -258,6 +258,12 @@ export default function App() {
   /** The id of the mission that is open on the right side. Only one of
    * `sel` and `selMission` is set: the side shows one item or one mission. */
   const [selMission, setSelMission] = useState<number | null>(null);
+  /** The last copy of the open mission from today's list (see selM). */
+  const lastSelM = useRef<api.Mission | undefined>(undefined);
+  /** The mission whose chat the user wrote in. Its panel stays open when
+   * the AI there finishes the mission or says "Not today", so the user
+   * sees the answer and can ask for the undo. */
+  const [keptMission, setKeptMission] = useState<number | null>(null);
   /** Closes the item or the mission on the right side. */
   const clearSel = () => {
     setSel(null);
@@ -604,6 +610,14 @@ export default function App() {
       .catch(() => {});
   }, [today]);
 
+  // A brief can mark your tasks done (matches.rs). When it brings new
+  // matches, load the tasks again, so they do not show as open. The mission
+  // steps come with the brief.
+  const doneIds = (brief?.done ?? []).map((m) => m.id).join(",");
+  useEffect(() => {
+    if (doneIds) loadTasks();
+  }, [doneIds, loadTasks]);
+
   // AIfred's sort moved new items into subtasks in the background. Show the
   // new trees, and the brief with its note about the moves, at once.
   const afterSort = useCallback(() => {
@@ -875,14 +889,16 @@ export default function App() {
     if (sel && !byKey.has(sel) && !sourcesLoading) setSel(null);
   }, [sel, byKey, sourcesLoading]);
   // A mission that left today's list (done, "Not today", a new brief) closes its panel.
+  // Not after the user wrote in the mission's chat (keptMission).
   useEffect(() => {
     if (
       selMission !== null &&
+      selMission !== keptMission &&
       brief &&
       !brief.missions?.some((m) => m.id === selMission)
     )
       setSelMission(null);
-  }, [selMission, brief]);
+  }, [selMission, keptMission, brief]);
 
   // ---------- Toast ----------
 
@@ -1727,7 +1743,14 @@ export default function App() {
     goalQueue.current = goals;
     goals.then(setGoals).catch(() => {});
     loadPlans();
-    // AIfred can add items to a mission or take them out (missions.rs).
+    // AIfred can hide an email (hide_email). The saved list has it, with no download.
+    loadMail("saved");
+    // AIfred can start or stop the work timer (start_work, stop_work).
+    api
+      .workRunning()
+      .then(setWork)
+      .catch(() => {});
+    // AIfred can change a mission: its items, its steps, finish, or "Not today" (missions.rs).
     loadTodayBrief();
     // AIfred can put an item under another item (move_item), and say that
     // an item waits for another item (set_blocker).
@@ -1739,7 +1762,7 @@ export default function App() {
       .itemBlockers()
       .then(setBlockers)
       .catch(() => {});
-  }, [loadTasks, loadMeta, loadPlans, loadTodayBrief]);
+  }, [loadTasks, loadMeta, loadPlans, loadTodayBrief, loadMail]);
 
   /** Runs one question in a chat and puts the messages in `set`. */
   async function chat(
@@ -1841,6 +1864,7 @@ export default function App() {
 
   /** `key` is an item key, or "mission:<id>" for the chat of a mission. */
   const askItem = (key: string, text: string, files: api.FileRef[]) => {
+    if (selMission !== null && key === missionChatKey(selMission)) setKeptMission(selMission);
     const set = (f: (c: ChatState) => ChatState) =>
       setItemChats((all) => ({ ...all, [key]: f(all[key] ?? EMPTY_CHAT) }));
     text = withFiles(text, files);
@@ -1849,7 +1873,12 @@ export default function App() {
         model: pickArg(models.item),
         files: files.map((f) => f.id),
       }),
-    );
+    ).then((ok) => {
+      // The chat of a ClickUp task and a mission chat can mark a ClickUp
+      // task done. The reload reads the saved list (no download while it is new).
+      if (key.startsWith("clickup:") || key.startsWith("mission:")) loadClickup(false, clickupOn);
+      return ok;
+    });
   };
 
   // The chat of an item or a mission loads when its panel opens, one time. A message
@@ -2071,10 +2100,16 @@ export default function App() {
     sel && (page === "home" || page === "tasks" || onPlan)
       ? byKey.get(sel)
       : undefined;
-  // The missions show only on the home page.
+  // The missions show only on the home page. When the AI in the mission
+  // chat finishes the mission or says "Not today", the mission leaves
+  // today's list. The panel stays open with the last copy, so the user
+  // still sees the answer and can ask for the undo in the same chat.
+  const foundM =
+    selMission !== null ? brief?.missions?.find((m) => m.id === selMission) : undefined;
+  if (foundM) lastSelM.current = foundM;
   const selM =
     selMission !== null && page === "home"
-      ? brief?.missions?.find((m) => m.id === selMission)
+      ? (foundM ?? (lastSelM.current?.id === selMission ? lastSelM.current : undefined))
       : undefined;
   const selTitle = selItem?.title ?? selM?.title;
   const showSide = (v: "chat" | "task") => {
@@ -2248,6 +2283,9 @@ export default function App() {
         r &&
         Object.fromEntries(Object.entries(r).filter(([k]) => !keys.has(k)));
       run(api.correctMission(m.id, kind, day), (cs) => {
+        // The button closes the panel of the mission. (A change by the AI
+        // in the mission chat keeps it open: see selM.)
+        setSelMission((s) => (s === m.id ? null : s));
         setBrief((b) =>
           b && b.day === shown
             ? {
@@ -2351,6 +2389,7 @@ export default function App() {
         }
       }
       return run(api.finishMission(m.id), () => {
+        setSelMission((s) => (s === m.id ? null : s));
         setBrief((b) =>
           b?.missions
             ? { ...b, missions: b.missions.filter((x) => x.id !== m.id) }
@@ -2439,6 +2478,23 @@ export default function App() {
     [run, toast, titleOf],
   );
 
+  /** Undoes one match of the brief (matches.rs). The line goes away, and
+   * the tasks and the missions load again: the task or the step is open. */
+  const undoDoneMatch = useCallback(
+    (m: api.DoneMatch) =>
+      run(api.undoDoneMatch(m.id), () => {
+        setBrief((b) =>
+          b?.done ? { ...b, done: b.done.filter((x) => x.id !== m.id) } : b,
+        );
+        loadTasks();
+        loadTodayBrief();
+        toast(
+          `Open again: ${m.step || m.title}. AIfred does not mark it done for "${m.by_title}" again.`,
+        );
+      }),
+    [run, toast, loadTasks, loadTodayBrief],
+  );
+
   /** Undoes AIfred's moves from the brief. The lines go away from the brief. */
   const undoMoves = useCallback(
     (moves: api.Moved[]) => {
@@ -2524,6 +2580,7 @@ export default function App() {
     addBlocker,
     removeBlocker,
     undoMoves,
+    undoDoneMatch,
     trackEmail,
     hideSent,
     addWaiting,

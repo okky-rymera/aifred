@@ -1562,6 +1562,21 @@ export function fakeBackend(init: Partial<Fake> = {}): Fake {
           unlink(String(args.key));
           return { ...linksNow(), before };
         }
+        case "undo_done_match": {
+          // Like matches::undo: the task is open again, and the line goes.
+          for (const b of Object.values(fake.briefs)) {
+            const m = b.done?.find((x) => x.id === args.id);
+            if (!m) continue;
+            b.done = b.done!.filter((x) => x.id !== args.id);
+            const t = fake.tasks.find((x) => `task:${x.id}` === m.key);
+            if (t) {
+              t.done = false;
+              t.done_at = null;
+            }
+            return null;
+          }
+          throw `AIfred does not know the match ${args.id}`;
+        }
         case "undo_moves": {
           // Like sort::undo for a first move: the item goes back to the top.
           const moves = Object.values(fake.briefs).flatMap(

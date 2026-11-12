@@ -97,6 +97,9 @@ struct Raw {
     updated_at: String,
     #[serde(default)]
     body: Option<String>,
+    /// Only in the search for closed items (finished_items).
+    #[serde(default, rename = "closedAt")]
+    closed_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +144,27 @@ fn search_args(kind: &str, filter: &str, owners: &[String]) -> Vec<String> {
     args
 }
 
+/// The `gh` arguments for one search of the items closed on `since` (a
+/// "YYYY-MM-DD" day) or later.
+fn closed_args(kind: &str, filter: &str, since: &str, owners: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "search",
+        kind,
+        filter,
+        "--state=closed",
+        &format!("--closed=>={since}"),
+        "--limit",
+        &SEARCH_LIMIT.to_string(),
+        "--json",
+        "id,repository,number,title,url,updatedAt,body,closedAt",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(owners.iter().map(|o| format!("--owner={o}")));
+    args
+}
+
 /// One search result: GitHub's node ID and the item.
 type Found = (String, GithubItem);
 
@@ -163,24 +187,78 @@ async fn search(
 /// Turns the JSON output of `gh search` into items.
 fn parse(json: &[u8], reason: &str) -> anyhow::Result<Vec<Found>> {
     let raw: Vec<Raw> = serde_json::from_slice(json)?;
+    Ok(raw.into_iter().map(|r| found(r, reason)).collect())
+}
+
+/// One search result as an item.
+fn found(r: Raw, reason: &str) -> Found {
+    let item = GithubItem {
+        id: item_id(&r.repository.name_with_owner, r.number),
+        repo: r.repository.name_with_owner,
+        number: r.number,
+        title: r.title,
+        url: r.url,
+        reason: reason.into(),
+        updated: r.updated_at,
+        links: Vec::new(),
+        more_links: false,
+        body: r.body,
+    };
+    (r.id, item)
+}
+
+/// Turns the JSON output of a closed-item search into items, each with its
+/// close time in Unix seconds (`since` when GitHub sends none).
+fn parse_closed(json: &[u8], reason: &str, since: u64) -> anyhow::Result<Vec<(GithubItem, u64)>> {
+    let raw: Vec<Raw> = serde_json::from_slice(json)?;
     Ok(raw
         .into_iter()
-        .map(|r| {
-            let item = GithubItem {
-                id: item_id(&r.repository.name_with_owner, r.number),
-                repo: r.repository.name_with_owner,
-                number: r.number,
-                title: r.title,
-                url: r.url,
-                reason: reason.into(),
-                updated: r.updated_at,
-                links: Vec::new(),
-                more_links: false,
-                body: r.body,
-            };
-            (r.id, item)
+        .map(|mut r| {
+            let closed = r
+                .closed_at
+                .take()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+                .and_then(|t| u64::try_from(t.timestamp()).ok())
+                .unwrap_or(since);
+            (found(r, reason).1, closed)
         })
         .collect())
+}
+
+/// The issues assigned to the user and the user's own pull requests that
+/// closed after `since` (Unix seconds), with their close time. Two searches.
+/// AIfred saves the ones that it did not know (db::save_finished), so
+/// the brief can match them to open work (matches.rs). Why each one closed
+/// (done, or closed with no merge) comes later, from look_up_github.
+pub async fn finished_items(
+    owners: &[String],
+    since: u64,
+) -> anyhow::Result<Vec<(GithubItem, u64)>> {
+    let day = chrono::DateTime::from_timestamp(since as i64, 0)
+        .unwrap_or_default()
+        .format("%Y-%m-%d")
+        .to_string();
+    let run = |kind: &'static str, filter: &'static str, reason: &'static str| {
+        let args = closed_args(kind, filter, &day, owners);
+        async move {
+            let out = Command::new("gh").args(args).output().await?;
+            if !out.status.success() {
+                bail!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            parse_closed(&out.stdout, reason, since)
+        }
+    };
+    let (a, b) = tokio::try_join!(
+        run("issues", "--assignee=@me", "assigned"),
+        run("prs", "--author=@me", "your_pr"),
+    )?;
+    let mut out = a;
+    for i in b {
+        if !out.iter().any(|(o, _)| o.id == i.0.id) {
+            out.push(i);
+        }
+    }
+    Ok(out)
 }
 
 /// The most items in one link query.
@@ -554,6 +632,25 @@ mod tests {
         {"id":"PR_12","repository":{"name":"docs","nameWithOwner":"acme/docs"},"number":12,"title":"Typo",
          "url":"https://github.com/acme/docs/pull/12","updatedAt":"2026-09-01T10:00:00Z"}
     ]"#;
+
+    #[test]
+    fn the_closed_search_asks_for_closed_items_since_a_day_with_their_close_time() {
+        let args = closed_args("prs", "--author=@me", "2026-11-05", &["acme".into()]);
+        assert!(args.contains(&"--state=closed".to_string()));
+        assert!(args.contains(&"--closed=>=2026-11-05".to_string()));
+        assert!(args.iter().any(|a| a.ends_with(",closedAt")));
+        assert!(args.contains(&"--owner=acme".to_string()));
+
+        let json = br#"[
+          {"id":"I_1","repository":{"nameWithOwner":"acme/shop"},"number":7,"title":"Fix cart","url":"https://github.com/acme/shop/pull/7","updatedAt":"2026-11-10T10:00:00Z","closedAt":"2026-11-10T10:00:00Z"},
+          {"id":"I_2","repository":{"nameWithOwner":"acme/shop"},"number":8,"title":"No time","url":"u","updatedAt":"2026-11-10T10:00:00Z"}
+        ]"#;
+        let got = parse_closed(json, "your_pr", 5).unwrap();
+        assert_eq!(got[0].0.id, "acme/shop#7");
+        assert_eq!(got[0].0.reason, "your_pr");
+        assert_eq!(got[0].1, 1_794_304_800);
+        assert_eq!(got[1].1, 5, "no close time: the start of the window");
+    }
 
     #[test]
     fn close_state_reads_why_an_item_closed() {

@@ -233,6 +233,153 @@ struct MissionItemArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct MissionArgs {
+    /// The mission id, from `missions` in overview, or the id of this mission chat.
+    mission: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct StepArgs {
+    /// The text of the step, at most 100 characters.
+    text: String,
+    /// true: ticked. false: not ticked. Leave it out: the step keeps the tick of the old step with the same text.
+    done: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MissionStepsArgs {
+    /// The mission id, from `missions` in overview, or the id of this mission chat.
+    mission: i64,
+    /// The full new checklist, first step first, at most 12 steps. It replaces the old checklist.
+    steps: Vec<StepArgs>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RenameArgs {
+    /// The mission id, from `missions` in overview, or the id of this mission chat.
+    mission: i64,
+    /// The new title: one line, at most 80 characters.
+    title: String,
+    /// Leave it out for a rename. Send true only for the undo of a rename
+    /// whose `before.brief_may_change` was true: then the brief can change
+    /// the title again.
+    #[serde(default)]
+    brief_may_change: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct TickArgs {
+    /// The mission id, from `missions` in overview, or the id of this mission chat.
+    mission: i64,
+    /// The number of the step: 1 is the first step.
+    step: usize,
+    /// true: tick the step. false: take the tick away.
+    done: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct UndoSkipArgs {
+    /// The mission id.
+    mission: i64,
+    /// The `corrections` ids from the skip_mission_today answer.
+    ids: Vec<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct TimeGuessArgs {
+    /// The item key, from overview or day_plan. For example task:t123 or github:acme/shop#7.
+    key: String,
+    /// The time guess in minutes, from 5 to 600. null removes the guess.
+    minutes: Option<u32>,
+    /// Who made the guess: "you" (the default) or "aifred". Only the undo sends "aifred", from `before_by`.
+    #[serde(default)]
+    by: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct HideEmailArgs {
+    /// The key of the email, from needs_reply in overview. For example gmail:18c2.
+    key: String,
+    /// true: hide it until a new message comes in the thread. false: show it again (the undo).
+    hide: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CorrectArgs {
+    /// The item key, from overview.
+    key: String,
+    /// "not_today": the item is not for today. "wrong_priority": the brief ranked it too high.
+    kind: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CorrectionIdArgs {
+    /// The `correction` id from the correct_brief answer.
+    id: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct KeyArgs {
+    /// The item key, from overview. For example task:t123 or github:acme/shop#7.
+    key: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RuleFromTaskArgs {
+    /// A ClickUp task with the status that the rule is for, for example clickup:86abc. The rule uses the status name that this task has now.
+    task: String,
+    /// Where the rule counts: "list" (the list of the task), "folder", "space", or "all" (all ClickUp lists).
+    scope: String,
+    /// AIfred's status for this ClickUp status: "todo", "progress", "waiting", "done", "unfinished", or "cancelled".
+    status: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RuleIdArgs {
+    /// The rule id, from status_rules.
+    id: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct RuleArgs {
+    /// The rule id from `before`.
+    #[serde(default)]
+    id: i64,
+    /// The ClickUp status name.
+    name: String,
+    /// "list", "folder", "space", or "all".
+    scope: String,
+    #[serde(default)]
+    scope_id: String,
+    #[serde(default)]
+    scope_name: String,
+    #[serde(default)]
+    space_id: String,
+    #[serde(default)]
+    space_name: String,
+    #[serde(default)]
+    kind: String,
+    /// AIfred's status.
+    status: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PickArgs {
+    /// The item key, from the weekly review or overview.
+    key: String,
+    /// "do" (into today's plan), "plan" (into the plan of a later day), "delegate" (someone else does it: it goes on the "waiting for" list, and a local task closes), or "drop" (a local task closes; a GitHub or ClickUp item only stops counting in AIfred).
+    pick: String,
+    /// For "plan": the day, "YYYY-MM-DD", after today. For "delegate": the person. Else leave it out.
+    note: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct PickIdArgs {
+    /// The pick id from the review_pick answer.
+    id: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct ContextArgs {
     /// The item key, from overview. For example task:t123 or github:acme/shop#7.
     key: String,
@@ -358,6 +505,52 @@ fn check_mission(
     }
 }
 
+/// An error unless this is the main chat or the plan chat. `what` changes
+/// many items at once, so an item chat must not change it: text in an
+/// email or an issue there comes from other people.
+fn check_main_chat(bound: Option<&[String]>, what: &str) -> Result<(), ErrorData> {
+    match bound {
+        None => Ok(()),
+        Some(_) => Err(ErrorData::invalid_params(
+            format!("Only the main chat can change {what}. Tell the user to ask there."),
+            None,
+        )),
+    }
+}
+
+/// An error when a chat changes a whole mission (its steps, finish, "Not
+/// today") that it must not change. The mission chat (`own`) can change
+/// only its own mission. Another item chat (`bound` is its items) can
+/// change a mission only when each item of the mission is an item of the
+/// chat: text in an email or an issue must not change other work. The main
+/// chat can change all missions.
+fn check_whole_mission(
+    own: Option<i64>,
+    bound: Option<&[String]>,
+    mission: &aifred_core::missions::Mission,
+) -> Result<(), ErrorData> {
+    match (own, bound) {
+        (Some(m), _) if m != mission.id => Err(ErrorData::invalid_params(
+            format!(
+                "This chat can change only mission {m}, not mission {}.",
+                mission.id
+            ),
+            None,
+        )),
+        (Some(_), _) | (None, None) => Ok(()),
+        (None, Some(b)) => {
+            if !mission.items.is_empty() && mission.items.iter().all(|i| b.contains(&i.key)) {
+                Ok(())
+            } else {
+                Err(ErrorData::invalid_params(
+                    format!("This chat cannot change mission {}.", mission.id),
+                    None,
+                ))
+            }
+        }
+    }
+}
+
 fn fail(e: anyhow::Error) -> ErrorData {
     ErrorData::internal_error(format!("{e:#}"), None)
 }
@@ -370,6 +563,25 @@ fn json<T: serde::Serialize>(v: &T) -> Result<CallToolResult, ErrorData> {
 impl TaskTools {
     fn store(&self) -> TaskStore {
         TaskStore::new(&self.dir)
+    }
+
+    /// Saves a status rule, and gives the rule with `before` for the undo.
+    fn save_rule(&self, rule: &aifred_core::status::Rule) -> Result<CallToolResult, ErrorData> {
+        let (rules, before) =
+            aifred_core::status::set_rule(&self.dir, rule, now()).map_err(fail)?;
+        let saved = rules.into_iter().find(|r| {
+            r.name == rule.name.trim().to_lowercase()
+                && r.scope == rule.scope
+                && (r.scope == "all" || r.scope_id == rule.scope_id.trim())
+        });
+        json(&serde_json::json!({ "rule": saved, "before": before }))
+    }
+
+    /// Mission `id`, when this chat can change all of it (check_whole_mission).
+    fn chat_mission_check(&self, id: i64) -> Result<aifred_core::missions::Mission, ErrorData> {
+        let m = aifred_core::missions::get(&self.dir, id).map_err(fail)?;
+        check_whole_mission(chat_mission(), chat_items().as_deref(), &m)?;
+        Ok(m)
     }
 
     /// The plan of `day` for the AI: each item with its time guess, and
@@ -803,6 +1015,377 @@ impl TaskTools {
         let c = aifred_core::missions::remove_item(&self.dir, a.mission, a.key.trim(), now())
             .map_err(fail)?;
         json(&c.mission)
+    }
+
+    #[tool(
+        description = "Replace the checklist of a mission: add, change, remove, or sort its steps. Send the full new list, at most 12 steps of at most 100 characters each. A step keeps its tick when its text stays the same. The items of the mission do not change, and the brief keeps this checklist. Use it only when the user asks to change the steps of the mission, not the steps of a task (update_task). Say the change in one short line, so the user can ask you to undo it: the answer has the mission and `before`, the old checklist. The undo is this tool with the old steps and their `done` values."
+    )]
+    async fn set_mission_steps(
+        &self,
+        Parameters(a): Parameters<MissionStepsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.chat_mission_check(a.mission)?;
+        let steps: Vec<aifred_core::missions::NewStep> = a
+            .steps
+            .into_iter()
+            .map(|s| aifred_core::missions::NewStep {
+                text: s.text,
+                done: s.done,
+            })
+            .collect();
+        let c = aifred_core::missions::set_checklist(&self.dir, a.mission, &steps, now())
+            .map_err(fail)?;
+        json(&c)
+    }
+
+    #[tool(
+        description = "Rename a mission. The brief keeps the new title and does not write it again. Use it only when the user asks. Say the change in one short line, so the user can ask you to undo it: the answer has the mission and `before`, the old title and its `brief_may_change`. The undo is this tool with the old title and that `brief_may_change`."
+    )]
+    async fn rename_mission(
+        &self,
+        Parameters(a): Parameters<RenameArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.chat_mission_check(a.mission)?;
+        let c = aifred_core::missions::rename(
+            &self.dir,
+            a.mission,
+            &a.title,
+            a.brief_may_change,
+            now(),
+        )
+        .map_err(fail)?;
+        json(&c)
+    }
+
+    #[tool(
+        description = "Tick one step of a mission's checklist, or take the tick away. The items of the mission do not change. Use it only when the user's own words say that the step is done, or ask to take the tick away. The answer has the mission and `before`, the tick from before."
+    )]
+    async fn tick_mission_step(
+        &self,
+        Parameters(a): Parameters<TickArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let m = self.chat_mission_check(a.mission)?;
+        let Some(index) = a.step.checked_sub(1) else {
+            return Err(ErrorData::invalid_params("The first step is 1.", None));
+        };
+        let before = m.checklist.get(index).map(|s| s.done);
+        let m = aifred_core::missions::set_step(&self.dir, a.mission, index, a.done, now())
+            .map_err(fail)?;
+        json(&serde_json::json!({ "mission": m, "before": before }))
+    }
+
+    #[tool(
+        description = "Finish a mission: it leaves the home page. It does not close its items: when the user says an item is done too, close it first with its own tool (complete_task, mark_task_done, or set_item_status). Use it only when the user's own words say that the mission is finished. Say it in one short line: reopen_mission is the undo."
+    )]
+    async fn finish_mission(
+        &self,
+        Parameters(a): Parameters<MissionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.chat_mission_check(a.mission)?;
+        aifred_core::missions::finish(&self.dir, a.mission, now()).map_err(fail)?;
+        json(&aifred_core::missions::get(&self.dir, a.mission).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Undo finish_mission: the finished mission is open again, with its checklist. An item that a later brief put in another mission does not come back. Use it only when the user asks."
+    )]
+    async fn reopen_mission(
+        &self,
+        Parameters(a): Parameters<MissionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.chat_mission_check(a.mission)?;
+        aifred_core::missions::reopen(&self.dir, a.mission, now()).map_err(fail)?;
+        json(&aifred_core::missions::get(&self.dir, a.mission).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Say \"Not today\" for a mission, the same as the button on the home page: the mission leaves today's list, and the brief learns that its open items are not for today. The mission and its checklist stay. Use it only when the user's own words say not today, later, or reset the mission for today. The answer has `corrections`: give them to undo_skip_mission for the undo."
+    )]
+    async fn skip_mission_today(
+        &self,
+        Parameters(a): Parameters<MissionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.chat_mission_check(a.mission)?;
+        // Today's list, also in the plan chat of another day.
+        let day = plan::today();
+        let done = aifred_core::missions::correct(
+            &self.dir,
+            a.mission,
+            aifred_core::learn::NOT_TODAY,
+            &day,
+            now(),
+        )
+        .map_err(fail)?;
+        // Only the new corrections: one that the user made before stays
+        // after the undo.
+        let ids: Vec<i64> = done
+            .iter()
+            .filter(|c| c.new)
+            .map(|c| c.correction.id)
+            .collect();
+        json(&serde_json::json!({ "day": day, "corrections": ids }))
+    }
+
+    #[tool(
+        description = "Undo skip_mission_today: the mission is back in today's list. Use it only when the user asks for the undo."
+    )]
+    async fn undo_skip_mission(
+        &self,
+        Parameters(a): Parameters<UndoSkipArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let m = self.chat_mission_check(a.mission)?;
+        // Check all first, so the undo is all or nothing.
+        for id in &a.ids {
+            let c = aifred_core::learn::get(&self.dir, *id).map_err(fail)?;
+            if c.kind != aifred_core::learn::NOT_TODAY || !m.items.iter().any(|i| i.key == c.key) {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "The correction {id} is not a \"Not today\" of mission {}.",
+                        m.id
+                    ),
+                    None,
+                ));
+            }
+        }
+        for id in &a.ids {
+            aifred_core::learn::undo(&self.dir, *id).map_err(fail)?;
+        }
+        json(&aifred_core::missions::get(&self.dir, a.mission).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Start the work timer on one item: the user works on it now. The timer of another item stops. Use it only when the user says that they start work on the item. The answer has `before`, the item whose timer ran before (null: none): the undo is start_work with that key, or stop_work when it is null."
+    )]
+    async fn start_work(
+        &self,
+        Parameters(a): Parameters<KeyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = a.key.trim();
+        check_item(chat_items().as_deref(), key)?;
+        let before = aifred_core::worktime::running(&self.dir)
+            .map_err(fail)?
+            .map(|r| r.key);
+        let r = aifred_core::worktime::start(&self.dir, key, now()).map_err(fail)?;
+        json(&serde_json::json!({ "running": r, "before": before }))
+    }
+
+    #[tool(
+        description = "Stop the work timer: the user stopped work for now. The item stays open. To finish an item, use its status or done tool instead: that also keeps the real time. Use it only when the user says that they stopped. The answer has `stopped`, the item key (null: no timer ran): the undo is start_work with that key."
+    )]
+    async fn stop_work(&self) -> Result<CallToolResult, ErrorData> {
+        let running = aifred_core::worktime::running(&self.dir).map_err(fail)?;
+        if let Some(r) = &running {
+            check_item(chat_items().as_deref(), &r.key)?;
+        }
+        aifred_core::worktime::stop(&self.dir, now()).map_err(fail)?;
+        json(&serde_json::json!({ "stopped": running.map(|r| r.key) }))
+    }
+
+    #[tool(
+        description = "The user's rules for ClickUp statuses: each rule says that a ClickUp status name in one list, folder, space, or in all lists is one AIfred status. The rules change the AIfred status of the ClickUp tasks."
+    )]
+    async fn status_rules(&self) -> Result<CallToolResult, ErrorData> {
+        json(&aifred_core::status::rules(&self.dir).map_err(fail)?)
+    }
+
+    #[tool(
+        description = "Add or change a rule for a ClickUp status, from a task that has that status now: \"this status in the list of this task (or its folder, its space, or all lists) is this AIfred status\". It changes the AIfred status of all tasks with that status there, not ClickUp. Use it only when the user asks for such a rule. The answer has the rule and `before` (null: there was no rule): the undo is remove_status_rule with the new rule id when `before` is null, else restore_status_rule with `before`."
+    )]
+    async fn set_status_rule(
+        &self,
+        Parameters(a): Parameters<RuleFromTaskArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        check_main_chat(chat_items().as_deref(), "status rules")?;
+        let id = a.task.trim().trim_start_matches("clickup:");
+        let Some(t) = aifred_core::clickup_list::ClickupStore::new(&self.dir)
+            .get(id)
+            .map_err(fail)?
+        else {
+            return Err(ErrorData::invalid_params(
+                format!("AIfred has no ClickUp task {id}. Use a task from overview or my_tasks."),
+                None,
+            ));
+        };
+        let (scope_id, scope_name) = match a.scope.as_str() {
+            "list" => (t.list_id.clone(), t.list.clone()),
+            "folder" if t.folder_id.is_empty() => {
+                return Err(ErrorData::invalid_params(
+                    "The list of this task is in no folder. Use \"list\" or \"space\".",
+                    None,
+                ));
+            }
+            "folder" => (t.folder_id.clone(), t.folder.clone()),
+            "space" => (t.space_id.clone(), t.space.clone()),
+            _ => (String::new(), String::new()),
+        };
+        let rule = aifred_core::status::Rule {
+            id: 0,
+            name: t.status.clone(),
+            scope: a.scope.clone(),
+            scope_id,
+            scope_name,
+            space_id: t.space_id.clone(),
+            space_name: t.space.clone(),
+            kind: t.status_type.clone(),
+            status: a.status.clone(),
+        };
+        self.save_rule(&rule)
+    }
+
+    #[tool(
+        description = "Put back a status rule as it was: the undo of set_status_rule or remove_status_rule. Give `before` from that answer, with all its fields. Use it only when the user asks for the undo."
+    )]
+    async fn restore_status_rule(
+        &self,
+        Parameters(a): Parameters<RuleArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        check_main_chat(chat_items().as_deref(), "status rules")?;
+        self.save_rule(&aifred_core::status::Rule {
+            id: a.id,
+            name: a.name,
+            scope: a.scope,
+            scope_id: a.scope_id,
+            scope_name: a.scope_name,
+            space_id: a.space_id,
+            space_name: a.space_name,
+            kind: a.kind,
+            status: a.status,
+        })
+    }
+
+    #[tool(
+        description = "Remove one status rule. The tasks with that status get their status from the other rules or from ClickUp again. Use it only when the user asks. The answer has `before`, the rule: the undo is restore_status_rule with it."
+    )]
+    async fn remove_status_rule(
+        &self,
+        Parameters(a): Parameters<RuleIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        check_main_chat(chat_items().as_deref(), "status rules")?;
+        let Some(rule) = aifred_core::status::rules(&self.dir)
+            .map_err(fail)?
+            .into_iter()
+            .find(|r| r.id == a.id)
+        else {
+            return Err(ErrorData::invalid_params(
+                format!("There is no status rule {}. Use status_rules.", a.id),
+                None,
+            ));
+        };
+        aifred_core::status::delete_rule(&self.dir, &rule).map_err(fail)?;
+        json(&serde_json::json!({ "removed": rule.id, "before": rule }))
+    }
+
+    #[tool(
+        description = "The user's pick for one item in the weekly review, the same as the buttons there: \"do\", \"plan\" (with the day in `note`), \"delegate\" (with the person in `note`), or \"drop\". Use it only when the user's own words give the pick. The answer has the pick with its `id`: undo_review_pick with that id is the undo."
+    )]
+    async fn review_pick(
+        &self,
+        Parameters(a): Parameters<PickArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = a.key.trim();
+        check_item(chat_items().as_deref(), key)?;
+        let p = aifred_core::review::pick(
+            &self.dir,
+            key,
+            a.pick.trim(),
+            a.note.as_deref().unwrap_or(""),
+            &plan::today(),
+            now(),
+        )
+        .map_err(fail)?;
+        json(&p)
+    }
+
+    #[tool(
+        description = "Undo review_pick: the plan, the task, and the \"waiting for\" list are as before the pick. Use it only when the user asks for the undo."
+    )]
+    async fn undo_review_pick(
+        &self,
+        Parameters(a): Parameters<PickIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = aifred_core::review::pick_key(&self.dir, a.id).map_err(fail)?;
+        check_item(chat_items().as_deref(), &key)?;
+        aifred_core::review::undo_pick(&self.dir, a.id, now()).map_err(fail)?;
+        json(&serde_json::json!({ "undone": a.id, "key": key }))
+    }
+
+    #[tool(
+        description = "Set the user's time guess for one item, in minutes, without a change to the day plan. Use it only when the user gives or changes the time for an item. A guess that the user gave here counts as the user's own: the brief and the plan do not change it. The answer has `before`, the old guess (null: none), and `before_by`: the undo is this tool with minutes `before` and by `before_by`."
+    )]
+    async fn set_time_guess(
+        &self,
+        Parameters(a): Parameters<TimeGuessArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = a.key.trim();
+        check_item(chat_items().as_deref(), key)?;
+        let old = plan::estimates(&self.dir).map_err(fail)?.remove(key);
+        let before = old.as_ref().map(|e| e.minutes);
+        let before_by = old.map(|e| e.by);
+        let by = a.by.as_deref().unwrap_or("you");
+        // A guess by "aifred" never replaces one by "you" (plan.rs), so
+        // the undo removes the user's guess first.
+        if by == "aifred" {
+            plan::set_estimate(&self.dir, key, None, "you").map_err(fail)?;
+        }
+        plan::set_estimate(&self.dir, key, a.minutes, by).map_err(fail)?;
+        let now_guess = plan::estimates(&self.dir)
+            .map_err(fail)?
+            .remove(key)
+            .map(|e| e.minutes);
+        json(
+            &serde_json::json!({ "key": key, "minutes": now_guess, "before": before, "before_by": before_by }),
+        )
+    }
+
+    #[tool(
+        description = "Hide an email that waits for the user's answer (\"no answer needed\"), the same as the button in the app. It comes back when a new message comes in the thread. Use it only when the user's own words say that the email needs no answer. hide false is the undo: the email shows again."
+    )]
+    async fn hide_email(
+        &self,
+        Parameters(a): Parameters<HideEmailArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = a.key.trim();
+        check_item(chat_items().as_deref(), key)?;
+        let Some(thread) = key.strip_prefix("gmail:").filter(|t| !t.is_empty()) else {
+            return Err(ErrorData::invalid_params(
+                format!("{key} is not an email. An email key is gmail:<id>."),
+                None,
+            ));
+        };
+        gmail::hide(&self.dir, thread, a.hide, now()).map_err(fail)?;
+        json(&serde_json::json!({ "key": key, "hidden": a.hide }))
+    }
+
+    #[tool(
+        description = "Tell the brief that it is wrong about one item today, the same as the buttons on the home page. \"not_today\": the item is not for today. \"wrong_priority\": the brief ranked it too high, and AIfred ranks its items lower from now on. Use it only when the user's own words say so. For all items of a mission, use skip_mission_today. The answer has `correction`: give it to undo_brief_correction for the undo. `learned` is a memory fact that AIfred learned from this and other corrections: tell the user about it."
+    )]
+    async fn correct_brief(
+        &self,
+        Parameters(a): Parameters<CorrectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let key = a.key.trim();
+        check_item(chat_items().as_deref(), key)?;
+        let c = aifred_core::learn::add(&self.dir, key, a.kind.trim(), &plan::today(), now())
+            .map_err(fail)?;
+        json(&serde_json::json!({
+            "correction": c.correction.id,
+            // False: an old correction of the same day, that the user made before.
+            "new": c.new,
+            "learned": c.learned.map(|f| f.text),
+        }))
+    }
+
+    #[tool(
+        description = "Undo correct_brief: take one correction away. A memory fact that AIfred learned from it is forgotten too, when the user did not change it. Use it only when the user asks for the undo, and only for a correction that this chat made (`new` true)."
+    )]
+    async fn undo_brief_correction(
+        &self,
+        Parameters(a): Parameters<CorrectionIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let c = aifred_core::learn::get(&self.dir, a.id).map_err(fail)?;
+        check_item(chat_items().as_deref(), &c.key)?;
+        aifred_core::learn::undo(&self.dir, a.id).map_err(fail)?;
+        json(&serde_json::json!({ "removed": a.id, "key": c.key, "kind": c.kind }))
     }
 
     #[tool(
@@ -1278,6 +1861,341 @@ mod tests {
             check_mission(None, Some(&one), 8, "task:t9").is_err(),
             "an email in the chat of task:t1 cannot move task:t9"
         );
+    }
+
+    #[test]
+    fn a_chat_changes_a_whole_mission_only_when_it_owns_all_of_it() {
+        let item = |k: &str| aifred_core::missions::MissionItem {
+            key: k.into(),
+            title: "T".into(),
+            open: true,
+            by: "aifred".into(),
+        };
+        let m = |keys: &[&str]| aifred_core::missions::Mission {
+            id: 7,
+            title: "M".into(),
+            doer: "you".into(),
+            day: None,
+            rank: None,
+            status: "open".into(),
+            items: keys.iter().map(|k| item(k)).collect(),
+            checklist: Vec::new(),
+            progress: aifred_core::missions::Progress {
+                steps_done: 0,
+                steps: 0,
+                items_closed: 0,
+                items: 0,
+                percent: 0,
+            },
+        };
+        let one = ["task:t1".to_string()];
+        let two = m(&["task:t1", "task:t2"]);
+        assert!(
+            check_whole_mission(None, None, &two).is_ok(),
+            "the main chat"
+        );
+        assert!(
+            check_whole_mission(Some(7), Some(&one), &two).is_ok(),
+            "its own mission"
+        );
+        assert!(
+            check_whole_mission(Some(8), Some(&one), &two).is_err(),
+            "the chat of mission 8 cannot change mission 7"
+        );
+        assert!(
+            check_whole_mission(None, Some(&one), &two).is_err(),
+            "the chat of task:t1 cannot finish the work of task:t2"
+        );
+        assert!(check_whole_mission(None, Some(&one), &m(&["task:t1"])).is_ok());
+        assert!(check_whole_mission(None, Some(&[]), &m(&[])).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_chat_runs_the_timer_sets_status_rules_and_picks_in_the_review() {
+        let t = tools("step-four");
+        let a = format!("task:{}", t.store().add("A", "", "you").unwrap().id);
+        let b = format!("task:{}", t.store().add("B", "", "you").unwrap().id);
+        let key = |k: &String| Parameters(KeyArgs { key: k.clone() });
+
+        // The timer, with the undo values.
+        let r = body(t.start_work(key(&a)).await.unwrap());
+        assert_eq!(r["running"]["key"], a.as_str());
+        assert!(r["before"].is_null());
+        let r = body(t.start_work(key(&b)).await.unwrap());
+        assert_eq!(r["before"], a.as_str());
+        let r = body(t.stop_work().await.unwrap());
+        assert_eq!(r["stopped"], b.as_str());
+        assert!(aifred_core::worktime::running(&t.dir).unwrap().is_none());
+
+        // A status rule from a saved ClickUp task, and its undo.
+        let item = aifred_core::clickup::ClickupItem {
+            id: "86abc".into(),
+            custom_id: None,
+            title: "Docs".into(),
+            url: String::new(),
+            status: "In QA".into(),
+            status_color: String::new(),
+            status_type: "custom".into(),
+            list: "Sprint".into(),
+            list_id: "901".into(),
+            folder_id: String::new(),
+            folder: String::new(),
+            space_id: "s1".into(),
+            space: "Team".into(),
+            workspace: "Rymera".into(),
+            priority: None,
+            due: None,
+            updated: 0,
+            description: None,
+        };
+        aifred_core::db::write(&t.dir, |tx| {
+            tx.execute(
+                "INSERT INTO work_item (source, item_id, title, place, url, data, in_list, pos, first_seen, last_seen)
+                 VALUES ('clickup', '86abc', 'Docs', '', '', ?1, 1, 0, 0, 0)",
+                [serde_json::to_string(&item)?],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let rule = |scope: &str| {
+            Parameters(RuleFromTaskArgs {
+                task: "clickup:86abc".into(),
+                scope: scope.into(),
+                status: "waiting".into(),
+            })
+        };
+        assert!(
+            t.set_status_rule(rule("folder")).await.is_err(),
+            "no folder"
+        );
+        let r = body(t.set_status_rule(rule("list")).await.unwrap());
+        assert_eq!(r["rule"]["name"], "in qa");
+        assert_eq!(r["rule"]["scope_id"], "901");
+        assert!(r["before"].is_null());
+        let id = r["rule"]["id"].as_i64().unwrap();
+        let r = body(
+            t.remove_status_rule(Parameters(RuleIdArgs { id }))
+                .await
+                .unwrap(),
+        );
+        assert!(aifred_core::status::rules(&t.dir).unwrap().is_empty());
+        let before: RuleArgs = serde_json::from_value(r["before"].clone()).unwrap();
+        t.restore_status_rule(Parameters(before)).await.unwrap();
+        assert_eq!(aifred_core::status::rules(&t.dir).unwrap()[0].id, id);
+
+        // A pick in the weekly review, and its undo.
+        let p = body(
+            t.review_pick(Parameters(PickArgs {
+                key: a.clone(),
+                pick: "drop".into(),
+                note: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        let done = || {
+            t.store()
+                .load()
+                .unwrap()
+                .into_iter()
+                .find(|x| format!("task:{}", x.id) == a)
+                .unwrap()
+                .done
+        };
+        assert!(done(), "drop closes a local task");
+        t.undo_review_pick(Parameters(PickIdArgs {
+            id: p["id"].as_i64().unwrap(),
+        }))
+        .await
+        .unwrap();
+        assert!(!done(), "the undo opens it again");
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_main_chat_changes_status_rules() {
+        assert!(check_main_chat(None, "status rules").is_ok());
+        let one = ["clickup:86abc".to_string()];
+        assert!(
+            check_main_chat(Some(&one), "status rules").is_err(),
+            "a task description in an item chat cannot change all tasks"
+        );
+        assert!(check_main_chat(Some(&[]), "status rules").is_err());
+    }
+
+    #[tokio::test]
+    async fn the_chat_sets_a_time_guess_corrects_the_brief_and_undoes_it() {
+        let t = tools("small-tools");
+        let k = format!("task:{}", t.store().add("A", "", "you").unwrap().id);
+        let guess = |minutes: Option<u32>| {
+            Parameters(TimeGuessArgs {
+                key: k.clone(),
+                minutes,
+                by: None,
+            })
+        };
+        plan::set_estimate(&t.dir, &k, Some(30), "aifred").unwrap();
+        let r = body(t.set_time_guess(guess(Some(45))).await.unwrap());
+        assert_eq!(r["minutes"], 45);
+        assert_eq!(r["before"], 30);
+        assert_eq!(plan::estimates(&t.dir).unwrap()[&k].by, "you");
+        assert_eq!(r["before_by"], "aifred");
+        // The undo puts back the old guess and who made it.
+        t.set_time_guess(Parameters(TimeGuessArgs {
+            key: k.clone(),
+            minutes: Some(30),
+            by: Some("aifred".into()),
+        }))
+        .await
+        .unwrap();
+        let e = &plan::estimates(&t.dir).unwrap()[&k];
+        assert_eq!((e.minutes, e.by.as_str()), (30, "aifred"));
+        let r = body(t.set_time_guess(guess(None)).await.unwrap());
+        assert!(r["minutes"].is_null());
+
+        let correct = |kind: &str| {
+            Parameters(CorrectArgs {
+                key: k.clone(),
+                kind: kind.into(),
+            })
+        };
+        assert!(t.correct_brief(correct("later")).await.is_err());
+        let r = body(t.correct_brief(correct("not_today")).await.unwrap());
+        assert_eq!(r["new"], true);
+        let id = r["correction"].as_i64().unwrap();
+        let again = body(t.correct_brief(correct("not_today")).await.unwrap());
+        assert_eq!(again["correction"], id);
+        assert_eq!(again["new"], false, "the same correction of the same day");
+        t.undo_brief_correction(Parameters(CorrectionIdArgs { id }))
+            .await
+            .unwrap();
+        assert!(aifred_core::learn::get(&t.dir, id).is_err());
+
+        assert!(
+            t.hide_email(Parameters(HideEmailArgs {
+                key: k.clone(),
+                hide: true,
+            }))
+            .await
+            .is_err(),
+            "only an email"
+        );
+        std::fs::remove_dir_all(&t.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_chat_changes_the_steps_and_finishes_or_skips_a_mission() {
+        let t = tools("mission-whole");
+        let k = format!("task:{}", t.store().add("A", "", "you").unwrap().id);
+        let day = aifred_core::plan::today();
+        aifred_core::db::write(&t.dir, |tx| {
+            aifred_core::missions::save_in(
+                tx,
+                &day,
+                &[aifred_core::missions::Proposal {
+                    id: None,
+                    title: "Ship".into(),
+                    keys: vec![k.clone()],
+                    steps: vec!["Old".into()],
+                    doer: "you".into(),
+                }],
+                1,
+            )
+        })
+        .unwrap();
+        let id = aifred_core::missions::today(&t.dir, &day).unwrap()[0].id;
+        let mission = || Parameters(MissionArgs { mission: id });
+
+        let r = body(
+            t.set_mission_steps(Parameters(MissionStepsArgs {
+                mission: id,
+                steps: vec![
+                    StepArgs {
+                        text: "First".into(),
+                        done: None,
+                    },
+                    StepArgs {
+                        text: "Second".into(),
+                        done: None,
+                    },
+                ],
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(r["mission"]["checklist"][1]["text"], "Second");
+        assert_eq!(r["before"][0]["text"], "Old");
+
+        let rename = |title: &str, brief_may_change: bool| {
+            Parameters(RenameArgs {
+                mission: id,
+                title: title.into(),
+                brief_may_change,
+            })
+        };
+        let r = body(
+            t.rename_mission(rename("Ship the cart", false))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(r["mission"]["title"], "Ship the cart");
+        assert_eq!(r["before"]["title"], "Ship");
+        assert_eq!(r["before"]["brief_may_change"], true);
+        let r = body(t.rename_mission(rename("Ship", true)).await.unwrap());
+        assert_eq!(r["mission"]["title"], "Ship", "the undo");
+        assert!(t.rename_mission(rename(" ", false)).await.is_err());
+
+        let tick = |step: usize| {
+            Parameters(TickArgs {
+                mission: id,
+                step,
+                done: true,
+            })
+        };
+        let r = body(t.tick_mission_step(tick(2)).await.unwrap());
+        assert_eq!(r["mission"]["checklist"][1]["done"], true);
+        assert_eq!(r["before"], false);
+        assert!(
+            t.tick_mission_step(tick(0)).await.is_err(),
+            "steps start at 1"
+        );
+        assert!(t.tick_mission_step(tick(3)).await.is_err());
+
+        // "Not today", and its undo.
+        let r = body(t.skip_mission_today(mission()).await.unwrap());
+        let ids: Vec<i64> = serde_json::from_value(r["corrections"].clone()).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert!(
+            aifred_core::missions::today(&t.dir, &day)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            t.undo_skip_mission(Parameters(UndoSkipArgs {
+                mission: id,
+                ids: vec![ids[0] + 99]
+            }))
+            .await
+            .is_err(),
+            "only a correction of this mission"
+        );
+        t.undo_skip_mission(Parameters(UndoSkipArgs { mission: id, ids }))
+            .await
+            .unwrap();
+        assert_eq!(aifred_core::missions::today(&t.dir, &day).unwrap().len(), 1);
+
+        // Finish, and its undo.
+        let r = body(t.finish_mission(mission()).await.unwrap());
+        assert_eq!(r["status"], "done");
+        assert!(
+            aifred_core::missions::today(&t.dir, &day)
+                .unwrap()
+                .is_empty()
+        );
+        let r = body(t.reopen_mission(mission()).await.unwrap());
+        assert_eq!(r["status"], "open");
+        assert_eq!(r["checklist"][1]["done"], true, "the checklist stays");
+        std::fs::remove_dir_all(&t.dir).unwrap();
     }
 
     #[tokio::test]

@@ -268,6 +268,9 @@ export type Brief = {
   moves?: Moved[];
   /** The count of older moves that `moves` does not give: it gives only the newest. */
   moves_more?: number;
+  /** Your open work that the brief marked done today, because it is the
+   * same work as a finished ClickUp task or GitHub item (matches.rs). Each one has an Undo. */
+  done?: DoneMatch[];
   /** The items that AIfred has questions about, at most 5 (context::MAX_ASK). "Help AIfred understand" asks about them. */
   ask?: string[];
   /** The question about the items in `ask` (context::QUESTION in Rust). */
@@ -290,6 +293,22 @@ export type Moved = {
   title: string;
   main: string;
   main_title: string;
+  why: string;
+};
+
+/** One task or mission step that the brief marked done, because it is the
+ * same work as a finished item (matches.rs). */
+export type DoneMatch = {
+  id: number;
+  /** "task:<id>" or "mission:<id>". */
+  key: string;
+  /** The task title, or the mission title. */
+  title: string;
+  /** The mission step. "" for a task. */
+  step: string;
+  /** The finished ClickUp task or GitHub item. */
+  by_key: string;
+  by_title: string;
   why: string;
 };
 
@@ -1066,6 +1085,9 @@ export const unlinkItem = (key: string) =>
 /** Undoes AIfred's moves (sort.rs): each item goes back to where it was. AIfred does not move these items again. */
 export const undoMoves = (ids: number[]) =>
   invoke<Links>("undo_moves", { ids });
+/** Undoes one match of the brief: the task or the mission step is open again. AIfred does not make this match again. */
+export const undoDoneMatch = (id: number) =>
+  invoke<void>("undo_done_match", { id });
 
 /** One item that waits until another item is finished, in AIfred only
  * (blockers.rs). `by`: who set it ("chat": the AI, because you asked in a chat). `why`: AIfred's reason. */

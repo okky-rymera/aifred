@@ -74,6 +74,8 @@ export type AppCtx = {
   removeBlocker: (key: string, blocker: string) => Promise<boolean>;
   /** Undoes AIfred's moves from the brief: the items go back to where they were. */
   undoMoves: (moves: api.Moved[]) => Promise<boolean>;
+  /** Undoes one match of the brief: the task or the mission step is open again. */
+  undoDoneMatch: (m: api.DoneMatch) => Promise<boolean>;
   trackEmail: (m: api.Mail, followUp?: string) => Promise<boolean>;
   hideSent: (m: api.Mail) => Promise<boolean>;
   addWaiting: (item: api.NewWaiting) => Promise<boolean>;

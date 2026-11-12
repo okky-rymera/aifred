@@ -6,11 +6,14 @@
 //! goes into the tool settings file that Claude reads.
 //!
 //! These tools only read, with one exception: the question chat on the home
-//! page (QUESTION_CHAT_ENV) can mark a task that the home page asked about
-//! today done when the user says it is finished, put the status from
-//! before back, and write a comment on such a task in the user's words
-//! (also on a task that it closed today, QUESTION_REOPEN_ENV). The user
-//! also marks ClickUp tasks done in the window.
+//! page, the chat of a ClickUp task, and a mission chat (QUESTION_CHAT_ENV)
+//! can mark a task of the chat done when the user says it is finished, put
+//! the status from before back, and write a comment on such a task in the
+//! user's words (also on a task that it closed today, QUESTION_REOPEN_ENV).
+//! The tasks of the chat: in the question chat the tasks that the home page
+//! asked about today, in the chat of a task that task, in a mission chat
+//! the open ClickUp tasks of the mission. The user also marks ClickUp tasks
+//! done in the window.
 //!
 //! my_tasks uses the list that the window saved in the database while it is
 //! new enough, and saves each new list it gets from ClickUp. search_my_tasks
@@ -104,7 +107,7 @@ fn check_question_chat(var: &str, id: &str, scope: &str, advice: &str) -> Result
     } else {
         Err(ErrorData::invalid_request(
             format!(
-                "Only the question chat on the home page can change ClickUp, and only {scope}. {advice}"
+                "Only the question chat on the home page, the chat of a ClickUp task, or a mission chat can change ClickUp, and only {scope}. {advice}"
             ),
             None,
         ))
@@ -122,7 +125,7 @@ fn check_comment_chat(id: &str) -> Result<(), ErrorData> {
     check_question_chat(
         aifred_core::assistant::QUESTION_CHAT_ENV,
         id,
-        "the tasks that the home page asked about today",
+        "the tasks of the chat",
         "Tell the user to add the comment in ClickUp.",
     )
 }
@@ -373,7 +376,7 @@ impl ClickupTools {
         check_question_chat(
             aifred_core::assistant::QUESTION_CHAT_ENV,
             id,
-            "the tasks that the home page asked about today and that are still open in ClickUp",
+            "the tasks of the chat that are still open in ClickUp",
             "Tell the user to mark the task done in AIfred or in ClickUp.",
         )?;
         clickup::check_task_id(id).map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;

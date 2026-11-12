@@ -744,6 +744,17 @@ pub fn pick(
     })
 }
 
+/// The item key of pick `id`, for a check before undo_pick().
+pub fn pick_key(dir: &Path, id: i64) -> anyhow::Result<String> {
+    db::read(dir, |c| {
+        c.query_row("SELECT key FROM review_pick WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("no pick with id {id}"))
+    })
+}
+
 /// Takes back a pick: the plan, the task, and the "waiting for" list are
 /// as before the pick. A start day that the user changed after the pick
 /// stays.

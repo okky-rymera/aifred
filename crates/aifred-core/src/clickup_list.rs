@@ -118,6 +118,56 @@ impl ClickupStore {
         Ok(view(fetched.items, now, &fetched.cut))
     }
 
+    /// Saves the finished tasks (clickup::Client::finished_tasks) that
+    /// AIfred did not know, with their done time (db::save_finished). The
+    /// user's status rules decide if each one is Done, Unfinished, or
+    /// Cancelled. Returns how many it added.
+    pub fn save_finished(
+        &self,
+        account: &str,
+        finished: &[(ClickupItem, u64)],
+        now: u64,
+    ) -> anyhow::Result<usize> {
+        let rules = crate::status::rules(&self.dir)?;
+        let rows = finished
+            .iter()
+            .filter_map(|(i, done)| {
+                let place = crate::status::Place {
+                    list_id: &i.list_id,
+                    folder_id: &i.folder_id,
+                    space_id: &i.space_id,
+                };
+                let (status, _) =
+                    crate::status::map_clickup(&rules, &i.status, &i.status_type, &place);
+                // A rule that calls the status open (for example "In QA
+                // means waiting"): for the user, the task is not finished.
+                let reason = crate::status::reason_for(status);
+                if reason == crate::status::STILL_OPEN {
+                    return None;
+                }
+                Some(Ok(db::FinishedRow {
+                    item: ListItem {
+                        id: i.id.clone(),
+                        title: i.title.clone(),
+                        place: format!("{} / {}", i.workspace, i.list),
+                        url: i.url.clone(),
+                        data: match serde_json::to_string(i) {
+                            Ok(d) => d,
+                            Err(e) => return Some(Err(e.into())),
+                        },
+                        details: i.description.clone(),
+                    },
+                    closed_at: *done,
+                    reason: Some(reason),
+                    label: i.status.clone(),
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        db::write(&self.dir, |tx| {
+            db::save_finished(tx, SOURCE, account, &rows, now)
+        })
+    }
+
     /// Notes that the question chat of the item `chat` marked the task `id`
     /// done, and its status from before. reopen_task uses it
     /// (closed_status). The undo works only on the same day, so it also
@@ -275,6 +325,20 @@ impl ClickupStore {
         })
     }
 
+    /// One saved task, also one that left the list. None: AIfred has no
+    /// such task.
+    pub fn get(&self, id: &str) -> anyhow::Result<Option<ClickupItem>> {
+        let data: Option<String> = db::read(&self.dir, |c| {
+            Ok(c.query_row(
+                "SELECT data FROM work_item WHERE source = ?1 AND item_id = ?2",
+                rusqlite::params![SOURCE, id.trim()],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })?;
+        Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
     /// Puts one task back in the saved list, after the undo of a close in
     /// the window (clickup_undo_done) or in the question chat
     /// (reopen_task). The undo of remove: the close columns go back to
@@ -407,6 +471,83 @@ pub(crate) mod tests {
 
     fn tasks(items: Vec<ClickupItem>) -> MyTasks {
         MyTasks { items, cut: vec![] }
+    }
+
+    #[test]
+    fn finished_tasks_are_saved_closed_and_a_known_task_does_not_change() {
+        let d = temp("finished");
+        let s = ClickupStore::new(&d);
+        s.save("acc", tasks(vec![item("open", 1)]), 100).unwrap();
+        let done = |id: &str, status: &str, kind: &str| {
+            let mut i = item(id, 2);
+            i.status = status.into();
+            i.status_type = kind.into();
+            i
+        };
+        // "In QA" is a done status, but the user's rule says it is open.
+        crate::status::set_rule(
+            &d,
+            &crate::status::Rule {
+                id: 0,
+                name: "in qa".into(),
+                scope: "all".into(),
+                scope_id: String::new(),
+                scope_name: String::new(),
+                space_id: String::new(),
+                space_name: String::new(),
+                kind: String::new(),
+                status: crate::status::WAITING.into(),
+            },
+            1,
+        )
+        .unwrap();
+        let added = s
+            .save_finished(
+                "acc",
+                &[
+                    (done("new", "complete", "closed"), 90),
+                    (done("open", "complete", "closed"), 95),
+                    (done("qa", "in qa", "done"), 96),
+                ],
+                200,
+            )
+            .unwrap();
+        assert_eq!(added, 1, "only the task that AIfred did not know");
+        let row = |id: &str| {
+            db::read(&d, |c| {
+                Ok(c.query_row(
+                    "SELECT in_list, close_reason, closed_at FROM work_item WHERE item_id = ?1",
+                    [id],
+                    |r| {
+                        Ok((
+                            r.get::<_, bool>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?)
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            row("new"),
+            Some((false, Some("done".into()), Some(90))),
+            "the real done time"
+        );
+        assert_eq!(
+            row("open"),
+            Some((true, None, None)),
+            "a task in the list does not change"
+        );
+        assert_eq!(row("qa"), None, "a rule says it is open: not finished work");
+        assert!(!db::read(&d, |c| crate::items::is_open(c, "clickup:new")).unwrap());
+
+        // Opened again in ClickUp: the next download puts it in the list.
+        s.save("acc", tasks(vec![item("open", 1), item("new", 3)]), 300)
+            .unwrap();
+        assert_eq!(row("new"), Some((true, None, None)));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

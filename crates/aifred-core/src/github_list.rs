@@ -55,6 +55,33 @@ impl GithubStore {
         })
     }
 
+    /// Saves the closed items (github::finished_items) that AIfred did not
+    /// know, with their close time (db::save_finished). Why each one closed
+    /// comes later from status::look_up_github. Returns how many it added.
+    pub fn save_finished(&self, finished: &[(GithubItem, u64)], now: u64) -> anyhow::Result<usize> {
+        let rows = finished
+            .iter()
+            .map(|(i, closed)| {
+                Ok(db::FinishedRow {
+                    item: ListItem {
+                        id: i.id.clone(),
+                        title: i.title.clone(),
+                        place: i.repo.clone(),
+                        url: i.url.clone(),
+                        data: serde_json::to_string(i)?,
+                        details: i.body.clone(),
+                    },
+                    closed_at: *closed,
+                    reason: None,
+                    label: String::new(),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        db::write(&self.dir, |tx| {
+            db::save_finished(tx, SOURCE, "", &rows, now)
+        })
+    }
+
     /// Saves a new list from GitHub.
     ///
     /// GitHub did not send the links of the items in `no_links`. They get the

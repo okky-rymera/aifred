@@ -15,6 +15,8 @@
 //! - A mission keeps its id, so its checklist stays, when the brief gives
 //!   that id and some items stay, or when half of its open items or more stay.
 //! - The checklist is the mission's own. A tick does not change the items.
+//! - The brief writes the title again each day, until the user renames the
+//!   mission (rename()). Then the brief keeps the user's title.
 //! - The user can add an item to a mission or take one out (add_item(),
 //!   remove_item(), with restore() as the undo). An item that the user
 //!   added stays in that mission: the brief cannot take it away or put it
@@ -46,7 +48,10 @@ const MAX_TITLE: usize = 80;
 /// At most this many steps in a new mission.
 const MAX_STEPS: usize = 6;
 /// The longest step, in characters.
-const MAX_STEP: usize = 100;
+pub const MAX_STEP: usize = 100;
+/// At most this many steps when the user (or the AI on the user's word)
+/// sets the checklist (set_checklist). The brief uses MAX_STEPS.
+pub const MAX_SET_STEPS: usize = 12;
 /// An open mission that did not change for this many days goes away.
 const STALE_DAYS: u64 = 14;
 
@@ -152,7 +157,7 @@ pub fn parse(v: &Value, known: &HashSet<&str>) -> Vec<Proposal> {
 }
 
 /// The open missions, for the AI (overview.rs): the id, the title, the
-/// keys, and the steps. With them the brief can keep a mission's id.
+/// keys, and the steps, with the text of the open steps. With them the brief can keep a mission's id.
 pub(crate) fn for_ai(c: &Connection) -> anyhow::Result<Vec<Value>> {
     let mut out = Vec::new();
     for m in open_in(c)? {
@@ -163,6 +168,17 @@ pub(crate) fn for_ai(c: &Connection) -> anyhow::Result<Vec<Value>> {
         });
         if !m.checklist.is_empty() {
             v["steps"] = format!("{} of {} done", m.progress.steps_done, m.progress.steps).into();
+            // The brief can mark an open step done when it is the same work
+            // as a finished item (matches.rs).
+            let open: Vec<&str> = m
+                .checklist
+                .iter()
+                .filter(|s| !s.done)
+                .map(|s| s.text.as_str())
+                .collect();
+            if !open.is_empty() {
+                v["open_steps"] = open.into();
+            }
         }
         // The brief cannot move these items (module text).
         let kept: Vec<&str> = m
@@ -274,7 +290,9 @@ pub fn save_in(
                     }
                 }
                 tx.execute(
-                    "UPDATE mission SET title = ?2, doer = ?3, day = ?4, rank = ?5, updated = ?6 WHERE id = ?1",
+                    // A title that the user set stays (rename()).
+                    "UPDATE mission SET title = CASE WHEN title_by = 'you' THEN title ELSE ?2 END,
+                     doer = ?3, day = ?4, rank = ?5, updated = ?6 WHERE id = ?1",
                     rusqlite::params![id, p.title, p.doer, day, rank, now as i64],
                 )?;
                 if !p.steps.is_empty() {
@@ -547,6 +565,155 @@ pub fn set_step(
             rusqlite::params![id, serde_json::to_string(&list)?, now as i64],
         )?;
         get_in(tx, id)
+    })
+}
+
+/// One step of a new checklist for set_checklist(). `done` None: the step
+/// keeps the tick of an old step with the same text, else it is not done.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct NewStep {
+    pub text: String,
+    #[serde(default)]
+    pub done: Option<bool>,
+}
+
+/// A checklist change: the mission after it, and the checklist from
+/// before, for the undo.
+#[derive(Debug, Clone, Serialize)]
+pub struct StepsChanged {
+    pub mission: Mission,
+    pub before: Vec<ChecklistItem>,
+}
+
+/// Replaces the checklist of open mission `id`: add, change, remove, or
+/// sort the steps. A step with the same text as an old step (case and the
+/// spaces around it do not count) keeps its tick when `done` is None. The
+/// items do not change. An empty list is allowed: the next brief then
+/// gives new steps.
+///
+/// The brief does not change a checklist that has steps (save_in), so the
+/// change stays.
+pub fn set_checklist(
+    dir: &Path,
+    id: i64,
+    steps: &[NewStep],
+    now: u64,
+) -> anyhow::Result<StepsChanged> {
+    if steps.len() > MAX_SET_STEPS {
+        bail!(
+            "A mission can have at most {MAX_SET_STEPS} steps, not {}",
+            steps.len()
+        );
+    }
+    let mut texts = Vec::with_capacity(steps.len());
+    for (n, s) in steps.iter().enumerate() {
+        let text = s.text.trim();
+        if text.is_empty() {
+            bail!("Step {} has no text", n + 1);
+        }
+        if text.chars().count() > MAX_STEP {
+            bail!("Step {} is longer than {MAX_STEP} characters", n + 1);
+        }
+        texts.push(text.to_string());
+    }
+    db::write(dir, |tx| {
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT checklist FROM mission WHERE id = ?1 AND status = 'open'",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            bail!("AIfred does not know the open mission {id}");
+        };
+        let before: Vec<ChecklistItem> = serde_json::from_str(&raw)?;
+        // Each old step gives its tick to one new step only.
+        let mut used = vec![false; before.len()];
+        let list: Vec<ChecklistItem> = steps
+            .iter()
+            .zip(texts)
+            .map(|(s, text)| {
+                let old = before.iter().enumerate().position(|(i, o)| {
+                    !used[i] && o.text.trim().to_lowercase() == text.to_lowercase()
+                });
+                if let Some(i) = old {
+                    used[i] = true;
+                }
+                let done = s.done.unwrap_or(old.is_some_and(|i| before[i].done));
+                ChecklistItem { text, done }
+            })
+            .collect();
+        tx.execute(
+            "UPDATE mission SET checklist = ?2, updated = ?3 WHERE id = ?1",
+            rusqlite::params![id, serde_json::to_string(&list)?, now as i64],
+        )?;
+        Ok(StepsChanged {
+            mission: get_in(tx, id)?,
+            before,
+        })
+    })
+}
+
+/// The mission after a rename, and the title and its mark from before, for
+/// the undo.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Renamed {
+    pub mission: Mission,
+    pub before: TitleBefore,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TitleBefore {
+    pub title: String,
+    /// True when the brief could change the old title: the undo sends it
+    /// back, so the brief can change the title again.
+    pub brief_may_change: bool,
+}
+
+/// The user (or the AI on the user's word) renames an open mission. With
+/// `brief_may_change` false, the brief keeps this title (save_in). True is
+/// for the undo of a rename of a title that the brief wrote.
+pub fn rename(
+    dir: &Path,
+    id: i64,
+    title: &str,
+    brief_may_change: bool,
+    now: u64,
+) -> anyhow::Result<Renamed> {
+    let title = title.trim();
+    if title.is_empty() {
+        bail!("The title has no text");
+    }
+    if title.contains('\n') {
+        bail!("The title must be one line");
+    }
+    if title.chars().count() > MAX_TITLE {
+        bail!("The title is longer than {MAX_TITLE} characters");
+    }
+    let by = if brief_may_change { "aifred" } else { "you" };
+    db::write(dir, |tx| {
+        let old: Option<(String, String)> = tx
+            .query_row(
+                "SELECT title, title_by FROM mission WHERE id = ?1 AND status = 'open'",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((old_title, old_by)) = old else {
+            bail!("AIfred does not know the open mission {id}");
+        };
+        tx.execute(
+            "UPDATE mission SET title = ?2, title_by = ?3, updated = ?4 WHERE id = ?1",
+            rusqlite::params![id, title, by, now as i64],
+        )?;
+        Ok(Renamed {
+            mission: get_in(tx, id)?,
+            before: TitleBefore {
+                title: old_title,
+                brief_may_change: old_by != "you",
+            },
+        })
     })
 }
 
@@ -1040,6 +1207,114 @@ mod tests {
         let m = today(&d, "2026-11-08").unwrap();
         assert_ne!(m[0].id, id, "a done mission does not open again");
         assert_eq!(keys(&m[0]), [a.as_str()], "its items are free");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_renamed_mission_keeps_its_title_when_the_brief_runs_again() {
+        let d = temp("rename");
+        let (a, _, _) = three(&d);
+        save(&d, "2026-11-08", &[p(None, "Ship", &[&a], &[])], 100);
+        let id = today(&d, "2026-11-08").unwrap()[0].id;
+
+        let r = rename(&d, id, "  Ship the cart  ", false, 101).unwrap();
+        assert_eq!(r.mission.title, "Ship the cart");
+        assert_eq!(r.before.title, "Ship");
+        assert!(r.before.brief_may_change, "the brief wrote the old title");
+
+        save(&d, "2026-11-09", &[p(Some(id), "Ship it", &[&a], &[])], 200);
+        let m = today(&d, "2026-11-09").unwrap();
+        assert_eq!(m[0].id, id);
+        assert_eq!(
+            m[0].title, "Ship the cart",
+            "the brief keeps the user's title"
+        );
+
+        // A second rename says that the user set the old title.
+        let r = rename(&d, id, "Cart", false, 201).unwrap();
+        assert!(!r.before.brief_may_change);
+
+        // The undo of the first rename gives the title back to the brief.
+        rename(&d, id, "Ship", true, 202).unwrap();
+        save(&d, "2026-11-10", &[p(Some(id), "Ship it", &[&a], &[])], 300);
+        assert_eq!(today(&d, "2026-11-10").unwrap()[0].title, "Ship it");
+
+        // A wrong title changes nothing.
+        assert!(rename(&d, id, " ", false, 301).is_err());
+        assert!(rename(&d, id, "a\nb", false, 301).is_err());
+        assert!(rename(&d, id, &"x".repeat(MAX_TITLE + 1), false, 301).is_err());
+        assert!(rename(&d, 999, "X", false, 301).is_err());
+        assert_eq!(get(&d, id).unwrap().title, "Ship it");
+    }
+
+    #[test]
+    fn the_user_changes_the_checklist_and_the_brief_keeps_it() {
+        let d = temp("checklist");
+        let (a, _, _) = three(&d);
+        save(
+            &d,
+            "2026-11-08",
+            &[p(None, "Ship", &[&a], &["One", "Two"])],
+            100,
+        );
+        let id = today(&d, "2026-11-08").unwrap()[0].id;
+        set_step(&d, id, 1, true, 101).unwrap();
+        let step = |t: &str, done: Option<bool>| NewStep {
+            text: t.into(),
+            done,
+        };
+
+        let c = set_checklist(
+            &d,
+            id,
+            &[
+                step(" two ", None),
+                step("New", None),
+                step("One", Some(true)),
+            ],
+            102,
+        )
+        .unwrap();
+        let got: Vec<(&str, bool)> = c
+            .mission
+            .checklist
+            .iter()
+            .map(|s| (s.text.as_str(), s.done))
+            .collect();
+        assert_eq!(
+            got,
+            [("two", true), ("New", false), ("One", true)],
+            "the same text keeps its tick; `done` wins"
+        );
+        assert_eq!(c.before.len(), 2);
+        assert!(c.before[1].done, "before is the old list, for the undo");
+        assert_eq!(c.mission.items.len(), 1, "the items do not change");
+
+        // The limits. A wrong list changes nothing.
+        let many: Vec<NewStep> = (0..=MAX_SET_STEPS)
+            .map(|n| step(&n.to_string(), None))
+            .collect();
+        assert!(set_checklist(&d, id, &many, 103).is_err());
+        assert!(set_checklist(&d, id, &[step(" ", None)], 103).is_err());
+        assert!(set_checklist(&d, id, &[step(&"x".repeat(MAX_STEP + 1), None)], 103).is_err());
+        assert_eq!(get(&d, id).unwrap().checklist.len(), 3);
+
+        // The next brief keeps the user's steps.
+        save(
+            &d,
+            "2026-11-09",
+            &[p(Some(id), "Ship", &[&a], &["Brief step"])],
+            200,
+        );
+        let m = today(&d, "2026-11-09").unwrap();
+        assert_eq!(m[0].id, id);
+        assert_eq!(m[0].checklist[1].text, "New");
+
+        finish(&d, id, 201).unwrap();
+        assert!(
+            set_checklist(&d, id, &[step("A", None)], 202).is_err(),
+            "only an open mission"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 

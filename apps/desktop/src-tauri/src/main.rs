@@ -899,9 +899,20 @@ async fn github_items(app: State<'_, App>, force: bool) -> CmdResult<GithubList>
                 GithubStore::new(&d).save_fetch(f.items, &f.no_links, now())
             })
             .await?;
-            // Why the items that left the list closed (status.rs). It runs
-            // after the answer: the list does not wait for it.
+            // The items that closed lately, also the ones that were never
+            // in the list (matches.rs), then why the items that left the
+            // list closed (status.rs). It runs after the answer: the list
+            // does not wait for it.
             tauri::async_runtime::spawn(async move {
+                let since = now().saturating_sub(aifred_core::matches::FINISHED_SECS);
+                match github::finished_items(&github::owners_from_env(), since).await {
+                    Ok(f) => {
+                        if let Err(e) = GithubStore::new(&dir).save_finished(&f, now()) {
+                            eprintln!("aifred: cannot save the closed GitHub items: {e:#}");
+                        }
+                    }
+                    Err(e) => eprintln!("aifred: cannot read the closed GitHub items: {e:#}"),
+                }
                 if let Err(e) = status::look_up_github(&dir, now()).await {
                     eprintln!("aifred: cannot read why GitHub items closed: {e:#}");
                 }
@@ -1139,6 +1150,13 @@ async fn restore_blocker(
 
 /// Undoes AIfred's moves of items (sort.rs): each item goes back to where
 /// it was before. AIfred does not move these items again.
+/// The undo of one match of the brief (matches.rs): the task or the
+/// mission step is open again, and the brief never makes this match again.
+#[tauri::command]
+async fn undo_done_match(app: State<'_, App>, id: i64) -> CmdResult<()> {
+    blocking(&app, move |a| aifred_core::matches::undo(&a.dir, id, now())).await
+}
+
 #[tauri::command]
 async fn undo_moves(app: State<'_, App>, ids: Vec<i64>) -> CmdResult<Links> {
     blocking(&app, move |a| aifred_core::sort::undo(&a.dir, &ids, now())).await
@@ -1254,13 +1272,24 @@ async fn clickup_items(app: State<'_, App>, force: bool) -> CmdResult<ClickupLis
     }
     match client.my_tasks().await {
         Ok(items) => {
-            let d = dir.clone();
+            let (d, acc) = (dir.clone(), account.clone());
             let list = blocking(&app, move |_| {
-                ClickupStore::new(&d).save(&account, items, now())
+                ClickupStore::new(&d).save(&acc, items, now())
             })
             .await?;
-            // Why the tasks that left the list closed (status.rs).
+            // The tasks that closed lately, also the ones that were never in
+            // the list (matches.rs), then why the tasks that left the list
+            // closed (status.rs).
             tauri::async_runtime::spawn(async move {
+                let since = now().saturating_sub(aifred_core::matches::FINISHED_SECS);
+                match client.finished_tasks(since).await {
+                    Ok(f) => {
+                        if let Err(e) = ClickupStore::new(&dir).save_finished(&account, &f, now()) {
+                            eprintln!("aifred: cannot save the closed ClickUp tasks: {e:#}");
+                        }
+                    }
+                    Err(e) => eprintln!("aifred: cannot read the closed ClickUp tasks: {e:#}"),
+                }
                 if let Err(e) = status::look_up_clickup(&dir, &client, now()).await {
                     eprintln!("aifred: cannot read why ClickUp tasks closed: {e:#}");
                 }
@@ -2045,6 +2074,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>, app: App) -> tau
         remove_blocker,
         restore_blocker,
         undo_moves,
+        undo_done_match,
         google_status,
         set_google_client,
         set_google_feature,

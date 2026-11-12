@@ -59,6 +59,10 @@ pub struct Corrected {
     pub correction: Correction,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub learned: Option<Fact>,
+    /// False: the same correction was there already (same item, kind, and
+    /// day). An undo by the AI must not take away the user's own one.
+    #[serde(skip)]
+    pub new: bool,
 }
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Correction> {
@@ -108,6 +112,7 @@ pub(crate) fn add_in(
         return Ok(Corrected {
             correction,
             learned: None,
+            new: false,
         });
     }
     tx.execute(
@@ -127,6 +132,7 @@ pub(crate) fn add_in(
     Ok(Corrected {
         correction,
         learned,
+        new: true,
     })
 }
 
@@ -184,6 +190,19 @@ fn is_fact_text(place: &str, text: &str) -> bool {
         .and_then(|r| r.strip_prefix(FACT_HEAD))
         .and_then(|r| r.strip_suffix(FACT_TAIL))
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// One correction, for a check before undo().
+pub fn get(dir: &Path, id: i64) -> anyhow::Result<Correction> {
+    db::read(dir, |c| {
+        c.query_row(
+            &format!("SELECT {COLUMNS} FROM correction WHERE id = ?1"),
+            [id],
+            row,
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("no correction with id {id}"))
+    })
 }
 
 /// Removes a correction: the click was a mistake. When the place of the

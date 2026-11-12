@@ -72,6 +72,22 @@ struct IdArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct EditArgs {
+    /// Fact id, from search_memory or facts_with_tag.
+    id: i64,
+    /// The full new text of the fact. It replaces the old text.
+    text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct AlwaysArgs {
+    /// Fact id, from search_memory or facts_with_tag.
+    id: i64,
+    /// true: the fact goes into every message. false: you find it with search_memory.
+    always: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct DaysArgs {
     /// The first day, "YYYY-MM-DD".
     from: String,
@@ -183,7 +199,7 @@ impl MemoryTools {
     }
 
     #[tool(
-        description = "Forget one fact, for example when the user says it is wrong or old. The user can restore it in the AIfred app."
+        description = "Forget one fact, for example when the user says it is wrong or old. restore_memory is the undo, and the user can also restore it in the AIfred app."
     )]
     async fn forget_memory(
         &self,
@@ -191,6 +207,43 @@ impl MemoryTools {
     ) -> Result<CallToolResult, ErrorData> {
         let f = MemoryStore::new(&self.dir).forget(a.id).map_err(fail)?;
         ok_json(&json!({ "forgotten": f.id, "text": f.text }))
+    }
+
+    #[tool(
+        description = "Change the text of one fact, for example when the user corrects it. Use it only when the user asks, or when the user's own words show that the fact changed. Keep one fact in one sentence. The answer has the fact and `before`, the old text: the undo is this tool with the old text."
+    )]
+    async fn edit_memory(
+        &self,
+        Parameters(a): Parameters<EditArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = MemoryStore::new(&self.dir);
+        let before = store.get(a.id).map_err(fail)?.text;
+        let f = store.edit(a.id, &a.text).map_err(fail)?;
+        ok_json(&json!({ "fact": fact(&f), "before": before }))
+    }
+
+    #[tool(
+        description = "Say if one fact goes into every message (always true) or only comes with search_memory (always false). Use it only when the user asks you to always keep a fact in mind, or to stop that. The answer has the fact and `before`, the old value: the undo is this tool with the old value."
+    )]
+    async fn set_memory_always(
+        &self,
+        Parameters(a): Parameters<AlwaysArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let store = MemoryStore::new(&self.dir);
+        let before = store.get(a.id).map_err(fail)?.core;
+        let f = store.set_core(a.id, a.always).map_err(fail)?;
+        ok_json(&json!({ "fact": fact(&f), "before": before }))
+    }
+
+    #[tool(
+        description = "Bring back one forgotten fact: the undo of forget_memory. Use it only when the user asks for it."
+    )]
+    async fn restore_memory(
+        &self,
+        Parameters(a): Parameters<IdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let f = MemoryStore::new(&self.dir).restore(a.id).map_err(fail)?;
+        ok_json(&fact(&f))
     }
 
     #[tool(
@@ -295,6 +348,53 @@ mod tests {
             query: q.into(),
             limit: None,
         })
+    }
+
+    #[tokio::test]
+    async fn the_chat_edits_a_fact_keeps_it_always_and_restores_it() {
+        let t = tools("edit");
+        let id = MemoryStore::new(&t.dir)
+            .add("Sam sends the invoice", "you", false)
+            .unwrap()
+            .id;
+        let r = body(
+            t.edit_memory(Parameters(EditArgs {
+                id,
+                text: "Ana sends the invoice".into(),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(r["fact"]["text"], "Ana sends the invoice");
+        assert_eq!(r["before"], "Sam sends the invoice");
+
+        let r = body(
+            t.set_memory_always(Parameters(AlwaysArgs { id, always: true }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(r["fact"]["always"], true);
+        assert_eq!(r["before"], false);
+
+        t.forget_memory(Parameters(IdArgs { id })).await.unwrap();
+        let r = body(t.restore_memory(Parameters(IdArgs { id })).await.unwrap());
+        assert_eq!(r["text"], "Ana sends the invoice");
+        assert!(
+            MemoryStore::new(&t.dir)
+                .get(id)
+                .unwrap()
+                .forgotten
+                .is_none()
+        );
+        assert!(
+            t.edit_memory(Parameters(EditArgs {
+                id: id + 99,
+                text: "x".into()
+            }))
+            .await
+            .is_err()
+        );
+        std::fs::remove_dir_all(&t.dir).unwrap();
     }
 
     #[tokio::test]

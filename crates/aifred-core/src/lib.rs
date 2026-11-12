@@ -25,6 +25,7 @@ pub mod items;
 pub mod jobs;
 pub mod learn;
 pub mod links;
+pub mod matches;
 pub mod memory;
 pub mod missions;
 pub mod overview;

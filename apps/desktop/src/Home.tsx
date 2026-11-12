@@ -490,6 +490,59 @@ function MovesNote(props: { moves: api.Moved[]; more?: number }) {
   );
 }
 
+/** The open work that the brief marked done, because it is the same work as
+ * a finished ClickUp task or GitHub item (matches.rs). Each line has an Undo,
+ * like the moves note. */
+function DoneNote(props: { done: api.DoneMatch[] }) {
+  const { open, byKey, undoDoneMatch } = useApp();
+  const [busy, setBusy] = useState(false);
+  if (!props.done.length) return null;
+  const name = (key: string, title: string) =>
+    byKey.has(key) ? (
+      <button className="linkbtn" onClick={() => open(key)}>
+        {title}
+      </button>
+    ) : (
+      <span>{title}</span>
+    );
+  const undo = async (m: api.DoneMatch) => {
+    setBusy(true);
+    await undoDoneMatch(m);
+    setBusy(false);
+  };
+  const line = (m: api.DoneMatch) => (
+    <>
+      {m.step ? (
+        <>
+          I ticked the step "{m.step}" of the mission "{m.title}"
+        </>
+      ) : (
+        <>I marked {name(m.key, m.title)} done</>
+      )}
+      , because {name(m.by_key, m.by_title)} is finished. {m.why}{" "}
+      <button className="linkbtn" disabled={busy} aria-label={`Undo: ${m.step || m.title}`} onClick={() => undo(m)}>
+        Undo
+      </button>
+    </>
+  );
+  return (
+    <div className="btext moves" aria-label="What AIfred marked done">
+      {props.done.length === 1 ? (
+        <p>{line(props.done[0])}</p>
+      ) : (
+        <>
+          <p>Some of your work is already finished:</p>
+          <ul>
+            {props.done.map((m) => (
+              <li key={m.id}>{line(m)}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
 function BriefCard(props: { needYou: number }) {
   const { brief, briefState, writeBrief, open, byKey, sendMain, main } = useApp();
   const written = brief ? new Date(brief.written * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
@@ -512,6 +565,7 @@ function BriefCard(props: { needYou: number }) {
         <>
           <Md className="btext" text={brief.text} onItem={open} hasItem={(k) => byKey.has(k)} />
           {!!brief.moves?.length && <MovesNote moves={brief.moves} more={brief.moves_more} />}
+          {!!brief.done?.length && <DoneNote done={brief.done} />}
         </>
       ) : briefState === "writing" ? (
         <div className="btext wait">AIfred is reading your tasks, GitHub, ClickUp, and email to write today's brief…</div>

@@ -15,7 +15,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 pub const FILE: &str = "aifred.db";
 
 /// The schema version that this program writes. It is in `PRAGMA user_version`.
-const VERSION: i64 = 39;
+const VERSION: i64 = 41;
 
 const SCHEMA_1: &str = "
 -- One row for each memory fact.
@@ -1055,6 +1055,29 @@ CREATE TRIGGER period_vec_update AFTER UPDATE OF summary ON period_summary WHEN 
 END;
 ";
 
+/// Who set the mission title (missions.rs): 'aifred' (the brief writes it
+/// again each day) or 'you' (the user renamed it, so the brief keeps it).
+const SCHEMA_40: &str = "
+ALTER TABLE mission ADD COLUMN title_by TEXT NOT NULL DEFAULT 'aifred';
+";
+
+/// The open work that the brief marked done because it is the same work as
+/// a finished ClickUp or GitHub item (matches.rs).
+const SCHEMA_41: &str = "
+CREATE TABLE done_match (
+  id      INTEGER PRIMARY KEY,
+  day     TEXT NOT NULL,              -- the day of the brief that made it
+  key     TEXT NOT NULL,              -- 'task:<id>' or 'mission:<id>'
+  step    TEXT NOT NULL DEFAULT '',   -- the mission step; '' for a task
+  by_key  TEXT NOT NULL,              -- the finished item
+  why     TEXT NOT NULL,
+  made    INTEGER NOT NULL,           -- Unix seconds
+  undone  INTEGER NOT NULL DEFAULT 0  -- 1: the user undid it, so the brief never makes it again
+);
+CREATE INDEX done_match_by_day ON done_match(day);
+CREATE INDEX done_match_by_key ON done_match(key, by_key);
+";
+
 pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -1243,6 +1266,12 @@ fn upgrade(conn: &mut Connection, dir: &Path) -> anyhow::Result<()> {
     }
     if version < 39 {
         tx.execute_batch(SCHEMA_39)?;
+    }
+    if version < 40 {
+        tx.execute_batch(SCHEMA_40)?;
+    }
+    if version < 41 {
+        tx.execute_batch(SCHEMA_41)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
@@ -1471,6 +1500,57 @@ pub(crate) fn save_list(
     drop(upsert);
     crate::status::refresh_in(tx)?;
     Ok(())
+}
+
+/// One finished item for save_finished().
+pub(crate) struct FinishedRow {
+    pub item: ListItem,
+    /// When it closed in its source, in Unix seconds.
+    pub closed_at: u64,
+    /// status::DONE, UNFINISHED, or CANCELLED, when the download says it.
+    /// None: status::look_up_github reads it later.
+    pub reason: Option<&'static str>,
+    /// The name of the close in the source, like "complete".
+    pub label: String,
+}
+
+/// Saves the finished items of `source` that AIfred did not know, with
+/// in_list = 0, so search and the brief see them (matches.rs). An item that
+/// AIfred already has does not change: the download of the open list and
+/// the close look-up (status.rs) keep it. Returns how many it added.
+pub(crate) fn save_finished(
+    tx: &Transaction,
+    source: &str,
+    account: &str,
+    rows: &[FinishedRow],
+    now: u64,
+) -> anyhow::Result<usize> {
+    let mut insert = tx.prepare(
+        "INSERT INTO work_item (source, item_id, account, title, place, url, data, in_list, pos, first_seen, last_seen,
+                                details, closed_at, close_reason, close_label, close_checked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?8, COALESCE(?9, ''), ?10, ?11, NULLIF(?12, ''), ?13)
+         ON CONFLICT (source, item_id) DO NOTHING",
+    )?;
+    let mut added = 0;
+    for r in rows {
+        let i = &r.item;
+        added += insert.execute(rusqlite::params![
+            source,
+            i.id,
+            account,
+            i.title,
+            i.place,
+            i.url,
+            i.data,
+            now as i64,
+            i.details,
+            r.closed_at as i64,
+            r.reason,
+            r.label.trim(),
+            if r.reason.is_some() { now as i64 } else { 0 },
+        ])?;
+    }
+    Ok(added)
 }
 
 /// The data JSON of the items of `source` that are in the last download, in

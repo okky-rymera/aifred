@@ -43,6 +43,7 @@ The source code:
 - When memory is larger, only the facts with "Always" on go into every message. For each question, the app also adds up to 8 other facts that match the question. Under the answer, "Used N facts from memory" shows them. AIfred can also search for more facts.
 - A fact can have up to 5 tags, for example `testing` or `people`. AIfred gives each new fact 1 to 3 tags and reuses the tags that exist. Click "Tags" under a fact to change them (commas between tags). Click a tag to show only its facts.
 - AIfred can list the tags and read all facts with one tag. The tag names are not in each message: AIfred asks for them when it needs them.
+- In the chat, you can ask AIfred to change a fact (`edit_memory`), to turn "Always" on or off (`set_memory_always`), or to restore a forgotten fact (`restore_memory`).
 - The facts that you add have "Always" on. AIfred can add facts in the chat. Those have "Always" off, unless AIfred decides that the fact matters in most chats.
 - AIfred can also search your old chats, your tasks, and the saved GitHub and ClickUp lists. A GitHub item or ClickUp task that left your list stays searchable.
 - Search finds words and meaning. For example, "book my flight" finds the fact "I prefer window seats".
@@ -229,7 +230,8 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 
 - Claude gets no built-in tools: no shell, no file access, no web.
 - Claude gets only the MCP servers and tools that AIfred names. All other tools are denied.
-- The GitHub and ClickUp tools that Claude uses can only read.
+- The GitHub tools that Claude uses can only read.
+- The ClickUp tools can only read, with one exception. The question chat, the chat of a ClickUp task, and a mission chat can mark a ClickUp task done and write a comment on it. Each change has an undo.
 - The desktop app also only reads GitHub. It never changes or closes an issue or pull request.
 
 ## GitHub list
@@ -245,7 +247,7 @@ Do not set `ANTHROPIC_API_KEY`. If it is set, `claude` uses the API key and not 
 - The list shows the open ClickUp tasks assigned to you, in all your workspaces. Tasks in a "done" or "closed" status do not show. It uses the same database and timer as the GitHub list.
 - Each row shows AIfred's own status (see "Item status"). The ClickUp status name is in the tooltip and in the item panel.
 - Tick a ClickUp task to close it in ClickUp. AIfred moves the task to the "closed" status of its list, like the ClickUp "mark complete" button. An Undo puts the old status back.
-- This tick is the only change AIfred makes in ClickUp. The chat can only read ClickUp.
+- The tick and these chats are the only places where AIfred changes ClickUp: the question chat of the home page, the chat of a ClickUp task, and a mission chat. These chats can mark a ClickUp task done (`mark_task_done`) and write a comment on it (`add_task_comment`), in your words. Ask the chat for the undo (`reopen_task`, `delete_task_comment`).
 - The token never goes into the tool settings file that Claude reads. The ClickUp tool server reads the token itself.
 
 ## Item status
@@ -302,6 +304,7 @@ Settings > ClickUp statuses follows the "group defaults plus overrides" pattern 
 - An override for one list wins over one for its space.
 - In a saved row, change the AIfred status in place. Each change and each "Remove" has an Undo.
 - The overrides change only AIfred, not ClickUp.
+- In the chat, you can ask for an override, for example "In QA means waiting" (`set_status_rule`, `remove_status_rule`). Only the main chat and the plan chat can change the overrides.
 
 ## Subtasks
 
@@ -379,7 +382,9 @@ A mission is the next small piece of work: usually one open item, sometimes two 
   - "Take out" on an item: the item leaves the mission. The brief never puts it back in this mission. It can still get a mission of its own. The last open item cannot go out: use "Done" or "Not today".
   - "Add an item": pick an open item. It leaves its other mission. The brief does not take it away from this mission.
   - Each "Take out" and "Add an item" message has an undo. The item goes back to where it was.
-- In the chat, you can ask AIfred to add an item to a mission or to take one out (the `add_to_mission` and `remove_from_mission` tools). The same rules apply. The chat has no undo button: ask the chat to change it back. The home page shows the change when the answer comes.
+- In the chat, you can ask AIfred to add an item to a mission or to take one out (the `add_to_mission` and `remove_from_mission` tools). The same rules apply.
+- In the chat, you can also ask AIfred to rename a mission (`rename_mission`), change its steps (`set_mission_steps`), tick a step (`tick_mission_step`), finish it (`finish_mission`), open it again (`reopen_mission`), or say "Not today" (`skip_mission_today`).
+- The brief marks a task or a mission step done when it is the same work as a ClickUp or GitHub item that closed as Done in the last 7 days. It changes only your own tasks and mission steps, never a ClickUp or GitHub item. The home page shows "What AIfred marked done" with an Undo. After an Undo, the brief does not make that match again. The chat has no undo button: ask the chat to change it back. The home page shows the change when the answer comes.
 - A tick in the checklist does not change the items.
 - An open mission that did not change for 14 days, and that today's brief did not rank, goes away.
 
@@ -452,6 +457,7 @@ AIfred reads Gmail (`crates/aifred-core/src/gmail.rs`). It cannot send or delete
 - AIfred leaves out archived threads, and threads where you are only in Cc and never wrote.
 - A tracked email closes when the person answers. AIfred reads each tracked thread again once a day. So an answer in a left-out tab closes the item within one day.
 - "No answer needed" (the tick) hides an email in AIfred. Gmail does not change. The email comes back when a new message comes in the thread.
+- In the chat, you can say that an email needs no answer (`hide_email`). It is the same as the tick.
 - An email that you sent, with no answer yet, shows under "No answer yet to your emails" in the "Waiting for" card. "Track" puts it on the list. "Hide" removes the suggestion.
 - AIfred reads again only the threads that changed since the last download. The first download can take some seconds.
 
@@ -524,6 +530,7 @@ AIfred learns from what you change (`crates/aifred-core/src/learn.rs`, `worktime
   - "Not today": the item does not need you today.
   - "Wrong priority": the brief ranked the item too high.
 - The item loses its reason at once. The brief text does not change until AIfred writes it again. Each button has an undo.
+- In the chat, you can give the same correction (`correct_brief`).
 - The next briefs and the plan chat get your corrections of the last 30 days.
 - Three "Wrong priority" corrections of different items from one place in 60 days make one memory fact. A place is a GitHub repository, a ClickUp list, the first person of an email, or the first tag of a local task. An item with no place teaches nothing. Example: "GitHub acme/docs: these items are less important to the user than they look. Rank them lower."
 - The fact is a core fact, so it goes into every chat and the brief. You can change or forget it under "What AIfred knows about you". AIfred does not learn a forgotten fact again.
@@ -534,6 +541,7 @@ AIfred learns from what you change (`crates/aifred-core/src/learn.rs`, `worktime
 
 - "Start" on an item starts a timer. The card "Working on" shows the time, and the time guess when the item has one. You work on one item at a time: "Start" on another item stops the first one.
 - "Stop" stops the timer. The item stays open. You can start it again later. All sessions count.
+- In the chat, you can start and stop the timer (`start_work`, `stop_work`), and give the time guess of an item (`set_time_guess`). A guess that you give is yours: the brief and the plan do not change it.
 - "Done" on the card, or the tick of the item, finishes the item. The message says the real time and the guess, for example "It took 45 m, the guess was 30 m".
 - A GitHub item stays in the list until it closes on GitHub. "Done" only keeps its time.
 - A session longer than 10 hours does not count. AIfred thinks that you forgot the timer.
@@ -562,6 +570,7 @@ Two reviews keep the list right (`crates/aifred-core/src/review.rs`). They need 
   - "Plan": pick a later day. The item goes into that day's plan. Your own task also waits until that day (its start day).
   - "Give to…": type who does it. The item goes on the "Waiting for" list. Your own task closes.
   - "Drop": your own task closes. A GitHub or ClickUp item does not change there: AIfred only stops counting it in the brief and the reviews.
+  - In the chat, you can give the same pick (`review_pick`).
   - A task that closes with "Give to…" or "Drop" is not finished work. No "task done" job starts, and its timer time is not kept.
   - An item that you gave away or dropped counts again when it changes after the pick. For example, you open the task again, or the GitHub item has new activity.
 - The brief and the plan chat get your "Do" and "Plan" picks of the last 30 days. They also get each "Give to…" and "Drop" pick that still hides an open item.
